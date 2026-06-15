@@ -2,8 +2,17 @@ name: EP2026 Ticket Watcher
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check = print result only (no email) | test = send test email'
+        required: false
+        default: 'check'
+        type: choice
+        options:
+          - check
+          - test
 
 jobs:
   check:
@@ -24,9 +33,15 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual trigger detected: Running in TEST mode..."
-            python ticket_checker.py --test
+            MODE="${{ github.event.inputs.mode }}"
+            if [ "$MODE" = "test" ]; then
+              echo "Running TEST EMAIL mode..."
+              python ticket_checker.py --test
+            else
+              echo "Running CHECK mode (print result, no email)..."
+              python ticket_checker.py --check
+            fi
           else
-            echo "Scheduled trigger detected: Checking Ticketmaster..."
+            echo "Scheduled run — checking Ticketmaster..."
             python ticket_checker.py
           fi
