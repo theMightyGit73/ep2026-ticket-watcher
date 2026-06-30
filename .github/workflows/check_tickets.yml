@@ -2,17 +2,30 @@ name: EP2026 Ticket Watcher
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    # GitHub's floor for reliable scheduled runs is 5 minutes — anything
+    # tighter isn't guaranteed to actually fire, so this is as fast as it
+    # gets without risking silently dropped checks.
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: 'check = print result only (no email) | test = send test email'
+        description: 'check = print result only (no notifications) | test = send test notifications'
         required: false
         default: 'check'
         type: choice
         options:
           - check
           - test
+
+# Needed so the job can commit the small watchdog state file back to the repo.
+permissions:
+  contents: write
+
+# Defensive only — runs take ~10-20s so overlap is very unlikely, but this
+# makes sure a slow run never gets clobbered by the next scheduled trigger.
+concurrency:
+  group: ep2026-ticket-watcher
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -26,22 +39,35 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install cloudscraper
+        run: pip install cloudscraper requests
       - name: Run ticket checker
         env:
           GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             MODE="${{ github.event.inputs.mode }}"
             if [ "$MODE" = "test" ]; then
-              echo "Running TEST EMAIL mode..."
+              echo "Running TEST mode..."
               python ticket_checker.py --test
             else
-              echo "Running CHECK mode (print result, no email)..."
+              echo "Running CHECK mode (print result, no notifications)..."
               python ticket_checker.py --check
             fi
           else
             echo "Scheduled run — checking Ticketmaster..."
             python ticket_checker.py
+          fi
+      - name: Commit updated watchdog state (if changed)
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain state.json 2>/dev/null)" ]; then
+            git config user.name "ep2026-ticket-watcher-bot"
+            git config user.email "actions@github.com"
+            git add state.json
+            git commit -m "Update watcher state [skip ci]"
+            git push
+          else
+            echo "No state change to commit."
           fi
