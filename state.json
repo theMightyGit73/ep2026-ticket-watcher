@@ -1,6 +1,8 @@
 {
-  "consecutive_failures": 6,
+  "consecutive_failures": 7,
   "watchdog_alert_sent": true,
   "fallback_streak": 0,
-  "fallback_alert_sent": false
+  "fallback_alert_sent": false,
+  "availability_alert_sent": false,
+  "known_ticket_type_names": []
 }
