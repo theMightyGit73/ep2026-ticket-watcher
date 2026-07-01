@@ -1,6 +1,6 @@
 {
-  "consecutive_failures": 5,
-  "watchdog_alert_sent": false,
+  "consecutive_failures": 6,
+  "watchdog_alert_sent": true,
   "fallback_streak": 0,
   "fallback_alert_sent": false
 }
