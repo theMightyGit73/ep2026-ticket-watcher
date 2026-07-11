@@ -1,5 +1,5 @@
 {
-  "consecutive_failures": 127,
+  "consecutive_failures": 128,
   "watchdog_alert_sent": true,
   "fallback_streak": 0,
   "fallback_alert_sent": false,
