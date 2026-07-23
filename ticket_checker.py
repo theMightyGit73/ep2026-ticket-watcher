@@ -178,6 +178,18 @@ def parse_ticket_data(html: str) -> CheckResult:
 
             result.method = f"__NEXT_DATA__ JSON (pageMode={page_mode})"
 
+            # Observational only — never alerts. A single returned ticket is
+            # most likely to surface as a Verified Resale listing, and it's
+            # unconfirmed whether resale flips hasEnabledTicketTypes or lives
+            # elsewhere in this blob. Log any resale-flavoured key names so a
+            # few days of Actions logs reveal where (or whether) resale data
+            # appears in the page payload, before wiring real detection.
+            resale_keys = sorted(set(
+                re.findall(r'"([^"]*resale[^"]*)"\s*:', m.group(1), re.IGNORECASE)
+            ))
+            if resale_keys:
+                result.notes.append(f"resale-related keys present: {resale_keys}")
+
             if maintenance:
                 result.notes.append("maintenance=true — page temporarily offline")
                 return result
