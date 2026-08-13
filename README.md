@@ -323,6 +323,41 @@ if both spot the same thing you get two emails. That is the right trade.
 
 ---
 
+## Rate limiting — read this before speeding it up
+
+This is the failure mode most likely to cost you a ticket, and it was
+triggered for real during development.
+
+Polling every 3 minutes, roughly 30 searches in an afternoon was enough for
+ticketmaster.ie to start answering **HTTP 403** to the same headed Chrome that
+had been getting 200 all day. Verified it was the rate and not the setup: the
+identical command that worked fifteen minutes earlier also got 403.
+
+What the watcher does about it:
+
+* **403 is not 401.** A 401 is the ordinary challenge and a reload fixes it.
+  A 403 means blocked, where retrying has never once helped and merely triples
+  the request volume at the worst moment. The watcher bails immediately on 403.
+* **It backs off exponentially** — 30 minutes, doubling to a 3-hour cap —
+  and resets the moment a real reading comes back. Being blocked and carrying
+  on at the normal cadence is how a short rate-limit becomes a long one.
+* **The default cadence is 10 minutes.** Over a fortnight that is ~2,000
+  searches rather than the ~6,700 a 3-minute cadence would send.
+
+The tension is real and worth stating plainly: a resale listing observed
+during testing lived about **five minutes**, so a 10-minute cadence genuinely
+will miss some. But a blocked watcher misses *all* of them. A watcher that
+gets itself banned on day two catches nothing on day nine.
+
+If you want to run hot during a known onsale, lower `EP_POLL_SECONDS` for that
+window and put it back afterwards — and accept it may cost you the rest of the
+fortnight.
+
+If you are blocked right now, do nothing. It clears on its own, usually within
+hours, and the watcher will pick back up without help.
+
+---
+
 ## Honest limits
 
 - **It will not buy the ticket.** It finds and alerts; you buy. Automating the
