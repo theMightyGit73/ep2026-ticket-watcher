@@ -33,6 +33,11 @@ def _defaults():
         "last_heartbeat": None,           # ISO8601
         "checks_since_heartbeat": 0,
         "failures_since_heartbeat": 0,
+        # Connection health. Every HTTP 403 is recorded with a timestamp so
+        # the emails can say whether this connection is in trouble, rather
+        # than leaving David to infer it from a run of quiet failures.
+        "block_history": [],              # ISO8601 timestamps, pruned to 7 days
+        "checks_total": 0,
     }
 
 
@@ -73,12 +78,22 @@ def _hours_since(iso: Optional[str]) -> Optional[float]:
 
 # ── Alert gating ─────────────────────────────────────────────────────────────
 
-def should_alert_availability(state: dict, reading) -> tuple:
+def should_alert_availability(state: dict, reading, new_listings=()) -> tuple:
     """Decide whether this reading deserves an email, and why.
+
+    MUST be called before record_success(), which overwrites the very fields
+    this compares against. Getting that order wrong silently disables all the
+    edge detection below, leaving only the periodic re-nag — so a ticket that
+    appeared, sold, and appeared again inside the re-nag window would produce
+    no second alert at all.
 
     Edge-triggered on each market independently, so resale appearing still
     alerts even on a run where primary was already available (and vice versa).
-    Then re-nags on a slow clock while the good state persists — one missed
+    A newly-seen listing also counts: a flat per-market boolean hides
+    tier-level changes, where one listing sells and another appears while the
+    market never stops reading "available".
+
+    Then it re-nags on a slow clock while the good state persists — one missed
     push notification shouldn't cost the ticket, but neither should a stuck
     'available' spam the inbox every minute for a day.
     """
@@ -87,6 +102,8 @@ def should_alert_availability(state: dict, reading) -> tuple:
         reasons.append(f"primary stock went {state['last_primary']} → {reading.primary}")
     if reading.resale in GOOD_STATUSES and state["last_resale"] not in GOOD_STATUSES:
         reasons.append(f"resale went {state['last_resale']} → {reading.resale}")
+    if new_listings:
+        reasons.append(f"new listing(s): {', '.join(new_listings)}")
 
     if reasons:
         return True, "; ".join(reasons)
@@ -111,16 +128,27 @@ def should_alert_watchdog(state: dict) -> bool:
     return since is None or since >= config.WATCHDOG_RENAG_HOURS
 
 
+def pending_listings(state: dict, reading) -> list:
+    """Listings in this reading that weren't in the last one. Does not mutate.
+
+    Separate from record_success on purpose: the alerting decision needs to
+    see this *before* state is updated, and folding the two together is what
+    made the edge detection silently useless.
+    """
+    previous = set(state.get("known_listings", []))
+    return [l.describe() for l in reading.listings if l.describe() not in previous]
+
+
 def record_success(state: dict, reading) -> list:
-    """Fold a good reading into state. Returns newly-seen listing descriptions."""
+    """Fold a good reading into state. Returns newly-seen listing descriptions.
+
+    Call this AFTER should_alert_availability() — it overwrites the fields
+    that decision compares against.
+    """
+    new = pending_listings(state, reading)
     state["consecutive_failures"] = 0
     state["last_success"] = utc_now().isoformat()
-
-    current = [l.describe() for l in reading.listings]
-    previous = set(state.get("known_listings", []))
-    new = [c for c in current if c not in previous]
-
-    state["known_listings"] = current
+    state["known_listings"] = [l.describe() for l in reading.listings]
     state["last_primary"] = reading.primary
     state["last_resale"] = reading.resale
     return new
@@ -166,3 +194,77 @@ def reset_heartbeat(state: dict) -> None:
 
 def hours_since_heartbeat(state: dict):
     return _hours_since(state["last_heartbeat"])
+
+
+# ── Connection health ────────────────────────────────────────────────────────
+#
+# The point of all this is one lesson learned the hard way on 2026-08-13: a
+# watcher polling too fast got the *home* connection flagged, which blocked
+# ordinary manual browsing. That is the worst possible outcome, because the
+# home IP is the one needed to actually buy a ticket. So the watcher tracks
+# how often it is being blocked and says so plainly, rather than leaving a
+# run of quiet failures to be interpreted.
+
+def record_block(state: dict) -> None:
+    """Note an HTTP 403 and prune history older than a week."""
+    history = list(state.get("block_history", []))
+    history.append(utc_now().isoformat())
+    cutoff = utc_now() - timedelta(days=7)
+    state["block_history"] = [
+        ts for ts in history if (_parse(ts) or utc_now()) >= cutoff
+    ]
+
+
+def recent_blocks(state: dict, hours: float = 24.0) -> int:
+    cutoff = utc_now() - timedelta(hours=hours)
+    return sum(
+        1 for ts in state.get("block_history", []) if (_parse(ts) or cutoff) >= cutoff
+    )
+
+
+def connection_health(state: dict) -> tuple:
+    """Return (severity, headline, what-to-do) for the current connection.
+
+    Severity is one of "ok", "watch", "blocked" — used to decide whether an
+    email needs to shout.
+    """
+    day = recent_blocks(state, 24)
+    hour = recent_blocks(state, 1)
+
+    if day == 0:
+        return (
+            "ok",
+            "No blocks in the last 24 hours — this connection looks healthy.",
+            "Nothing to do.",
+        )
+
+    if hour == 0 and day <= 3:
+        return (
+            "watch",
+            f"{day} block(s) in the last 24h, none in the last hour — recovered.",
+            "Nothing to do. The watcher backs off on its own when this happens.",
+        )
+
+    if hour <= 2:
+        return (
+            "watch",
+            f"{hour} block(s) in the last hour ({day} in 24h) — being rate-limited.",
+            "No action needed yet: the watcher is already backing off and will "
+            "resume by itself. If you need to browse Ticketmaster right now, use "
+            "mobile data rather than this connection.",
+        )
+
+    return (
+        "blocked",
+        f"{hour} blocks in the last hour ({day} in 24h) — this connection is blocked.",
+        "Act on this one:\n"
+        "  1. Stop the watcher. Repeated attempts extend the block.\n"
+        "     macOS:  launchctl unload ~/Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist\n"
+        "  2. To browse or buy right now, switch to mobile data — a phone with\n"
+        "     Wi-Fi off, or tethered. That is a different IP and works immediately.\n"
+        "  3. Sign in to your Ticketmaster account. An authenticated session gets\n"
+        "     considerably more latitude than anonymous browsing.\n"
+        "  4. Leave it a few hours. These blocks decay on their own.\n"
+        "  5. Before restarting, raise EP_POLL_SECONDS. Getting blocked on day two\n"
+        "     catches nothing on day nine.",
+    )

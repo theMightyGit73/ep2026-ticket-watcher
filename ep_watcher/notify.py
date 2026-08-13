@@ -128,7 +128,24 @@ def reserved_in_browser(reading: Reading) -> None:
     )
 
 
-def heartbeat(checks: int, failures: int, hours: float, reading: Reading) -> None:
+def _health_section(health) -> str:
+    """Render the connection-health block that goes into status emails.
+
+    Deliberately always present, including when everything is fine. The point
+    is that David can tell at a glance whether his connection is in trouble
+    without having to infer it from a run of quiet failures — which is exactly
+    what he had to do the day his home IP got flagged.
+    """
+    severity, headline, action = health
+    marker = {"ok": "OK", "watch": "WATCH", "blocked": "BLOCKED"}[severity]
+    return (
+        f"Connection health [{marker}]\n"
+        f"  {headline}\n\n"
+        f"  {action}"
+    )
+
+
+def heartbeat(checks: int, failures: int, hours: float, reading: Reading, health=None) -> None:
     """The hourly "still nothing, still trying" report.
 
     Deliberately carries the numbers rather than just the sentiment. "No
@@ -147,11 +164,14 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading) -> Non
             "quiet Ticketmaster — the numbers above are the difference."
         )
 
+    health_block = f"\n{_health_section(health)}\n" if health else ""
+
     subject = f"No luck yet — still watching {config.EVENT_NAME}"
     body = (
         f"Hi David,\n\n"
         f"No ticket has appeared in the last hour. Still trying.\n\n"
-        f"{health_line}\n\n"
+        f"{health_line}\n"
+        f"{health_block}\n"
         f"Last reading:\n"
         f"  Box office     : {reading.primary}\n"
         f"  Verified resale: {reading.resale}\n"
@@ -172,12 +192,15 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading) -> Non
         )
 
 
-def watchdog(reason: str, failures: int) -> None:
+def watchdog(reason: str, failures: int, health=None) -> None:
+    health_block = f"\n{_health_section(health)}\n" if health else ""
+
     subject = "EP2026 watcher is not working"
     body = (
         f"Hi David,\n\n"
         f"The ticket watcher has failed {failures} checks in a row.\n\n"
-        f"Reason: {reason}\n\n"
+        f"Reason: {reason}\n"
+        f"{health_block}\n"
         f"It will keep retrying, and it will keep nagging you every "
         f"{config.WATCHDOG_RENAG_HOURS}h until it recovers, so you can trust "
         f"silence to mean 'working'.\n\n"
@@ -239,11 +262,30 @@ def test() -> None:
     available(sample, "TEST — this is what a real find looks like", [])
 
     print(f"[{stamp()}] 3/4 hourly report")
-    heartbeat(checks=19, failures=0, hours=1.0,
-              reading=Reading(source="test", primary="UNAVAILABLE", resale="UNAVAILABLE"))
+    heartbeat(
+        checks=19, failures=0, hours=1.0,
+        reading=Reading(source="test", primary="UNAVAILABLE", resale="UNAVAILABLE"),
+        health=("ok", "No blocks in the last 24 hours — this connection looks healthy.",
+                "Nothing to do."),
+    )
 
     print(f"[{stamp()}] 4/4 watchdog")
-    watchdog("TEST — this is what a broken watcher looks like.", failures=4)
+    # Sent with the worst-case health block on purpose: this is the email that
+    # has to be useful on the day the connection is actually in trouble, so
+    # the sample should show the full set of instructions, not the calm case.
+    watchdog(
+        "TEST — this is what a broken watcher looks like.", failures=4,
+        health=(
+            "blocked",
+            "8 blocks in the last hour (23 in 24h) — this connection is blocked.",
+            "Act on this one:\n"
+            "  1. Stop the watcher. Repeated attempts extend the block.\n"
+            "  2. To browse or buy right now, switch to mobile data.\n"
+            "  3. Sign in to your Ticketmaster account.\n"
+            "  4. Leave it a few hours — these blocks decay on their own.\n"
+            "  5. Raise EP_POLL_SECONDS before restarting.",
+        ),
+    )
 
     _send_ntfy(
         title="TEST: EP2026 watcher",

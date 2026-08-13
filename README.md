@@ -168,6 +168,18 @@ page:
 | **No luck yet** | Hourly while nothing has turned up |
 | **Watcher is broken** | 4 consecutive failed checks, then every 6h until fixed |
 
+The status emails carry a **Connection health** block — `[OK]`, `[WATCH]` or
+`[BLOCKED]` — showing how many times Ticketmaster has rate-limited this
+connection in the last hour and day, and what to do about it. At `[BLOCKED]`
+it spells out the steps: stop the watcher, browse over mobile data, sign in,
+wait, and slow the cadence before restarting.
+
+That block exists because of what happened on 2026-08-13: the watcher polled
+too fast, the block escalated to the home IP, and ordinary manual browsing
+stopped working. The failure wasn't getting blocked — it was that nothing
+said so, because a run of quiet failures looks exactly like a quiet
+Ticketmaster.
+
 The hourly "no luck yet" email is a liveness proof, not a status update. A
 silent watcher and a dead watcher look identical from the inbox — that
 ambiguity is exactly what the previous version hid inside for 44 days. So the

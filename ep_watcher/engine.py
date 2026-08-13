@@ -71,6 +71,9 @@ def handle(reading: Reading, st: dict) -> None:
 
     state_mod.start_heartbeat_clock(st)
     state_mod.note_check(st, reading.failed)
+    st["checks_total"] = st.get("checks_total", 0) + 1
+    if reading.blocked:
+        state_mod.record_block(st)
 
     if reading.failed:
         failures = state_mod.record_failure(st)
@@ -87,7 +90,7 @@ def handle(reading: Reading, st: dict) -> None:
                 reason = "The Ticketmaster session needs a human — it is logged out or challenged."
             else:
                 reason = "Could not get a usable reading from Ticketmaster."
-            notify.watchdog(reason, failures)
+            notify.watchdog(reason, failures, health=state_mod.connection_health(st))
             st["last_watchdog_alert"] = state_mod.utc_now().isoformat()
         # A run of failures must not suppress the hourly report — a silent
         # watcher and a broken one look identical from the inbox, which is
@@ -96,12 +99,20 @@ def handle(reading: Reading, st: dict) -> None:
         return
 
     was_broken = st["consecutive_failures"]
-    new_listings = state_mod.record_success(st, reading)
+
+    # Order matters and is load-bearing. record_success() overwrites
+    # last_primary/last_resale/known_listings, which are exactly the fields
+    # the alerting decision compares this reading against — so the decision
+    # has to be made first, or every comparison is reading-vs-itself and the
+    # edge detection quietly does nothing.
+    new_listings = state_mod.pending_listings(st, reading)
+    should, reason = state_mod.should_alert_availability(st, reading, new_listings)
+    state_mod.record_success(st, reading)
+
     if was_broken >= config.WATCHDOG_FAILURE_THRESHOLD:
         notify.recovered(was_broken)
         st["last_watchdog_alert"] = None
 
-    should, reason = state_mod.should_alert_availability(st, reading)
     if not should:
         print(f"[{stamp()}] nothing to report")
         _maybe_heartbeat(reading, st)
@@ -127,7 +138,7 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     checks = st["checks_since_heartbeat"]
     failures = st["failures_since_heartbeat"]
     print(f"[{stamp()}] hourly report: {checks} checks, {failures} failed")
-    notify.heartbeat(checks, failures, hours, reading)
+    notify.heartbeat(checks, failures, hours, reading, health=state_mod.connection_health(st))
     state_mod.reset_heartbeat(st)
 
 

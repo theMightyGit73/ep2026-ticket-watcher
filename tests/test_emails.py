@@ -126,6 +126,31 @@ notify.heartbeat(checks=19, failures=19, hours=1.0,
                  reading=Reading(source="t"))
 check_true("all-failed hour is called out explicitly", "EVERY check failed" in last_body())
 
+print("\nConnection health reaches the inbox")
+
+sent.clear()
+notify.heartbeat(
+    checks=19, failures=0, hours=1.0, reading=Reading(source="t"),
+    health=st.connection_health(dict(st._defaults())),
+)
+check_true("healthy connection is reported", "Connection health [OK]" in last_body())
+
+blocked_state = dict(st._defaults())
+blocked_state["block_history"] = [st.utc_now().isoformat()] * 8
+sent.clear()
+notify.heartbeat(
+    checks=19, failures=19, hours=1.0, reading=Reading(source="t"),
+    health=st.connection_health(blocked_state),
+)
+body = last_body()
+check_true("a blocked connection is flagged", "Connection health [BLOCKED]" in body)
+check_true("...and says to stop the watcher", "Stop the watcher" in body)
+check_true("...and points at mobile data", "mobile data" in body)
+
+sent.clear()
+notify.watchdog("rate limited", failures=4, health=st.connection_health(blocked_state))
+check_true("the watchdog carries it too", "Connection health [BLOCKED]" in last_body())
+
 print("\nWatchdog")
 
 sent.clear()
