@@ -345,8 +345,11 @@ if both spot the same thing you get two emails. That is the right trade.
 
 ## Superseded
 
-`ticket_checker.py` and `.github/workflows/check_tickets.yml` are the old
-version. The workflow's schedule is disabled — it had been failing every run
-since 30 June while committing a state file on each one, which is where the
-~1000 `Update watcher state` commits came from. Left in place, not deleted, so
-the history stays readable.
+`ticket_checker.py` and `.github/workflows/check_tickets.yml` — the old
+watcher and its cron — have been deleted. They could not be fixed in place:
+the approach itself (fetch the page over plain HTTP, parse `__NEXT_DATA__`,
+run it in CI) fails at three independent layers, all documented above.
+
+Nothing is lost. `git log -- ticket_checker.py` still has every line of it,
+and the post-mortem lives in this README rather than in comments on a file
+nobody runs.
