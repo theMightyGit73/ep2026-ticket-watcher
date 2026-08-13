@@ -132,9 +132,21 @@ AVAILABILITY_RENAG_HOURS = 1
 
 # Seconds between polls in `watch`. Jittered by ±25% so the traffic pattern
 # isn't a metronome, which is itself something bot detection looks for.
-# One search per poll now that only quantity 1 is checked, so this can come
-# back down without raising the overall request rate.
-POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "180"))
+# Raised to 10 minutes after a 180s cadence got this client rate-limited
+# during testing — roughly 30 searches in an afternoon was enough to start
+# drawing HTTP 403 instead of the real page.
+#
+# The arithmetic is the argument. At 180s, two weeks is ~6,700 searches; at
+# 600s it is ~2,000. Neither is a human, but only one of them is quiet enough
+# to keep working, and a watcher that gets itself blocked on day two catches
+# nothing on day nine. Lower it during a known onsale if you want, and accept
+# that it may cost you the rest of the fortnight.
+POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "600"))
+
+# How long to sleep after an HTTP 403, doubling on each consecutive block up
+# to the cap, and reset on the first good read.
+BLOCKED_BACKOFF_SECONDS = int(os.environ.get("EP_BACKOFF_SECONDS", "1800"))
+BLOCKED_BACKOFF_MAX_SECONDS = int(os.environ.get("EP_BACKOFF_MAX_SECONDS", "10800"))
 
 # Send an "still nothing, still trying" email this often while there is no
 # ticket. Its real job is proving the watcher is alive: silence from a watcher
@@ -145,14 +157,12 @@ POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "180"))
 # turned up, that email already told the story.
 HEARTBEAT_HOURS = float(os.environ.get("EP_HEARTBEAT_HOURS", "1"))
 
-# Floor on the interval. Each poll sends a real search to Ticketmaster's
-# inventory system rather than reading a cached page, so there is a rate below
-# which this stops resembling a person checking whether they can go.
+# Hard floor on the interval, regardless of what EP_POLL_SECONDS says.
 #
-# Set to 120s, not the 600s it started at. That original figure was chosen
-# when pressing the button was an opt-in extra; now it is the only thing that
-# works, and a 10-minute floor silently defeated the entire purpose — the
-# resale listing observed during testing appeared and vanished inside about
-# five minutes, so a 10-minute cadence would have missed most of them. A
-# ticket you find twenty minutes late is a ticket someone else bought.
+# There is a real tension here and it is worth stating rather than hiding. A
+# resale listing observed during testing lived about five minutes, so a slow
+# cadence genuinely misses tickets. But a fast cadence gets the client
+# rate-limited, and a blocked watcher misses every ticket, not some of them.
+# Two minutes is the floor because sustained polling faster than that is what
+# produced the 403s; the default sits well above it.
 PRESS_MIN_INTERVAL_SECONDS = int(os.environ.get("EP_PRESS_MIN_SECONDS", "120"))

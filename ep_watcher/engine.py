@@ -12,6 +12,8 @@ def merge(readings: List[Reading]) -> Reading:
     real = [r for r in readings if not r.failed]
     merged = Reading(source=" + ".join(r.source for r in readings) or "none")
 
+    merged.blocked = any(r.blocked for r in readings)
+
     if not real:
         merged.failed = True
         merged.needs_login = any(r.needs_login for r in readings)
@@ -68,11 +70,17 @@ def handle(reading: Reading, st: dict) -> None:
         failures = state_mod.record_failure(st)
         print(f"[{stamp()}] check failed ({failures} in a row)")
         if state_mod.should_alert_watchdog(st):
-            reason = (
-                "The Ticketmaster session needs a human — it is logged out or challenged."
-                if reading.needs_login
-                else "Could not get a usable reading from Ticketmaster."
-            )
+            if reading.blocked:
+                reason = (
+                    "Ticketmaster is rate-limiting this machine (HTTP 403). The watcher "
+                    "is backing off automatically and will resume on its own — this "
+                    "usually clears within a few hours. If it persists for a day, lower "
+                    "the polling rate with EP_POLL_SECONDS."
+                )
+            elif reading.needs_login:
+                reason = "The Ticketmaster session needs a human — it is logged out or challenged."
+            else:
+                reason = "Could not get a usable reading from Ticketmaster."
             notify.watchdog(reason, failures)
             st["last_watchdog_alert"] = state_mod.utc_now().isoformat()
         # A run of failures must not suppress the hourly report — a silent

@@ -76,6 +76,10 @@ class Reading:
     failed: bool = False
     #: Set when the session needs a human: logged out, or challenged.
     needs_login: bool = False
+    #: Set on an HTTP 403 — this client is rate-limited rather than merely
+    #: challenged. The watch loop backs off hard on this rather than carrying
+    #: on at its normal cadence, which would deepen the block.
+    blocked: bool = False
 
     @property
     def any_good(self) -> bool:

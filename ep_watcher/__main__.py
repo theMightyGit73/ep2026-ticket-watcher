@@ -126,10 +126,24 @@ def cmd_watch(args) -> int:
 
     session = browser.BrowserSession()
     session.start()
+    backoff = 0
     try:
         while True:
             try:
                 reading = engine.run_once(session)
+
+                # Being blocked and carrying on at the normal cadence is how a
+                # short rate-limit becomes a long one. Back off exponentially
+                # and reset the moment a real reading comes back.
+                if reading.blocked:
+                    backoff = min(backoff * 2 or config.BLOCKED_BACKOFF_SECONDS,
+                                  config.BLOCKED_BACKOFF_MAX_SECONDS)
+                    print(f"[{stamp()}] rate-limited — sleeping {backoff // 60} min before retrying")
+                    time.sleep(backoff * random.uniform(0.85, 1.15))
+                    continue
+                if backoff:
+                    print(f"[{stamp()}] recovered from rate limiting")
+                    backoff = 0
                 # A live basket has a countdown on it; stop polling and leave
                 # the window alone so David can actually finish the checkout.
                 if config.PRESS_THE_BUTTON and any("RESERVE ACCEPTED" in n for n in reading.notes):

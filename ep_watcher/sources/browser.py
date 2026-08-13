@@ -165,6 +165,22 @@ class BrowserSession:
                 reading.note(f"attempt {attempt}: navigation failed: {exc}")
                 continue
 
+            # 401 and 403 are different answers and must not be treated alike.
+            # 401 is the ordinary challenge: solve it by reloading, which is
+            # the documented happy path. 403 means this client is currently
+            # blocked, and retrying immediately has never once cleared it —
+            # it just triples the request volume at the exact moment something
+            # upstream has decided we are asking too often. Bail out and let
+            # the caller back off.
+            if last_status == 403:
+                reading.failed = True
+                reading.blocked = True
+                reading.note(
+                    "HTTP 403 — this client is rate-limited, not merely challenged. "
+                    "Backing off instead of retrying."
+                )
+                return None
+
             self._dismiss_consent()
             try:
                 self.page.wait_for_load_state("networkidle", timeout=20_000)
