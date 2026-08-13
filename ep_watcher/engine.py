@@ -147,13 +147,19 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     checks = st["checks_since_heartbeat"]
     failures = st["failures_since_heartbeat"]
     print(f"[{stamp()}] hourly report: {checks} checks, {failures} failed")
-    net = state_mod.network_status(st)
+
+    # Only talk about networks where there is a network to talk about. In
+    # API-only mode this runs on a GitHub runner, where "switch the MacBook
+    # to your hotspot" is meaningless and "could not determine which
+    # connection is in use" is worse than saying nothing.
+    net = state_mod.network_status(st) if config.USE_BROWSER else None
+
     notify.heartbeat(
         checks, failures, hours, reading,
         health=state_mod.connection_health(st),
         net=net,
     )
-    if net[0]:
+    if net and net[0]:
         # Asked for a switch — don't ask again until the next window, whether
         # or not he acts on it. Repeating it hourly trains him to skim past it.
         state_mod.mark_rotation_asked(st)
