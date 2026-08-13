@@ -42,24 +42,43 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Two reasons not to run.
+      #
       # Without a Discovery key this job has no source it can read, so every
       # run would fail, and four failures in a row would start emailing "the
-      # watcher is broken" — which would be true but useless, since the cause
-      # is a missing secret rather than anything wrong with Ticketmaster.
-      # Skip quietly until the key exists.
-      - name: Check for a Discovery API key
+      # watcher is broken" — true but useless, since the cause is a missing
+      # secret rather than anything wrong with Ticketmaster.
+      #
+      # And the festival ends on 30 August 2026. Nothing here stops on its
+      # own, so without a hard date this job keeps polling hourly and mailing
+      # twice a day about a finished event, unattended, indefinitely. Cron
+      # jobs nobody owns are how you end up with a 2028 inbox full of alerts
+      # for a 2026 festival.
+      - name: Should this run at all?
         id: guard
         env:
           TM_DISCOVERY_KEY: ${{ secrets.TM_DISCOVERY_KEY }}
+          STOP_AFTER: '2026-08-31'
         run: |
+          today="$(date -u +%F)"
+
+          if [[ "$today" > "$STOP_AFTER" ]]; then
+            echo "Today is $today, past $STOP_AFTER — the festival is over."
+            echo "This workflow has retired itself. Delete it, or move STOP_AFTER"
+            echo "if you are watching a later event."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [ -z "$TM_DISCOVERY_KEY" ]; then
             echo "No TM_DISCOVERY_KEY secret set — nothing this job can read."
             echo "Get a free key at https://developer.ticketmaster.com/ and add it:"
             echo "  gh secret set TM_DISCOVERY_KEY --repo \$GITHUB_REPOSITORY"
             echo "configured=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          echo "configured=true" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         if: steps.guard.outputs.configured == 'true'
@@ -70,7 +89,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.ep2026-watcher/state.json
-          key: ep-watcher-state-${{ github.run_id }}
+          key: ep-watcher-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ep-watcher-state-
 
       - name: Run the API watch
@@ -98,4 +117,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.ep2026-watcher/state.json
-          key: ep-watcher-state-${{ github.run_id }}
+          key: ep-watcher-state-${{ github.run_id }}-${{ github.run_attempt }}
