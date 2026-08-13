@@ -145,8 +145,14 @@ POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "180"))
 # turned up, that email already told the story.
 HEARTBEAT_HOURS = float(os.environ.get("EP_HEARTBEAT_HOURS", "1"))
 
-# Floor on the interval when PRESS_THE_BUTTON is on. Each press is a real
-# reserve attempt against live inventory, not a page read, so it runs at a
-# human-plausible cadence rather than the read-only rate. Raise the read-only
-# rate freely; think before lowering this one.
-PRESS_MIN_INTERVAL_SECONDS = int(os.environ.get("EP_PRESS_MIN_SECONDS", "600"))
+# Floor on the interval. Each poll sends a real search to Ticketmaster's
+# inventory system rather than reading a cached page, so there is a rate below
+# which this stops resembling a person checking whether they can go.
+#
+# Set to 120s, not the 600s it started at. That original figure was chosen
+# when pressing the button was an opt-in extra; now it is the only thing that
+# works, and a 10-minute floor silently defeated the entire purpose — the
+# resale listing observed during testing appeared and vanished inside about
+# five minutes, so a 10-minute cadence would have missed most of them. A
+# ticket you find twenty minutes late is a ticket someone else bought.
+PRESS_MIN_INTERVAL_SECONDS = int(os.environ.get("EP_PRESS_MIN_SECONDS", "120"))

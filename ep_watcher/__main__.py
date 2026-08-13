@@ -97,6 +97,21 @@ def cmd_watch(args) -> int:
         )
         interval = config.PRESS_MIN_INTERVAL_SECONDS
 
+    # Refuse to run blind. A watcher that polls perfectly for two weeks and
+    # cannot send mail is worse than no watcher: it looks like it is working,
+    # and the silence reads as "no tickets yet" rather than "no email set up".
+    # That is the exact shape of the failure this whole rewrite exists to fix.
+    if not (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD):
+        print("\n  REFUSING TO START: no email configured.\n")
+        print("  Nothing would ever reach you, and the silence would look")
+        print("  identical to 'no tickets yet'.\n")
+        print(f"  Put a Gmail app password in {config.REPO_DIR.home()}/.ep2026-watcher/env")
+        print("  (https://myaccount.google.com/apppasswords — needs 2FA), then:")
+        print("      ./run_watcher.sh test\n")
+        print("  Override with EP_ALLOW_NO_EMAIL=1 if you really mean it.\n")
+        if os.environ.get("EP_ALLOW_NO_EMAIL", "").lower() not in ("1", "true", "yes"):
+            return 1
+
     mode = "PRESS THE BUTTON" if config.PRESS_THE_BUTTON else "read-only"
     _banner(f"Watching every ~{interval}s · mode: {mode}")
     if discovery.configured():
