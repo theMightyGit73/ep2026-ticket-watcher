@@ -182,7 +182,7 @@ Ticketmaster.
 
 ### Alternating home Wi-Fi and the phone hotspot
 
-The status emails also carry a **Network** block, and every ~6 hours (or 60
+The status emails also carry a **Network** block, and every ~3 hours (or 30
 searches, whichever comes first) it asks you to switch the MacBook between
 your home Wi-Fi and your phone's Personal Hotspot. When it does, that ask
 goes in the **subject line** — an instruction buried three paragraphs into an
@@ -199,9 +199,14 @@ you when to switch back. There is nothing to confirm and no setting to change.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `EP_ROTATE_HOURS` | `6` | Ask to switch after this long on one connection |
-| `EP_ROTATE_SEARCHES` | `60` | ...or after this many searches, whichever first |
+| `EP_ROTATE_HOURS` | `3` | Ask to switch after this long on one connection |
+| `EP_ROTATE_SEARCHES` | `30` | ...or after this many searches, whichever first |
 | `EP_HOME_IP` | — | Optional. Labels this IP "home Wi-Fi" instead of guessing |
+
+Switching more often does **not** reduce the daily total per connection —
+that is set by the poll rate, and ~144 searches a day split two ways is ~72
+each however often you alternate. What it reduces is how many land on one IP
+inside any given hour, which is what a rate limit actually measures.
 
 Without `EP_HOME_IP`, the first connection the watcher ever sees is assumed to
 be home — correct if you start it at home.
@@ -415,6 +420,27 @@ fortnight.
 
 If you are blocked right now, do nothing. It clears on its own, usually within
 hours, and the watcher will pick back up without help.
+
+---
+
+## It stops itself on 28 August
+
+Both halves retire after `2026-08-28` — the last watching day, since the
+festival opens that morning and a ticket found then is still usable.
+
+- **The Mac watcher** exits cleanly and sends one final "watcher stopped"
+  email. The LaunchAgent uses `KeepAlive: {SuccessfulExit: false}`, so it
+  restarts on a crash but *not* on that deliberate clean exit. With a plain
+  `KeepAlive: true` it would announce its own shutdown every minute forever.
+- **The GitHub workflow** skips with a message in the log.
+
+Change `EP_STOP_AFTER` in `~/.ep2026-watcher/env` and `STOP_AFTER` in the
+workflow to watch a later event. Set `EP_STOP_AFTER=` empty to disable the
+stop entirely.
+
+The goodbye email exists because unexplained silence is the one thing this
+design refuses to be ambiguous about — "no more emails" should never leave
+you wondering whether it finished or died.
 
 ---
 

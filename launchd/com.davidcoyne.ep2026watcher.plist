@@ -30,10 +30,21 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- `watch` is a long-running loop, not a one-shot. If it dies (Chrome
-         crash, network drop, a bug), bring it straight back. -->
+    <!-- Restart on failure, but NOT on a clean exit.
+
+         `watch` is a long-running loop, so if it dies (Chrome crash, network
+         drop, a bug) it should come straight back. But it also exits 0 on
+         purpose once it passes its stop date, and a plain KeepAlive=true
+         would resurrect it within seconds, forever — the watcher would
+         announce its own shutdown every minute until someone noticed.
+
+         SuccessfulExit=false means "restart only if it exited unsuccessfully",
+         which is what makes the stop date actually stop it. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>60</integer>
 

@@ -44,6 +44,7 @@ def _defaults():
         "searches_on_current_ip": 0,
         "networks": {},                   # ip -> {first_seen, searches, blocks}
         "rotation_asked_at": None,        # ISO8601, so we don't nag every hour
+        "stop_notified": False,           # the final "watcher stopped" email
     }
 
 
@@ -166,6 +167,18 @@ def record_failure(state: dict) -> int:
 
 
 # ── Hourly heartbeat ─────────────────────────────────────────────────────────
+
+def past_stop_date() -> bool:
+    """Has the watcher outlived the event it was built for?
+
+    Compared as ISO date strings, which sort correctly and avoid any timezone
+    argument about when exactly a day ends. STOP_AFTER_DATE is the last day
+    the watcher runs, so this is true from the following morning.
+    """
+    if not config.STOP_AFTER_DATE:
+        return False
+    return utc_now().strftime("%Y-%m-%d") > config.STOP_AFTER_DATE
+
 
 def should_send_heartbeat(state: dict) -> bool:
     """True once the heartbeat interval has elapsed with no ticket found.

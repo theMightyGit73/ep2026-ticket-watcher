@@ -240,6 +240,37 @@ def watchdog(reason: str, failures: int, health=None) -> None:
     )
 
 
+def stopped(checks_total: int) -> None:
+    """Final email: the watcher has reached its stop date and shut down.
+
+    Sent once, on the way out. Without it the watcher simply goes silent, and
+    silence is the one thing this whole design refuses to be ambiguous about —
+    "no more emails" should never leave you wondering whether it died or
+    finished.
+    """
+    subject = f"Watcher stopped — {config.EVENT_NAME}"
+    body = (
+        f"Hi David,\n\n"
+        f"The watcher has reached its stop date ({config.STOP_AFTER_DATE}) and shut\n"
+        f"itself down. This is the last email you'll get from it.\n\n"
+        f"It ran {checks_total} checks in total.\n\n"
+        f"Nothing is left running on a schedule. If you want to tidy up:\n\n"
+        f"  launchctl unload ~/Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist\n"
+        f"  sudo pmset -a disablesleep 0\n\n"
+        f"To watch a later event, set EP_STOP_AFTER to a new date in\n"
+        f"~/.ep2026-watcher/env and start it again.\n\n"
+        f"Stopped at: {stamp()}\n"
+    )
+    _safe("stopped-email", _send_email, subject, body)
+    _safe(
+        "stopped-push", _send_ntfy,
+        title="EP2026 watcher stopped",
+        message="Reached its stop date and shut down. No further alerts.",
+        priority="low",
+        tags=["checkered_flag"],
+    )
+
+
 def recovered(after: int) -> None:
     _safe(
         "recovered-push", _send_ntfy,

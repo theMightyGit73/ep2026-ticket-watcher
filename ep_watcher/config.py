@@ -15,6 +15,16 @@ EVENT_URL = (
 )
 EVENT_NAME = "Electric Picnic 2026 - Weekend Camping"
 
+# Last day the watcher runs. The festival opens on the 28th, so a ticket
+# found that morning is still usable — this is the last watching day, and it
+# stops at the end of it. Set EP_STOP_AFTER=2026-08-27 to stop as the 28th
+# begins instead.
+#
+# This exists because nothing here stops on its own, and an unattended
+# watcher outliving its event is how you end up with a cron job still mailing
+# you about a festival two years gone.
+STOP_AFTER_DATE = os.environ.get("EP_STOP_AFTER", "2026-08-28")
+
 # The id in the URL path. The Inventory Status API wants a "universal" event id
 # which may or may not be this same string — `python -m ep_watcher resolve-id`
 # looks the real one up via the Discovery API and tells you what to set.
@@ -174,8 +184,13 @@ HEARTBEAT_HOURS = float(os.environ.get("EP_HEARTBEAT_HOURS", "1"))
 # At the default 10-minute cadence, 6 hours is ~36 searches — comfortably
 # below the ~30-in-an-afternoon that got the home IP flagged on 2026-08-13,
 # with the search cap as a backstop if the cadence is ever lowered.
-NETWORK_ROTATE_HOURS = float(os.environ.get("EP_ROTATE_HOURS", "6"))
-NETWORK_ROTATE_SEARCHES = int(os.environ.get("EP_ROTATE_SEARCHES", "60"))
+# Every 3 hours, or 30 searches. Note what this does and does not buy: the
+# daily total per connection is set by the poll rate, not the switch rate —
+# 144 searches a day split two ways is ~72 each however often you alternate.
+# What switching more often lowers is how many land on one IP inside any
+# given hour, which is what a rate limit actually measures.
+NETWORK_ROTATE_HOURS = float(os.environ.get("EP_ROTATE_HOURS", "3"))
+NETWORK_ROTATE_SEARCHES = int(os.environ.get("EP_ROTATE_SEARCHES", "30"))
 
 # Optional. If set, this IP is labelled "home Wi-Fi" in the emails. Left
 # unset, the first connection the watcher ever sees is assumed to be home,

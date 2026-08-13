@@ -58,7 +58,10 @@ jobs:
         id: guard
         env:
           TM_DISCOVERY_KEY: ${{ secrets.TM_DISCOVERY_KEY }}
-          STOP_AFTER: '2026-08-31'
+          # Last day this runs. The festival opens on the 28th, so a ticket
+          # found that morning is still usable; it stops at the end of it.
+          # Keep this in step with EP_STOP_AFTER on the Mac.
+          STOP_AFTER: '2026-08-28'
         run: |
           today="$(date -u +%F)"
 

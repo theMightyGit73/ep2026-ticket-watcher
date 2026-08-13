@@ -90,6 +90,8 @@ def cmd_check(_args) -> int:
 
 def cmd_run(_args) -> int:
     """One full cycle including alerts. This is what a scheduler calls."""
+    if _stop_if_past_date():
+        return 0
     reading = engine.run_once()
     return 1 if reading.failed else 0
 
@@ -125,6 +127,11 @@ def cmd_watch(args) -> int:
         if os.environ.get("EP_ALLOW_NO_EMAIL", "").lower() not in ("1", "true", "yes"):
             return 1
 
+    # Before anything expensive. On the morning after the event this would
+    # otherwise launch a whole browser purely to throw it away one line later.
+    if _stop_if_past_date():
+        return 0
+
     mode = "PRESS THE BUTTON" if config.PRESS_THE_BUTTON else "read-only"
     _banner(f"Watching every ~{interval}s · mode: {mode}")
     if discovery.configured():
@@ -143,6 +150,8 @@ def cmd_watch(args) -> int:
     tried_profile_reset = False
     try:
         while True:
+            if _stop_if_past_date():
+                return 0
             try:
                 reading = engine.run_once(session)
 
@@ -198,10 +207,36 @@ def cmd_watch(args) -> int:
         session.close()
 
 
+def _stop_if_past_date() -> bool:
+    """Shut down cleanly once the event has been and gone.
+
+    Sends one final email so the silence that follows is explained rather than
+    ambiguous, and marks it in state so a restart doesn't send it again.
+
+    Exiting 0 matters: the LaunchAgent is configured to restart only on an
+    *unsuccessful* exit, so a clean exit here is what actually makes the
+    watcher stay stopped instead of being revived every few seconds.
+    """
+    if not state_mod.past_stop_date():
+        return False
+
+    st = state_mod.load()
+    print(f"\n[{stamp()}] Past the stop date ({config.STOP_AFTER_DATE}) — shutting down.")
+    if not st.get("stop_notified"):
+        notify.stopped(st.get("checks_total", 0))
+        st["stop_notified"] = True
+        state_mod.save(st)
+    print("  Nothing further will run. To watch a later event, set EP_STOP_AFTER")
+    print("  to a new date and start it again.\n")
+    return True
+
+
 def _watch_apis_only(interval: int) -> int:
     """Polling loop with no browser to keep alive."""
     try:
         while True:
+            if _stop_if_past_date():
+                return 0
             try:
                 engine.run_once()
             except KeyboardInterrupt:
