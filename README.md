@@ -96,9 +96,50 @@ Then confirm it works:
 ### Run it continuously
 
 ```bash
-cp launchd/com.davidcoyne.ep2026watcher.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist
-tail -f ~/.ep2026-watcher/logs/watcher.log
+./restart.sh
+```
+
+That installs and starts both LaunchAgents, and then tells you whether they
+actually came up. It is safe to run at any time, from any state — it is the
+one command to reach for whenever something looks wrong.
+
+---
+
+## Keeping it running
+
+Three layers, because they fail differently.
+
+**1. Reboots and logins.** The LaunchAgent lives in `~/Library/LaunchAgents/`
+with `RunAtLoad`, so macOS starts it automatically whenever you log in.
+Nothing to do after a restart except log in.
+
+**2. Crashes.** `KeepAlive: {SuccessfulExit: false}` restarts the watcher if
+it dies — but deliberately *not* when it exits cleanly on its stop date.
+
+**3. Hangs — the one the first two miss.** A wedged Chrome keeps its PID and
+looks perfectly healthy to launchd while doing nothing whatsoever. So the
+watcher writes `last_check_at` on every poll, and a second LaunchAgent runs
+[watchdog.sh](watchdog.sh) every 15 minutes: if that timestamp has stopped
+advancing for 45 minutes, it kicks the watcher. It stays silent when things
+are fine, and won't "repair" a watcher that is merely starting up or has
+correctly stopped after the event.
+
+### When something looks wrong
+
+```bash
+./run_watcher.sh doctor    # what is broken, and the exact command to fix it
+./restart.sh               # put everything back, from any state
+```
+
+`doctor` checks the agent is installed, the process is running, polling is
+actually advancing, email and push work, the connection isn't blocked, and
+the Mac isn't set to sleep. Every failure prints the command that repairs it.
+Both commands also appear in the "watcher is broken" email, so you never have
+to come back here to find them.
+
+```bash
+tail -f ~/.ep2026-watcher/logs/watcher.log     # what it is doing
+tail -f ~/.ep2026-watcher/logs/watchdog.log    # only written when it acts
 ```
 
 **Your Mac must be awake and logged in.** A sleeping Mac is a stopped watcher.
@@ -119,6 +160,7 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 | `watch` | Long-running loop, one warm browser held open |
 | `test` | Send one real example of **every** email to your inbox |
 | `selftest` | Offline checks — no network, no credentials, nothing sent |
+| `doctor` | Is it healthy? Prints the exact fix for anything that isn't |
 | `login` | Open Chrome to sign in by hand (only needed for *buying*) |
 | `calibrate` | Dump screenshot + text + HTML after a search |
 | `status` | Print config and health |

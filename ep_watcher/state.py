@@ -29,6 +29,11 @@ def _defaults():
         "last_availability_alert": None,  # ISO8601
         "known_listings": [],
         "last_success": None,             # ISO8601
+        # Written on EVERY poll, success or failure. This is the liveness
+        # signal: a hung process still counts as "running" to launchd, so a
+        # wedged Chrome would never be restarted and the only symptom would
+        # be silence. A timestamp that stops advancing is detectable.
+        "last_check_at": None,            # ISO8601
         # Hourly "still nothing" report.
         "last_heartbeat": None,           # ISO8601
         "checks_since_heartbeat": 0,
@@ -213,6 +218,15 @@ def reset_heartbeat(state: dict) -> None:
 
 def hours_since_heartbeat(state: dict):
     return _hours_since(state["last_heartbeat"])
+
+
+def hours_since_check(state: dict):
+    """How long since the watcher last did anything at all.
+
+    The liveness signal. A hung process keeps its PID and satisfies launchd
+    forever; this is what actually distinguishes working from wedged.
+    """
+    return _hours_since(state.get("last_check_at"))
 
 
 # ── Connection health ────────────────────────────────────────────────────────

@@ -225,9 +225,11 @@ def watchdog(reason: str, failures: int, health=None) -> None:
         f"It will keep retrying, and it will keep nagging you every "
         f"{config.WATCHDOG_RENAG_HOURS}h until it recovers, so you can trust "
         f"silence to mean 'working'.\n\n"
-        f"Most likely fix: the Ticketmaster login expired. Run\n"
-        f"    cd {config.REPO_DIR} && .venv/bin/python -m ep_watcher login\n"
-        f"and sign in in the window that opens.\n\n"
+        f"To find out what is actually wrong, and get the exact fix:\n\n"
+        f"    {config.REPO_DIR}/run_watcher.sh doctor\n\n"
+        f"To just put everything back the way it should be:\n\n"
+        f"    {config.REPO_DIR}/restart.sh\n\n"
+        f"Both are safe to run as often as you like.\n\n"
         f"Checked at: {stamp()}\n"
     )
     _safe("watchdog-email", _send_email, subject, body)

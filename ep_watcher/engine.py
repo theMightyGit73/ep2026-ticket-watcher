@@ -72,6 +72,7 @@ def handle(reading: Reading, st: dict) -> None:
     state_mod.start_heartbeat_clock(st)
     state_mod.note_check(st, reading.failed)
     st["checks_total"] = st.get("checks_total", 0) + 1
+    st["last_check_at"] = state_mod.utc_now().isoformat()
 
     # Which connection did this go out through? Detected rather than declared,
     # so switching the MacBook's network is all David has to do — the watcher

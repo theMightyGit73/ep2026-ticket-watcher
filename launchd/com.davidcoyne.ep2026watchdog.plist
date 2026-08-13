@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Watchdog for the watcher.
+
+  launchd restarts the watcher if it crashes. Nothing restarts it if it
+  merely hangs — a wedged Chrome keeps its PID and looks perfectly healthy
+  from the outside while doing nothing. This runs every 15 minutes, checks
+  whether the watcher has polled recently, and kicks it if not.
+
+  Install:
+    cp launchd/com.davidcoyne.ep2026watchdog.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.davidcoyne.ep2026watchdog.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.davidcoyne.ep2026watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/davidcoyne/SideProjects/EPTicketRefresher/watchdog.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/davidcoyne/SideProjects/EPTicketRefresher</string>
+
+    <!-- Every 15 minutes. Cheap: it reads one JSON file and usually exits. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/davidcoyne/.ep2026-watcher/logs/watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/davidcoyne/.ep2026-watcher/logs/watchdog.err.log</string>
+</dict>
+</plist>

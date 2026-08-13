@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import time
+from pathlib import Path
 
 from . import config, engine, notify, state as state_mod
 from .sources import discovery, inventory_api
@@ -358,6 +359,117 @@ def cmd_resolve_id(_args) -> int:
     return 0
 
 
+def cmd_doctor(_args) -> int:
+    """Check everything, and for anything wrong print the exact fix to paste.
+
+    Written for the moment something has gone quiet and you want one command
+    that says whether it is working, rather than four commands and a guess.
+    Every failure line carries the command that repairs it — a diagnosis you
+    have to go and look up is half a diagnosis.
+    """
+    import subprocess
+
+    print(f"\n  EP2026 watcher — health check at {stamp()}\n")
+    problems = []
+
+    def ok(label, detail=""):
+        print(f"  [ OK ]  {label}{'  — ' + detail if detail else ''}")
+
+    def bad(label, detail, fix):
+        print(f"  [FAIL]  {label}  — {detail}")
+        problems.append((label, fix))
+
+    # 1. Is the service installed and running?
+    plist = Path.home() / "Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist"
+    label = "com.davidcoyne.ep2026watcher"
+    reinstall = (
+        f"cd {config.REPO_DIR} && cp launchd/{plist.name} ~/Library/LaunchAgents/ && "
+        f"launchctl load ~/Library/LaunchAgents/{plist.name}"
+    )
+    if not plist.exists():
+        bad("LaunchAgent installed", "plist not in ~/Library/LaunchAgents", reinstall)
+    else:
+        ok("LaunchAgent installed")
+
+    listed = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    running_pid = None
+    for line in listed.stdout.splitlines():
+        if label in line:
+            parts = line.split()
+            running_pid = parts[0] if parts[0] != "-" else None
+    if running_pid:
+        ok("Service running", f"pid {running_pid}")
+    else:
+        bad("Service running", "not loaded, or loaded but not started", reinstall)
+
+    # 2. Is it actually doing work, or merely alive? A hung process passes
+    #    every check above and does nothing at all.
+    st = state_mod.load()
+    stale_after = max(config.POLL_INTERVAL_SECONDS * 3, 900) / 3600.0
+    age = state_mod.hours_since_check(st)
+    if age is None:
+        bad("Polling", "no check has ever been recorded",
+            f"tail -20 {config.LOG_DIR}/watcher.log")
+    elif age > stale_after:
+        bad("Polling", f"last check was {age * 60:.0f} min ago — looks wedged",
+            f"launchctl kickstart -k gui/$(id -u)/{label}")
+    else:
+        ok("Polling", f"last check {age * 60:.0f} min ago")
+
+    # 3. Can it tell you anything?
+    if config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD:
+        ok("Email configured", config.ALERT_TO)
+    else:
+        bad("Email configured", "no Gmail app password",
+            f"edit {Path.home()}/.ep2026-watcher/env, then ./run_watcher.sh test")
+    if config.NTFY_TOPIC:
+        ok("Push configured")
+    else:
+        print("  [ -- ]  Push not configured (optional, but faster than email)")
+
+    # 4. Is the connection healthy?
+    severity, headline, _ = state_mod.connection_health(st)
+    if severity == "blocked":
+        bad("Connection", headline, "switch networks; see the email for the full steps")
+    else:
+        ok("Connection", headline)
+
+    # 5. Will the Mac stay awake long enough to matter?
+    # pmset pads its columns with a variable number of tabs — "SleepDisabled"
+    # is followed by two, not one. Matching a literal \t reported this as
+    # broken while it was correctly set, and a health check that cries wolf
+    # is worse than no health check.
+    import re
+
+    sleep_cfg = subprocess.run(["pmset", "-g"], capture_output=True, text=True).stdout
+    disabled = re.search(r"SleepDisabled\s+1\b", sleep_cfg)
+    never_sleeps = re.search(r"^\s*sleep\s+0\b", sleep_cfg, re.MULTILINE)
+    prevented = "sleep prevented" in sleep_cfg
+    if disabled or never_sleeps or prevented:
+        ok("Mac stays awake", "sleep disabled")
+    else:
+        bad("Mac stays awake", "it may sleep, which stops the watcher",
+            "sudo pmset -a disablesleep 1")
+
+    # 6. Has it retired?
+    if state_mod.past_stop_date():
+        print(f"\n  Note: past the stop date ({config.STOP_AFTER_DATE}) — "
+              "the watcher has finished on purpose.")
+        return 0
+
+    print()
+    if not problems:
+        print("  Everything is working. Nothing to do.\n")
+        return 0
+
+    print(f"  {len(problems)} problem(s). Fixes, in order:\n")
+    for name, fix in problems:
+        print(f"    # {name}")
+        print(f"    {fix}\n")
+    print(f"  Or just re-run everything:  {config.REPO_DIR}/restart.sh\n")
+    return 1
+
+
 def cmd_status(_args) -> int:
     st = state_mod.load()
     print(f"\n  State file : {config.STATE_FILE}")
@@ -381,6 +493,7 @@ COMMANDS = {
     "watch": cmd_watch,
     "test": cmd_test,
     "selftest": cmd_selftest,
+    "doctor": cmd_doctor,
     "calibrate": cmd_calibrate,
     "resolve-id": cmd_resolve_id,
     "status": cmd_status,
