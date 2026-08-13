@@ -164,6 +164,27 @@ check_true("body says how to diagnose", "doctor" in body)
 check_true("body says how to restart", "restart.sh" in body)
 check_true("body gives runnable paths", str(config.REPO_DIR) in body)
 
+print("\nDrills must be unmistakable")
+# A sample "watcher stopped" email once arrived saying "this is the last
+# email you'll get from it" while the watcher was running perfectly. An
+# alert you cannot distinguish from a rehearsal is worse than no rehearsal.
+sent.clear()
+notify.stopped(checks_total=0)
+check_true("a real alert carries no test marker", "[TEST" not in sent[-1]["Subject"])
+
+notify.TEST_MODE = True
+sent.clear()
+notify.stopped(checks_total=0)
+check_true("a drill is flagged in the subject", "[TEST — not real]" in sent[-1]["Subject"])
+sent.clear()
+notify.available(Reading(source="t", resale=AVAILABLE), "drill", [])
+check_true("...for availability alerts too", "[TEST — not real]" in sent[-1]["Subject"])
+notify.TEST_MODE = False
+
+sent.clear()
+notify.available(Reading(source="t", resale=AVAILABLE), "real", [])
+check_true("and the marker is cleared afterwards", "[TEST" not in sent[-1]["Subject"])
+
 print("\nDelivery failures must never crash a run")
 
 def explode(*a, **kw):

@@ -17,9 +17,22 @@ from .model import GOOD_STATUSES, Listing, Reading
 from .state import stamp
 
 
+#: Set while sending sample alerts, so every one of them is unmistakably a
+#: drill. Without this a sample reads exactly like the real thing — a test
+#: "watcher stopped" email once landed saying "this is the last email you'll
+#: get from it" while the watcher was running perfectly well. An alert you
+#: cannot tell from a rehearsal is worse than no rehearsal.
+TEST_MODE = False
+
+
+def _mark(text: str) -> str:
+    return f"[TEST — not real] {text}" if TEST_MODE else text
+
+
 def _send_email(subject: str, body: str) -> None:
     if not (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD):
         raise RuntimeError("GMAIL_ADDRESS / GMAIL_APP_PASSWORD not set")
+    subject = _mark(subject)
 
     msg = MIMEMultipart()
     msg["From"] = config.GMAIL_ADDRESS
@@ -40,7 +53,7 @@ def _send_ntfy(title: str, message: str, priority: str = "default", tags=None) -
         f"https://ntfy.sh/{config.NTFY_TOPIC}",
         data=message.encode("utf-8"),
         headers={
-            "Title": title,
+            "Title": _mark(title),
             "Priority": priority,
             "Tags": ",".join(tags or []),
             "Click": config.EVENT_URL,
@@ -297,9 +310,12 @@ def test() -> None:
     discover that it went to spam or that the link in it was wrong. So this
     puts all four in the inbox now, while it costs nothing to check them.
     """
+    global TEST_MODE
+    TEST_MODE = True
+
     print(f"[{stamp()}] 1/4 connectivity")
     _send_email(
-        f"[TEST 1/4] {config.EVENT_NAME} watcher is wired up",
+        f"{config.EVENT_NAME} watcher is wired up",
         f"Hi David,\n\nIf you can read this, Gmail credentials work and mail is\n"
         f"reaching you. The next three are samples of the real alerts.\n\n"
         f"At: {stamp()}\n",
@@ -356,6 +372,8 @@ def test() -> None:
         message="Test push — ntfy is wired up.",
         tags=["test_tube"],
     )
-    print(f"\n  Four emails sent to {config.ALERT_TO}.")
+    TEST_MODE = False
+    print(f"\n  Four emails sent to {config.ALERT_TO}, each subject prefixed")
+    print("  '[TEST — not real]' so you can tell them from the genuine article.")
     print("  Check they arrived AND that none landed in spam — mark them")
     print("  'not spam' now if they did, not on the day it matters.")
