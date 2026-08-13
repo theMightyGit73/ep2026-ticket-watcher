@@ -1,0 +1,312 @@
+"""Command line entry point:  python -m ep_watcher <command>"""
+
+import argparse
+import json
+import os
+import random
+import sys
+import time
+
+from . import config, engine, notify, state as state_mod
+from .sources import browser, discovery, inventory_api
+from .state import stamp
+
+
+def _banner(title: str) -> None:
+    print(f"\n[{stamp()}] {title}")
+    print(f"  {config.EVENT_NAME}")
+    print(f"  {config.EVENT_URL}\n")
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+def cmd_login(_args) -> int:
+    """Sign in by hand, once. The cookies land in the profile dir and every
+    later run reuses them — this is the whole reason the watcher can see a
+    page that returns 401 to everything else."""
+    _banner("Opening Chrome so you can sign in to Ticketmaster")
+    print("  1. Accept the cookie dialog if it appears.")
+    print("  2. Sign in (only needed for buying — watching works logged out).")
+    print("  3. Come back here and press Enter.\n")
+
+    config.OFFSCREEN = False  # he needs to actually see and use this window
+    with browser.BrowserSession(headless=False) as session:
+        try:
+            session.page.goto(config.EVENT_URL, wait_until="domcontentloaded")
+        except Exception as exc:
+            print(f"  (navigation hiccup, carry on in the window anyway: {exc})")
+        try:
+            input("  Press Enter when you're signed in and the page looks right... ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return 1
+        text = session.visible_text().lower()
+
+    if "sign out" in text or "my account" in text:
+        print(f"\n  Signed in. Session saved to {config.PROFILE_DIR}")
+        return 0
+    print("\n  Could not confirm a signed-in session — run `check` and see what it says.")
+    return 0
+
+
+def cmd_check(_args) -> int:
+    """Read once and print the result. Sends nothing."""
+    _banner("Manual check (no notifications)")
+    reading = engine.poll()
+
+    print("─" * 68)
+    print(f"  Primary (box office) : {reading.primary}")
+    print(f"  Resale (verified)    : {reading.resale}")
+    print(f"  Source               : {reading.source}")
+    if reading.failed:
+        print("  Result               : FAILED — no usable reading")
+    elif reading.any_good:
+        print("  Result               : SOMETHING IS AVAILABLE")
+    else:
+        print("  Result               : nothing available")
+    for note in reading.notes:
+        print(f"  · {note}")
+    for listing in reading.listings:
+        print(f"  → {listing.kind}: {listing.describe()}")
+    print("─" * 68)
+
+    if reading.needs_login:
+        print("\n  Session needs attention:  python -m ep_watcher login\n")
+    return 1 if reading.failed else 0
+
+
+def cmd_run(_args) -> int:
+    """One full cycle including alerts. This is what a scheduler calls."""
+    reading = engine.run_once()
+    return 1 if reading.failed else 0
+
+
+def cmd_watch(args) -> int:
+    """Long-running loop holding one warm browser open between polls.
+
+    Preferred over scheduling one-shot `run`s: the session stays warm, each
+    poll costs a page load instead of a browser cold start, and a persistent
+    real browser is a far more ordinary thing to be doing than a fresh
+    headless Chrome every two minutes.
+    """
+    interval = args.interval or config.POLL_INTERVAL_SECONDS
+    if config.PRESS_THE_BUTTON and interval < config.PRESS_MIN_INTERVAL_SECONDS:
+        print(
+            f"[{stamp()}] press mode: raising interval {interval}s → "
+            f"{config.PRESS_MIN_INTERVAL_SECONDS}s (each poll is a real reserve attempt)"
+        )
+        interval = config.PRESS_MIN_INTERVAL_SECONDS
+
+    mode = "PRESS THE BUTTON" if config.PRESS_THE_BUTTON else "read-only"
+    _banner(f"Watching every ~{interval}s · mode: {mode}")
+    if discovery.configured():
+        print("  Discovery API: configured")
+    if inventory_api.configured():
+        print("  Inventory Status API: configured")
+
+    if not config.USE_BROWSER:
+        # API-only: no browser to keep warm, so this is just a polling loop.
+        print("  Browser DISABLED — API sources only\n")
+        return _watch_apis_only(interval)
+
+    session = browser.BrowserSession()
+    session.start()
+    try:
+        while True:
+            try:
+                reading = engine.run_once(session)
+                # A live basket has a countdown on it; stop polling and leave
+                # the window alone so David can actually finish the checkout.
+                if config.PRESS_THE_BUTTON and any("RESERVE ACCEPTED" in n for n in reading.notes):
+                    print(f"[{stamp()}] Reserve accepted — pausing the loop so you can check out.")
+                    print("  The browser is holding the basket. Ctrl-C when you're done.")
+                    while True:
+                        time.sleep(30)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"[{stamp()}] poll raised {type(exc).__name__}: {exc} — restarting browser")
+                session.close()
+                time.sleep(10)
+                session = browser.BrowserSession()
+                session.start()
+
+            sleep_for = interval * random.uniform(0.75, 1.25)
+            time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        print(f"\n[{stamp()}] Stopped.")
+        return 0
+    finally:
+        session.close()
+
+
+def _watch_apis_only(interval: int) -> int:
+    """Polling loop with no browser to keep alive."""
+    try:
+        while True:
+            try:
+                engine.run_once()
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                print(f"[{stamp()}] poll raised {type(exc).__name__}: {exc}")
+            time.sleep(interval * random.uniform(0.75, 1.25))
+    except KeyboardInterrupt:
+        print(f"\n[{stamp()}] Stopped.")
+        return 0
+
+
+def cmd_test(_args) -> int:
+    if not (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD):
+        print("GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set.")
+        return 1
+    print(f"[{stamp()}] Sending test notifications to {config.ALERT_TO}...")
+    try:
+        notify.test()
+    except Exception as exc:
+        print(f"FAILED: {exc}")
+        return 1
+    print("Sent — check your inbox and phone.")
+    return 0
+
+
+def cmd_selftest(_args) -> int:
+    """Run the offline checks: no network, no credentials, nothing sent.
+
+    Covers the alert-gating rules and the content of every email — that each
+    one goes to the right address and carries the link to the page you need to
+    open. Safe to run any time, including while the watcher is running.
+    """
+    import subprocess
+
+    tests = sorted((config.REPO_DIR / "tests").glob("test_*.py"))
+    if not tests:
+        print("No tests found.")
+        return 1
+
+    worst = 0
+    for path in tests:
+        print(f"\n{'=' * 68}\n  {path.name}\n{'=' * 68}")
+        result = subprocess.run([sys.executable, str(path)], cwd=str(config.REPO_DIR))
+        worst = max(worst, result.returncode)
+    print(f"\n{'ALL SUITES PASSED' if worst == 0 else 'SOME SUITES FAILED'}\n")
+    return worst
+
+
+def cmd_calibrate(_args) -> int:
+    """Dump what the browser actually sees, for checking the text anchors.
+
+    The anchors in sources/browser.py were written from a description of the
+    page, since it can't be fetched without a logged-in browser. Run this once
+    after `login` and read the .txt to confirm they match reality.
+    """
+    _banner("Dumping page diagnostics (this performs one search)")
+    config.OFFSCREEN = False
+    with browser.BrowserSession(headless=False) as session:
+        base = session.diagnose("calibrate")
+    print(f"  Screenshot : {base.with_suffix('.png')}")
+    print(f"  Visible text: {base.with_suffix('.txt')}   <- check the anchors against this")
+    print(f"  Raw HTML   : {base.with_suffix('.html')}\n")
+    return 0
+
+
+def cmd_resolve_id(_args) -> int:
+    """Find the id Discovery knows this event by, and check the resale path.
+
+    Two questions at once. First, whether the id from the ticketmaster.ie URL
+    works against Discovery directly. Second — the one that decides whether
+    this can run off the Mac at all — whether resale inventory shows up as
+    tmr-sourced events, since that is the only free, browser-free resale
+    signal available.
+    """
+    if not discovery.configured():
+        print("\n  Set TM_DISCOVERY_KEY first. Free, instant, no approval needed:")
+        print("  https://developer.ticketmaster.com/  → sign up → copy the Consumer Key\n")
+        return 1
+
+    print(f"\n  Looking up {config.TM_EVENT_ID} directly...")
+    try:
+        direct = discovery._get(f"/events/{config.TM_EVENT_ID}.json")
+    except Exception as exc:
+        print(f"  direct lookup failed: {exc}")
+        direct = None
+    if direct:
+        status = (direct.get("dates", {}).get("status", {}) or {}).get("code")
+        print(f"  FOUND: {direct.get('name')}  [{status}] — the URL id works as-is.")
+    else:
+        print("  Not found by that id — use one from the search below.")
+
+    try:
+        events = discovery.search_events()
+    except Exception as exc:
+        print(f"  Search failed: {exc}")
+        return 1
+
+    print(f"\n  Electric Picnic events in Discovery (IE): {len(events)}")
+    for e in events:
+        print(f"    id={e['id']}  {e['date']}  [{e['status']}]  {e['name']}")
+
+    print("\n  Ticketmaster Resale (source=tmr) events:")
+    try:
+        resale = discovery.find_resale_events()
+    except Exception as exc:
+        print(f"    lookup failed: {exc}")
+        return 1
+    if resale:
+        for e in resale:
+            print(f"    id={e['id']}  {e['date']}  {e['name']}  {e.get('price') or ''}")
+        print("\n  Resale IS visible via the free API — browser-free hosting can watch it.")
+    else:
+        print("    (none)")
+        print("\n  No tmr events right now. That is either genuinely no resale, or")
+        print("  resale for this event never surfaces in Discovery. Re-run this when")
+        print("  the browser reports a live resale listing — if this still says none")
+        print("  at that moment, the free API cannot see resale and hosting needs a browser.")
+    return 0
+
+
+def cmd_status(_args) -> int:
+    st = state_mod.load()
+    print(f"\n  State file : {config.STATE_FILE}")
+    print(f"  Profile    : {config.PROFILE_DIR}  (exists: {config.PROFILE_DIR.exists()})")
+    print(f"  Press mode : {config.PRESS_THE_BUTTON}")
+    print(f"  Browser    : {'enabled' if config.USE_BROWSER else 'DISABLED (API-only mode)'}")
+    print(f"  Discovery API configured: {discovery.configured()}")
+    print(f"  Inventory API configured: {inventory_api.configured()}")
+    print(f"  Email configured        : {bool(config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD)}")
+    print(f"  Push configured         : {bool(config.NTFY_TOPIC)}\n")
+    print(json.dumps(st, indent=2))
+    healthy = st["consecutive_failures"] < config.WATCHDOG_FAILURE_THRESHOLD
+    print(f"\n  Health: {'OK' if healthy else 'BROKEN — check the logs'}\n")
+    return 0 if healthy else 1
+
+
+COMMANDS = {
+    "login": cmd_login,
+    "check": cmd_check,
+    "run": cmd_run,
+    "watch": cmd_watch,
+    "test": cmd_test,
+    "selftest": cmd_selftest,
+    "calibrate": cmd_calibrate,
+    "resolve-id": cmd_resolve_id,
+    "status": cmd_status,
+}
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m ep_watcher",
+        description="Electric Picnic 2026 ticket watcher.",
+    )
+    parser.add_argument("command", choices=sorted(COMMANDS), help="what to do")
+    parser.add_argument(
+        "--interval", type=int, default=None,
+        help="seconds between polls in `watch` (default %(default)s)",
+    )
+    args = parser.parse_args(argv)
+    return COMMANDS[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

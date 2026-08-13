@@ -1,0 +1,34 @@
+# systemd unit for a Linux box — a VPS, a Raspberry Pi, or any always-on
+# machine that isn't David's MacBook.
+#
+#   sudo cp deploy/ep-watcher.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ep-watcher
+#   journalctl -u ep-watcher -f
+#
+# Adjust User and the paths if you didn't clone to /opt/ep-watcher.
+
+[Unit]
+Description=Electric Picnic 2026 ticket watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ep
+WorkingDirectory=/opt/ep-watcher
+EnvironmentFile=/etc/ep-watcher.env
+
+# xvfb-run gives Chrome a display. Headed Chrome on a virtual display gets
+# through; Chrome's own headless mode is rejected with a 403 every time.
+ExecStart=/usr/bin/xvfb-run -a --server-args=-screen 0 1440x900x24 \
+          /opt/ep-watcher/.venv/bin/python -m ep_watcher watch
+
+Restart=always
+RestartSec=30
+
+# Chrome writes a lot of temp data; give it somewhere private to do it.
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

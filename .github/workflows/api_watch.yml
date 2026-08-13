@@ -1,0 +1,68 @@
+name: EP2026 API Watch
+
+# The browser-free half of the watcher, running on GitHub's infrastructure.
+#
+# Be clear about what this can and cannot do. It runs ONLY the Discovery API
+# source, because every ticketmaster.ie endpoint — including the resale API
+# the page itself calls — returns 403 "dynamic_block" to anything that is not
+# a real browser, and a real browser will not run usefully here.
+#
+# Two limits inherited from GitHub, both measured on this repo:
+#   * Scheduled workflows do not run on time. The old '*/5' watcher actually
+#     fired every 40-100 minutes. Treat the cron below as a rough hourly.
+#   * Runners have datacentre IPs, which is what got the old watcher walled.
+#     The Discovery API does not care, which is exactly why this is API-only.
+#
+# So: a free, always-on safety net that catches a coarse re-release. It cannot
+# see a single resale listing that appears and vanishes inside five minutes,
+# which is the behaviour actually observed on this event. Do not let a quiet
+# inbox from this workflow persuade you that nothing happened.
+
+on:
+  schedule:
+    - cron: '17 * * * *'   # hourly-ish; a non-zero minute is less contended
+  workflow_dispatch:
+
+concurrency:
+  group: ep2026-api-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Restore watcher state
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ep2026-watcher/state.json
+          key: ep-watcher-state-${{ github.run_id }}
+          restore-keys: ep-watcher-state-
+
+      - name: Run the API watch
+        env:
+          EP_USE_BROWSER:     '0'
+          TM_DISCOVERY_KEY:   ${{ secrets.TM_DISCOVERY_KEY }}
+          TM_API_KEY:         ${{ secrets.TM_API_KEY }}
+          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
+        run: python -m ep_watcher run
+
+      # State is cached rather than committed. The old workflow pushed a
+      # commit on every run, which is where ~1000 junk commits came from and
+      # did nothing for its scheduling priority.
+      - name: Save watcher state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ep2026-watcher/state.json
+          key: ep-watcher-state-${{ github.run_id }}

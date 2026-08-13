@@ -1,11 +1,24 @@
-name: EP2026 Ticket Watcher
+name: EP2026 Ticket Watcher (RETIRED)
+
+# RETIRED 2026-08-13. Superseded by the ep_watcher package, which runs on
+# David's Mac — see README.md.
+#
+# The schedule is disabled rather than deleted, for the record:
+#
+#   * This job failed to fetch the page on EVERY run from 2026-06-30 onward —
+#     657 consecutive failures over 44 days — because ticketmaster.ie serves
+#     datacentre IPs and non-browser clients a 401 identity-verification wall
+#     that cloudscraper cannot solve. The runs still reported success, because
+#     a failed fetch exited 0.
+#   * The '*/5' schedule was fiction. Observed cadence was one run every
+#     40-100 minutes: GitHub heavily deprioritises scheduled workflows, and
+#     this one pushed a commit on every run, which does not help.
+#   * Those pushes are the ~1000 "Update watcher state [skip ci]" commits.
+#
+# The replacement cannot run here at all: it needs a real, visible Chrome from
+# a residential IP. Headless gets 403 and CI runners get 401.
 
 on:
-  schedule:
-    # GitHub's floor for reliable scheduled runs is 5 minutes — anything
-    # tighter isn't guaranteed to actually fire, so this is as fast as it
-    # gets without risking silently dropped checks.
-    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       mode:

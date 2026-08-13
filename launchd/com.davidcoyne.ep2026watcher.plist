@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent for the EP2026 watcher.
+
+  A LaunchAgent, not a LaunchDaemon, and that is not incidental: the watcher
+  drives a real visible Chrome window, so it needs a logged-in GUI session.
+  A daemon has no window server and the browser would fail to launch.
+
+  Install:
+    cp launchd/com.davidcoyne.ep2026watcher.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist
+
+  Stop:
+    launchctl unload ~/Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.davidcoyne.ep2026watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/davidcoyne/SideProjects/EPTicketRefresher/run_watcher.sh</string>
+        <string>watch</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/davidcoyne/SideProjects/EPTicketRefresher</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- `watch` is a long-running loop, not a one-shot. If it dies (Chrome
+         crash, network drop, a bug), bring it straight back. -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/davidcoyne/.ep2026-watcher/logs/watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/davidcoyne/.ep2026-watcher/logs/watcher.err.log</string>
+</dict>
+</plist>

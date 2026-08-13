@@ -1,0 +1,255 @@
+"""Email + push delivery.
+
+Lifted from the original watcher, which got this part right: every send is
+wrapped so a bad credential or an ntfy hiccup can never take down the run or
+lose the state write.
+"""
+
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from typing import Callable, List
+
+import requests
+
+from . import config
+from .model import GOOD_STATUSES, Listing, Reading
+from .state import stamp
+
+
+def _send_email(subject: str, body: str) -> None:
+    if not (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD):
+        raise RuntimeError("GMAIL_ADDRESS / GMAIL_APP_PASSWORD not set")
+
+    msg = MIMEMultipart()
+    msg["From"] = config.GMAIL_ADDRESS
+    msg["To"] = config.ALERT_TO
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
+        srv.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
+        srv.send_message(msg)
+    print(f"[{stamp()}] Email sent to {config.ALERT_TO}")
+
+
+def _send_ntfy(title: str, message: str, priority: str = "default", tags=None) -> None:
+    if not config.NTFY_TOPIC:
+        return
+    requests.post(
+        f"https://ntfy.sh/{config.NTFY_TOPIC}",
+        data=message.encode("utf-8"),
+        headers={
+            "Title": title,
+            "Priority": priority,
+            "Tags": ",".join(tags or []),
+            "Click": config.EVENT_URL,
+        },
+        timeout=10,
+    )
+    print(f"[{stamp()}] Push sent")
+
+
+def _safe(label: str, fn: Callable, *args, **kwargs) -> None:
+    try:
+        fn(*args, **kwargs)
+    except Exception as exc:
+        print(f"[{stamp()}] WARNING: {label} notification failed: {exc}")
+
+
+# ── The alerts ───────────────────────────────────────────────────────────────
+
+def _listing_block(listings: List[Listing]) -> str:
+    if not listings:
+        return "  (the source reported availability but named no specific tier)"
+    return "\n".join(f"  • {l.describe()}" for l in listings)
+
+
+def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
+    which = []
+    if reading.primary in GOOD_STATUSES:
+        which.append("box office")
+    if reading.resale in GOOD_STATUSES:
+        which.append("verified resale")
+    where = " and ".join(which) or "Ticketmaster"
+
+    new_block = ""
+    if new_listings:
+        new_block = "\nNew since the last check:\n" + "\n".join(f"  • {n}" for n in new_listings) + "\n"
+
+    subject = f"TICKETS AVAILABLE ({where}): {config.EVENT_NAME}"
+    body = (
+        f"Hi David,\n\n"
+        f"A ticket has shown up for {config.EVENT_NAME} on the {where}.\n\n"
+        f"What the watcher saw:\n{_listing_block(reading.listings)}\n{new_block}\n"
+        f"Trigger : {reason}\n"
+        f"Source  : {reading.source}\n"
+        f"Wanted  : {config.WANTED_QUANTITY} ticket(s)\n\n"
+        f"Go buy it now — this can be gone in under a minute, and the watcher\n"
+        f"deliberately does not buy on your behalf.\n\n"
+        f"{config.EVENT_URL}\n\n"
+        f"Checked at: {stamp()}\n"
+    )
+    _safe("available-email", _send_email, subject, body)
+    _safe(
+        "available-push", _send_ntfy,
+        title=f"EP2026: ticket on the {where}",
+        message=_listing_block(reading.listings) + "\n\nTap to open Ticketmaster.",
+        priority="urgent",
+        tags=["tickets", "rotating_light"],
+    )
+
+
+def reserved_in_browser(reading: Reading) -> None:
+    """The strongest possible signal: we pressed the button and it worked.
+
+    A successful reserve holds the ticket for a few minutes only, so this
+    alert is worded to get David to the already-open browser window fast.
+    """
+    subject = f"IN THE BASKET — finish checkout now: {config.EVENT_NAME}"
+    body = (
+        f"Hi David,\n\n"
+        f"The watcher pressed 'Find Tickets' and Ticketmaster ACCEPTED it —\n"
+        f"{config.WANTED_QUANTITY} ticket(s) are held in a basket right now.\n\n"
+        f"{_listing_block(reading.listings)}\n\n"
+        f"This hold expires in a couple of minutes. The Chrome window the\n"
+        f"watcher used has been left open on the checkout page — go finish it\n"
+        f"there, or open the link below and the basket should still be yours.\n\n"
+        f"{config.EVENT_URL}\n\n"
+        f"Reserved at: {stamp()}\n"
+    )
+    _safe("reserved-email", _send_email, subject, body)
+    _safe(
+        "reserved-push", _send_ntfy,
+        title="EP2026: TICKET HELD — check out NOW",
+        message="A reserve succeeded. The hold expires in minutes.",
+        priority="urgent",
+        tags=["rotating_light", "shopping_cart"],
+    )
+
+
+def heartbeat(checks: int, failures: int, hours: float, reading: Reading) -> None:
+    """The hourly "still nothing, still trying" report.
+
+    Deliberately carries the numbers rather than just the sentiment. "No
+    success in the last hour" is compatible with both a healthy watcher and
+    one that has been failing every attempt — which is exactly the ambiguity
+    the previous watcher died in — so the counts are the point of the email.
+    """
+    healthy = failures < checks or checks == 0
+    health_line = (
+        f"Checks run in the last {hours:.1f}h : {checks}\n"
+        f"Of those, failed to read the page: {failures}"
+    )
+    if checks and failures == checks:
+        health_line += (
+            "\n\nEVERY check failed this hour. That is a broken watcher, not a\n"
+            "quiet Ticketmaster — the numbers above are the difference."
+        )
+
+    subject = f"No luck yet — still watching {config.EVENT_NAME}"
+    body = (
+        f"Hi David,\n\n"
+        f"No ticket has appeared in the last hour. Still trying.\n\n"
+        f"{health_line}\n\n"
+        f"Last reading:\n"
+        f"  Box office     : {reading.primary}\n"
+        f"  Verified resale: {reading.resale}\n"
+        f"  Searching for  : {config.WANTED_QUANTITY} ticket\n\n"
+        f"Event page: {config.EVENT_URL}\n\n"
+        f"You'll get a separate, much louder email the moment anything shows up.\n"
+        f"This one just proves the watcher is still alive.\n\n"
+        f"Checked at: {stamp()}\n"
+    )
+    _safe("heartbeat-email", _send_email, subject, body)
+    if not healthy:
+        _safe(
+            "heartbeat-push", _send_ntfy,
+            title="EP2026 watcher: every check failing",
+            message=f"{failures}/{checks} checks failed this hour.",
+            priority="high",
+            tags=["warning"],
+        )
+
+
+def watchdog(reason: str, failures: int) -> None:
+    subject = "EP2026 watcher is not working"
+    body = (
+        f"Hi David,\n\n"
+        f"The ticket watcher has failed {failures} checks in a row.\n\n"
+        f"Reason: {reason}\n\n"
+        f"It will keep retrying, and it will keep nagging you every "
+        f"{config.WATCHDOG_RENAG_HOURS}h until it recovers, so you can trust "
+        f"silence to mean 'working'.\n\n"
+        f"Most likely fix: the Ticketmaster login expired. Run\n"
+        f"    cd {config.REPO_DIR} && .venv/bin/python -m ep_watcher login\n"
+        f"and sign in in the window that opens.\n\n"
+        f"Checked at: {stamp()}\n"
+    )
+    _safe("watchdog-email", _send_email, subject, body)
+    _safe(
+        "watchdog-push", _send_ntfy,
+        title="EP2026 watcher is broken",
+        message=reason,
+        priority="high",
+        tags=["warning"],
+    )
+
+
+def recovered(after: int) -> None:
+    _safe(
+        "recovered-push", _send_ntfy,
+        title="EP2026 watcher recovered",
+        message=f"Back to normal after {after} failed checks.",
+        priority="low",
+        tags=["white_check_mark"],
+    )
+    _safe(
+        "recovered-email", _send_email,
+        "EP2026 watcher is working again",
+        f"Hi David,\n\nThe watcher recovered after {after} failed checks and is "
+        f"reading Ticketmaster normally again.\n\nAt: {stamp()}\n",
+    )
+
+
+def test() -> None:
+    """Send one real example of every email the watcher can produce.
+
+    Not just a "credentials work" ping. The alert that matters will arrive
+    exactly once, under time pressure, and there is no second chance to
+    discover that it went to spam or that the link in it was wrong. So this
+    puts all four in the inbox now, while it costs nothing to check them.
+    """
+    print(f"[{stamp()}] 1/4 connectivity")
+    _send_email(
+        f"[TEST 1/4] {config.EVENT_NAME} watcher is wired up",
+        f"Hi David,\n\nIf you can read this, Gmail credentials work and mail is\n"
+        f"reaching you. The next three are samples of the real alerts.\n\n"
+        f"At: {stamp()}\n",
+    )
+
+    print(f"[{stamp()}] 2/4 availability alert")
+    sample = Reading(
+        source="test",
+        primary="UNAVAILABLE",
+        resale="AVAILABLE",
+        listings=[Listing(name="Verified Resale — Section STNDN1 (WEEKEND CAMPING)",
+                          price="€366.39", kind="resale")],
+    )
+    available(sample, "TEST — this is what a real find looks like", [])
+
+    print(f"[{stamp()}] 3/4 hourly report")
+    heartbeat(checks=19, failures=0, hours=1.0,
+              reading=Reading(source="test", primary="UNAVAILABLE", resale="UNAVAILABLE"))
+
+    print(f"[{stamp()}] 4/4 watchdog")
+    watchdog("TEST — this is what a broken watcher looks like.", failures=4)
+
+    _send_ntfy(
+        title="TEST: EP2026 watcher",
+        message="Test push — ntfy is wired up.",
+        tags=["test_tube"],
+    )
+    print(f"\n  Four emails sent to {config.ALERT_TO}.")
+    print("  Check they arrived AND that none landed in spam — mark them")
+    print("  'not spam' now if they did, not on the day it matters.")

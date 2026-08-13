@@ -1,0 +1,174 @@
+"""Check every email the watcher can send, without sending any of them.
+
+SMTP is stubbed out, so this runs offline, needs no credentials, and can be
+run as often as you like. It exists because the alert that matters arrives
+exactly once, under time pressure: if it goes to the wrong address, or omits
+the link to the page you need to open right now, you find out at the worst
+possible moment. These checks make that a build-time failure instead.
+
+Run with:  .venv/bin/python tests/test_emails.py
+"""
+
+import smtplib
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ep_watcher import config, notify, state as st  # noqa: E402
+from ep_watcher.model import AVAILABLE, UNAVAILABLE, Listing, Reading  # noqa: E402
+
+failures = []
+sent = []
+
+
+def check(label, got, want):
+    ok = got == want
+    print(f"  {'PASS' if ok else 'FAIL'}  {label}: got {got!r}, want {want!r}")
+    if not ok:
+        failures.append(label)
+
+
+def check_true(label, got):
+    check(label, bool(got), True)
+
+
+# ── Stub SMTP so nothing leaves the machine ──────────────────────────────────
+
+class FakeSMTP:
+    def __init__(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def login(self, *a):
+        pass
+
+    def send_message(self, msg):
+        sent.append(msg)
+
+
+smtplib.SMTP_SSL = FakeSMTP
+notify.requests = type("_NoPush", (), {"post": staticmethod(lambda *a, **kw: None)})()
+
+# Credentials must look present or _send_email refuses before building anything.
+config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
+config.GMAIL_APP_PASSWORD = "test-password"
+config.NTFY_TOPIC = None
+
+
+def last_body():
+    """The decoded text of the most recent email.
+
+    decode=True matters: any body containing a euro sign or an em dash is
+    non-ASCII, so MIMEText base64-encodes it. Reading the raw payload gives
+    you base64 and every substring assertion quietly fails — which is exactly
+    what happened the first time these checks ran.
+    """
+    payload = sent[-1].get_payload()[0]
+    return payload.get_payload(decode=True).decode("utf-8")
+
+
+print("\nAvailability alert — the one that must not be wrong")
+
+sent.clear()
+notify.available(
+    Reading(
+        source="t",
+        primary=UNAVAILABLE,
+        resale=AVAILABLE,
+        listings=[Listing("Verified Resale — Section STNDN1", "€366.39", "resale")],
+    ),
+    reason="resale went UNAVAILABLE → AVAILABLE",
+    new_listings=["Verified Resale — Section STNDN1 — €366.39"],
+)
+check("exactly one email sent", len(sent), 1)
+check("addressed to David", sent[-1]["To"], "davidcoyne73@gmail.com")
+check_true("subject says tickets are available", "AVAILABLE" in sent[-1]["Subject"])
+check_true("body links to the selling page", config.EVENT_URL in last_body())
+check_true("body names the listing", "STNDN1" in last_body())
+check_true("body shows the price", "366.39" in last_body())
+check_true("body says which market", "resale" in last_body().lower())
+
+print("\nBasket alert — fired when a reserve actually succeeds")
+
+sent.clear()
+notify.reserved_in_browser(
+    Reading(source="t", primary=AVAILABLE,
+            listings=[Listing("General Admission (in basket)", "€310.50", "primary")])
+)
+check("one email sent", len(sent), 1)
+check_true("subject conveys urgency", "now" in sent[-1]["Subject"].lower())
+check_true("body links to the selling page", config.EVENT_URL in last_body())
+check_true("body warns the hold expires", "expires" in last_body().lower())
+
+print("\nHourly report")
+
+sent.clear()
+notify.heartbeat(checks=19, failures=0, hours=1.0,
+                 reading=Reading(source="t", primary=UNAVAILABLE, resale=UNAVAILABLE))
+check("one email sent", len(sent), 1)
+check("addressed to David", sent[-1]["To"], "davidcoyne73@gmail.com")
+check_true("says no luck yet", "no luck" in sent[-1]["Subject"].lower())
+check_true("says it will keep trying", "still trying" in last_body().lower())
+check_true("reports how many checks ran", "19" in last_body())
+check_true("links to the selling page", config.EVENT_URL in last_body())
+
+# The important case: "no success this hour" must read differently when the
+# reason for no success is that the watcher itself is broken.
+sent.clear()
+notify.heartbeat(checks=19, failures=19, hours=1.0,
+                 reading=Reading(source="t"))
+check_true("all-failed hour is called out explicitly", "EVERY check failed" in last_body())
+
+print("\nWatchdog")
+
+sent.clear()
+notify.watchdog("Could not get a usable reading.", failures=4)
+check("one email sent", len(sent), 1)
+check_true("body explains how to fix the session", "login" in last_body())
+
+print("\nDelivery failures must never crash a run")
+
+def explode(*a, **kw):
+    raise RuntimeError("SMTP is down")
+
+
+real_send = notify._send_email
+notify._send_email = explode
+try:
+    notify.available(Reading(source="t", resale=AVAILABLE), "test", [])
+    print("  PASS  a failing send is swallowed, not raised")
+except Exception as exc:  # pragma: no cover - this is the thing being tested
+    print(f"  FAIL  exception escaped: {exc}")
+    failures.append("send failure escaped")
+finally:
+    notify._send_email = real_send
+
+print("\nHourly gating")
+
+s = dict(st._defaults())
+check("no heartbeat before the clock starts", st.should_send_heartbeat(s), False)
+
+st.start_heartbeat_clock(s)
+check("still quiet immediately after starting", st.should_send_heartbeat(s), False)
+
+s["last_heartbeat"] = (st.utc_now() - timedelta(hours=config.HEARTBEAT_HOURS + 0.01)).isoformat()
+check("fires once the hour is up", st.should_send_heartbeat(s), True)
+
+st.note_check(s, failed=False)
+st.note_check(s, failed=True)
+check("counts checks", s["checks_since_heartbeat"], 2)
+check("counts failures separately", s["failures_since_heartbeat"], 1)
+
+st.reset_heartbeat(s)
+check("reset clears the counters", s["checks_since_heartbeat"], 0)
+check("reset silences it again", st.should_send_heartbeat(s), False)
+
+print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
+sys.exit(1 if failures else 0)

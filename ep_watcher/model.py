@@ -1,0 +1,89 @@
+"""Shared vocabulary for "is there a ticket".
+
+Both sources (the Inventory Status API and the browser) answer in these types,
+so the alerting logic never has to care which one produced the answer.
+"""
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+# ── Status values ────────────────────────────────────────────────────────────
+# Deliberately mirrors Ticketmaster's own Inventory Status vocabulary so the
+# API source maps across with no invention on our part.
+AVAILABLE = "AVAILABLE"
+FEW_LEFT = "FEW_LEFT"
+UNAVAILABLE = "UNAVAILABLE"
+UNKNOWN = "UNKNOWN"
+
+#: Statuses that should wake David up.
+GOOD_STATUSES = (AVAILABLE, FEW_LEFT)
+
+#: How much each status is worth when two readings disagree. Combining picks
+#: the more confident answer, and on a tie between two definite-but-opposite
+#: answers prefers the optimistic one: a false alarm costs a glance at a
+#: phone, a miss costs the ticket. The old watcher chose the other asymmetry
+#: — "defaulting to sold out to avoid false alerts" — which is the wrong
+#: trade for something whose only job is to not miss a drop.
+_CONFIDENCE = {UNKNOWN: 0, UNAVAILABLE: 1, FEW_LEFT: 2, AVAILABLE: 2}
+
+
+def better_status(a: str, b: str) -> str:
+    """Combine two answers about the same market into the one worth acting on."""
+    if _CONFIDENCE.get(a, 0) > _CONFIDENCE.get(b, 0):
+        return a
+    if _CONFIDENCE.get(b, 0) > _CONFIDENCE.get(a, 0):
+        return b
+    return a if a in GOOD_STATUSES else b
+
+
+@dataclass
+class Listing:
+    """One purchasable thing we could see — a tier, or a resale listing."""
+    name: str
+    price: Optional[str] = None
+    kind: str = "primary"        # "primary" | "resale"
+    locked: bool = False         # needs an unlock/presale code
+
+    def describe(self) -> str:
+        bits = [self.name]
+        if self.price:
+            bits.append(f"— {self.price}")
+        if self.locked:
+            bits.append("[needs unlock code]")
+        return " ".join(bits)
+
+
+@dataclass
+class Reading:
+    """One source's answer for one poll.
+
+    `primary` and `resale` are tracked separately and alerted on separately.
+    They are genuinely different products here: primary is the box office
+    releasing returned stock, resale is another punter relisting a ticket. For
+    a sold-out festival two weeks out, resale is the likelier of the two, and
+    collapsing both into one boolean is what made the old watcher unable to
+    say anything useful about either.
+    """
+    source: str
+    primary: str = UNKNOWN
+    resale: str = UNKNOWN
+    listings: List[Listing] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+
+    #: Set when the source could not produce a real answer at all (network
+    #: failure, bot wall, logged out). Distinct from "answered UNAVAILABLE" —
+    #: the watchdog counts these, the alerting logic ignores them.
+    failed: bool = False
+    #: Set when the session needs a human: logged out, or challenged.
+    needs_login: bool = False
+
+    @property
+    def any_good(self) -> bool:
+        return self.primary in GOOD_STATUSES or self.resale in GOOD_STATUSES
+
+    def note(self, msg: str) -> "Reading":
+        self.notes.append(msg)
+        return self
+
+    def summary(self) -> str:
+        return f"primary={self.primary} resale={self.resale} (via {self.source})"

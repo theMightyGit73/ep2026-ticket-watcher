@@ -1,0 +1,25 @@
+# docker compose -f deploy/docker-compose.yml up -d
+#
+# Put secrets in ~/.ep2026-watcher/env on the host:
+#   GMAIL_ADDRESS=...
+#   GMAIL_APP_PASSWORD=...
+#   NTFY_TOPIC=...
+#   TM_DISCOVERY_KEY=...
+
+services:
+  watcher:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ep-watcher
+    restart: unless-stopped
+    env_file:
+      - ~/.ep2026-watcher/env
+    volumes:
+      - watcher-data:/data
+    # Chrome needs more than the default 64MB of shared memory or it will
+    # crash on pages of any complexity.
+    shm_size: 1gb
+
+volumes:
+  watcher-data:

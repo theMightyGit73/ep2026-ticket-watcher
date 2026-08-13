@@ -1,1 +1,10 @@
 *.pem
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime state, logs and the Chrome profile all live in ~/.ep2026-watcher/
+# rather than here. The old watcher committed its state file on every run,
+# which is where ~1000 "Update watcher state" commits came from.
+state.json
