@@ -135,6 +135,11 @@ def cmd_watch(args) -> int:
 
     mode = "PRESS THE BUTTON" if config.PRESS_THE_BUTTON else "read-only"
     _banner(f"Watching every ~{interval}s · mode: {mode}")
+    if config.NIGHT_POLL_SECONDS:
+        print(
+            f"  Overnight ({config.NIGHT_START_HOUR:02d}:00-{config.NIGHT_END_HOUR:02d}:00 "
+            f"local): every ~{config.NIGHT_POLL_SECONDS // 60} min"
+        )
     if discovery.configured():
         print("  Discovery API: configured")
     if inventory_api.configured():
@@ -149,6 +154,7 @@ def cmd_watch(args) -> int:
     session.start()
     backoff = 0
     tried_profile_reset = False
+    was_night = config.is_night()
     try:
         while True:
             if _stop_if_past_date():
@@ -199,8 +205,21 @@ def cmd_watch(args) -> int:
                 session = _browser().BrowserSession()
                 session.start()
 
-            sleep_for = interval * random.uniform(0.75, 1.25)
-            time.sleep(sleep_for)
+            # Recomputed every loop, not once at startup: the watcher runs
+            # for days, so it has to notice night beginning and ending while
+            # already running.
+            wait, night = config.poll_interval_now(interval)
+            if night != was_night:
+                print(
+                    f"[{stamp()}] "
+                    + (
+                        f"overnight — slowing to {wait // 60} min between checks"
+                        if night
+                        else f"morning — back to {wait // 60} min between checks"
+                    )
+                )
+                was_night = night
+            time.sleep(wait * random.uniform(0.75, 1.25))
     except KeyboardInterrupt:
         print(f"\n[{stamp()}] Stopped.")
         return 0

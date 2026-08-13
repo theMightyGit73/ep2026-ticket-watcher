@@ -161,6 +161,43 @@ AVAILABILITY_RENAG_HOURS = 1
 # that it may cost you the rest of the fortnight.
 POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "600"))
 
+# Overnight, poll far less often.
+#
+# The reasoning is about what the watcher is *for*. Its value is a headstart,
+# and a headstart is worth nothing at 3am — you cannot act on a resale
+# listing while asleep, and those listings last about five minutes. So the
+# overnight hours buy almost no coverage while quietly accumulating request
+# volume on whichever connection is in use, unattended, with nobody awake to
+# notice a block.
+#
+# Slowing to 30 minutes cuts the overnight load on that IP by two thirds and
+# leaves it fresh for the morning, which is when a headstart actually counts.
+# Local time, not UTC. Set EP_NIGHT_POLL_SECONDS=0 to disable.
+NIGHT_POLL_SECONDS = int(os.environ.get("EP_NIGHT_POLL_SECONDS", "1800"))
+NIGHT_START_HOUR = int(os.environ.get("EP_NIGHT_START_HOUR", "0"))
+NIGHT_END_HOUR = int(os.environ.get("EP_NIGHT_END_HOUR", "7"))
+
+
+def is_night(now=None) -> bool:
+    """Is it currently the quiet overnight window, in local time?"""
+    from datetime import datetime
+
+    hour = (now or datetime.now()).hour
+    if NIGHT_START_HOUR == NIGHT_END_HOUR:
+        return False
+    if NIGHT_START_HOUR < NIGHT_END_HOUR:
+        return NIGHT_START_HOUR <= hour < NIGHT_END_HOUR
+    # Window wraps past midnight, e.g. 23:00-07:00.
+    return hour >= NIGHT_START_HOUR or hour < NIGHT_END_HOUR
+
+
+def poll_interval_now(daytime_interval=None) -> tuple:
+    """(seconds, is_night) for the next poll."""
+    day = daytime_interval or POLL_INTERVAL_SECONDS
+    if NIGHT_POLL_SECONDS and is_night():
+        return max(NIGHT_POLL_SECONDS, day), True
+    return day, False
+
 # How long to sleep after an HTTP 403, doubling on each consecutive block up
 # to the cap, and reset on the first good read.
 BLOCKED_BACKOFF_SECONDS = int(os.environ.get("EP_BACKOFF_SECONDS", "1800"))
