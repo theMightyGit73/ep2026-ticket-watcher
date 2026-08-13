@@ -37,7 +37,10 @@ Every claim here was measured against the live page on 2026-08-13.
 | Playwright **headless** Chrome | `403`, every time |
 | Playwright **headed** Chrome | `401` on first load → **reload → `200`, real page** |
 
-So the working recipe is a **real, visible Chrome, from a home IP**:
+So the working recipe is a **real, visible Chrome**. It was first proven from
+a residential connection — but do not run it from yours. See the rate-limiting
+section: polling hard from home got that IP flagged for ordinary browsing too,
+and your home IP is the one you need in order to actually buy.
 
 1. Load the page — expect the first response to fail. Its content lives inside
    `<noscript>`, so a walled page looks *blank* rather than obviously blocked.
@@ -130,7 +133,7 @@ Environment variables, all optional:
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `WANTED_QUANTITIES` | `1` | Quantities to search per poll |
-| `EP_POLL_SECONDS` | `180` | Seconds between polls, jittered ±25% |
+| `EP_POLL_SECONDS` | `600` | Seconds between polls, jittered ±25% |
 | `EP_HEARTBEAT_HOURS` | `1` | How often to send the "still nothing" report |
 | `EP_OFFSCREEN` | `1` | Park the Chrome window off-desktop |
 | `EP_HEADLESS` | `0` | **Leave this alone.** Headless is always blocked |
@@ -254,22 +257,41 @@ most heavily, and GitHub Actions runners are the case we already know fails.
 laptop keeps the one variable proven to work (the residential IP) and removes
 the one you object to (the MacBook being on).
 
-### Cloud providers: they are all the same bet
+### Cloud providers: two hard requirements
 
-AWS, Oracle, Hetzner, DigitalOcean, Fly.io — for this problem the choice barely
-matters, because **the risk is the datacentre IP, and they all have one.** AWS
-is not safer than a €4 Hetzner box; if anything its ranges are more heavily
-used by scrapers and so more likely to be pre-judged. Pick on price:
+Providers differ less than you would think — the risk is the datacentre IP and
+they all have one. But two requirements rule most cheap tiers out:
 
-| Provider | Cost | Note |
+**x86-64, not ARM.** Google ships Chrome for Linux on `amd64` only. On ARM you
+get Chromium, which is a different fingerprint from the browser this was
+verified against, and Chromium-flavoured browsers are what this site rejects.
+
+**At least 2 GB RAM.** Chrome will thrash or get OOM-killed on 1 GB.
+
+Together those disqualify the free tiers. Oracle Always Free is ARM (Ampere);
+its x86 alternative is 1 GB. AWS's always-free x86 is 1 GB too.
+
+| Provider | Cost | Verdict |
 | --- | --- | --- |
-| Oracle Cloud Always Free | **free** | 4 ARM cores / 24 GB, free indefinitely |
-| Hetzner CX22 | ~€4/mo | Cheapest reliable x86 |
-| AWS Lightsail | ~$5/mo | Simpler than EC2; EC2 free tier is 12-month only |
-| Fly.io / DigitalOcean | ~$5/mo | Fine, no advantage here |
+| **Hetzner CX22** | ~€4/mo | **Best fit** — x86, 4 GB, EU, hourly billing |
+| DigitalOcean 2 GB | ~$12/mo | Fine, three times the price |
+| AWS Lightsail 2 GB | ~$12/mo | Fine, no advantage |
+| Oracle Always Free | free | ARM → Chromium → expect blocking |
+| Any 1 GB tier | ~$5/mo | Chrome will not run reliably |
 
-Oracle's always-free tier is the one worth trying first: it costs nothing, so
-the datacentre-IP gamble is free to take.
+Hetzner bills by the hour, so **testing whether a datacentre IP works at all
+costs about one cent** — spin one up, run the check, destroy it if it fails.
+That test is the first thing to do, before committing to anything.
+
+### Setting one up
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/theMightyGit73/ep2026-ticket-watcher/main/deploy/bootstrap.sh | bash
+```
+
+Installs Docker, clones, builds, and runs a single `check` — deliberately
+stopping before it starts the service, because that check answers the only
+question that matters: does this host get the real page, or a 403?
 
 **Whichever you pick, it is a 60-second experiment**, and the code supports it
 today:
@@ -335,13 +357,13 @@ identical command that worked fifteen minutes earlier also got 403.
 
 What the watcher does about it:
 
-* **403 is not 401.** A 401 is the ordinary challenge and a reload fixes it.
+- **403 is not 401.** A 401 is the ordinary challenge and a reload fixes it.
   A 403 means blocked, where retrying has never once helped and merely triples
   the request volume at the worst moment. The watcher bails immediately on 403.
-* **It backs off exponentially** — 30 minutes, doubling to a 3-hour cap —
+- **It backs off exponentially** — 30 minutes, doubling to a 3-hour cap —
   and resets the moment a real reading comes back. Being blocked and carrying
   on at the normal cadence is how a short rate-limit becomes a long one.
-* **The default cadence is 10 minutes.** Over a fortnight that is ~2,000
+- **The default cadence is 10 minutes.** Over a fortnight that is ~2,000
   searches rather than the ~6,700 a 3-minute cadence would send.
 
 The tension is real and worth stating plainly: a resale listing observed

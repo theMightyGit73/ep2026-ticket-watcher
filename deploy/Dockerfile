@@ -21,12 +21,33 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Google Chrome proper, not Chromium: Playwright's channel="chrome" uses the
 # same build a human would, which is one less thing that looks unusual.
+#
+# ARCHITECTURE MATTERS HERE. Google ships Chrome for Linux on amd64 only —
+# there is no arm64 build. So an ARM host (Oracle's Ampere free tier, AWS
+# Graviton, an Apple-silicon `docker build`) can only run Chromium, which is
+# a different fingerprint from the browser this was verified against, and
+# Chromium-flavoured browsers are exactly what this site rejects. The build
+# still works on ARM so you can experiment, but it warns, and you should
+# expect it to be blocked. Use an x86-64 host.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget gnupg ca-certificates xvfb fonts-liberation \
-    && wget -q -O /tmp/chrome.deb \
-        https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get install -y --no-install-recommends /tmp/chrome.deb \
-    && rm -rf /tmp/chrome.deb /var/lib/apt/lists/*
+    && ARCH="$(dpkg --print-architecture)" \
+    && if [ "$ARCH" = "amd64" ]; then \
+           wget -q -O /tmp/chrome.deb \
+               https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+        && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+        && rm -f /tmp/chrome.deb \
+        && echo "chrome" > /etc/ep-browser-channel; \
+       else \
+           echo "=======================================================" >&2; \
+           echo " WARNING: $ARCH is not amd64. Google Chrome is amd64-" >&2; \
+           echo " only, so this image falls back to Chromium, which"    >&2; \
+           echo " ticketmaster.ie is expected to block. Use x86-64."     >&2; \
+           echo "=======================================================" >&2; \
+           apt-get install -y --no-install-recommends chromium \
+        && echo "chromium" > /etc/ep-browser-channel; \
+       fi \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
@@ -43,8 +64,8 @@ ENV EP_PROFILE_DIR=/data/chrome-profile \
     EP_OFFSCREEN=0
 VOLUME /data
 
-# xvfb-run gives Chrome a display to draw into. Without it a headed Chrome
-# cannot start at all on a machine with no window server.
-ENTRYPOINT ["xvfb-run", "-a", "--server-args=-screen 0 1440x900x24", \
-            "python", "-m", "ep_watcher"]
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["watch"]
