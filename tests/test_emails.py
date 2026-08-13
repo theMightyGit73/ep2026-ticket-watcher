@@ -156,7 +156,13 @@ print("\nWatchdog")
 sent.clear()
 notify.watchdog("Could not get a usable reading.", failures=4)
 check("one email sent", len(sent), 1)
-check_true("body explains how to fix the session", "login" in last_body())
+body = last_body()
+# The recovery commands must be IN the email. An alert that says something is
+# broken and then makes you go and look up how to fix it is half an alert,
+# and this one arrives when the watcher is already not working.
+check_true("body says how to diagnose", "doctor" in body)
+check_true("body says how to restart", "restart.sh" in body)
+check_true("body gives runnable paths", str(config.REPO_DIR) in body)
 
 print("\nDelivery failures must never crash a run")
 
