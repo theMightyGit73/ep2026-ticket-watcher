@@ -140,23 +140,39 @@ def cmd_watch(args) -> int:
     session = _browser().BrowserSession()
     session.start()
     backoff = 0
+    tried_profile_reset = False
     try:
         while True:
             try:
                 reading = engine.run_once(session)
 
                 # Being blocked and carrying on at the normal cadence is how a
-                # short rate-limit becomes a long one. Back off exponentially
-                # and reset the moment a real reading comes back.
+                # short rate-limit becomes a long one. But before assuming the
+                # network is at fault, try a clean browser identity: the block
+                # is carried in the profile's bot-check cookies, and a fresh
+                # profile has been observed clearing it instantly on a network
+                # where the old profile was still refused. Only if that fails
+                # is it really the IP, and only then is a long sleep the
+                # right answer.
                 if reading.blocked:
+                    if not tried_profile_reset:
+                        print(f"[{stamp()}] blocked — trying a clean browser profile first")
+                        session.reset_profile()
+                        tried_profile_reset = True
+                        time.sleep(30)
+                        continue
                     backoff = min(backoff * 2 or config.BLOCKED_BACKOFF_SECONDS,
                                   config.BLOCKED_BACKOFF_MAX_SECONDS)
-                    print(f"[{stamp()}] rate-limited — sleeping {backoff // 60} min before retrying")
+                    print(
+                        f"[{stamp()}] still blocked with a fresh profile — this is the "
+                        f"network. Sleeping {backoff // 60} min."
+                    )
                     time.sleep(backoff * random.uniform(0.85, 1.15))
                     continue
-                if backoff:
+                if backoff or tried_profile_reset:
                     print(f"[{stamp()}] recovered from rate limiting")
                     backoff = 0
+                tried_profile_reset = False
                 # A live basket has a countdown on it; stop polling and leave
                 # the window alone so David can actually finish the checkout.
                 if config.PRESS_THE_BUTTON and any("RESERVE ACCEPTED" in n for n in reading.notes):

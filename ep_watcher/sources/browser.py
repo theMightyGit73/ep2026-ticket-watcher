@@ -123,6 +123,39 @@ class BrowserSession:
             raise RuntimeError("BrowserSession used before start()")
         return self._page
 
+    def reset_profile(self) -> bool:
+        """Throw away the browser profile and start again with a clean one.
+
+        Measured on 2026-08-13, and it changes what "blocked" means. After the
+        watcher was rate-limited, moving to a completely different network did
+        NOT clear it: the first request drew the ordinary 401 challenge, and
+        the reload was still 403. A fresh profile on that same network worked
+        immediately, first try.
+
+        So the block lives in the profile's cookies — the bot-check tokens
+        mark this *client*, and carrying them to a new IP just re-announces
+        who you are. Changing address without changing identity is pointless.
+
+        Safe to do: the watcher browses logged out, so the profile holds
+        nothing but consent and bot-check state, both of which regenerate on
+        the next page load.
+        """
+        import shutil
+
+        self.close()
+        target = config.PROFILE_DIR
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            print(f"[{stamp()}] browser profile reset — new identity, cookies cleared")
+            ok = True
+        except OSError as exc:
+            print(f"[{stamp()}] could not reset profile {target}: {exc}")
+            ok = False
+
+        self.start()
+        return ok
+
     def visible_text(self) -> str:
         try:
             return self.page.inner_text("body")
