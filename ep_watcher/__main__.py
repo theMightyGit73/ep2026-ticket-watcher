@@ -8,8 +8,21 @@ import sys
 import time
 
 from . import config, engine, notify, state as state_mod
-from .sources import browser, discovery, inventory_api
+from .sources import discovery, inventory_api
 from .state import stamp
+
+
+def _browser():
+    """Import the browser source only when a command actually needs it.
+
+    Playwright is absent in API-only deployments (EP_USE_BROWSER=0), so a
+    module-scope import would stop `run`, `status` and `selftest` working
+    anywhere the browser cannot run — which is exactly where those commands
+    are most useful.
+    """
+    from .sources import browser
+
+    return browser
 
 
 def _banner(title: str) -> None:
@@ -30,7 +43,7 @@ def cmd_login(_args) -> int:
     print("  3. Come back here and press Enter.\n")
 
     config.OFFSCREEN = False  # he needs to actually see and use this window
-    with browser.BrowserSession(headless=False) as session:
+    with _browser().BrowserSession(headless=False) as session:
         try:
             session.page.goto(config.EVENT_URL, wait_until="domcontentloaded")
         except Exception as exc:
@@ -124,7 +137,7 @@ def cmd_watch(args) -> int:
         print("  Browser DISABLED — API sources only\n")
         return _watch_apis_only(interval)
 
-    session = browser.BrowserSession()
+    session = _browser().BrowserSession()
     session.start()
     backoff = 0
     try:
@@ -157,7 +170,7 @@ def cmd_watch(args) -> int:
                 print(f"[{stamp()}] poll raised {type(exc).__name__}: {exc} — restarting browser")
                 session.close()
                 time.sleep(10)
-                session = browser.BrowserSession()
+                session = _browser().BrowserSession()
                 session.start()
 
             sleep_for = interval * random.uniform(0.75, 1.25)
@@ -231,7 +244,7 @@ def cmd_calibrate(_args) -> int:
     """
     _banner("Dumping page diagnostics (this performs one search)")
     config.OFFSCREEN = False
-    with browser.BrowserSession(headless=False) as session:
+    with _browser().BrowserSession(headless=False) as session:
         base = session.diagnose("calibrate")
     print(f"  Screenshot : {base.with_suffix('.png')}")
     print(f"  Visible text: {base.with_suffix('.txt')}   <- check the anchors against this")

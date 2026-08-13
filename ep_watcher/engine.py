@@ -4,8 +4,12 @@ from typing import List, Optional
 
 from . import config, notify, state as state_mod
 from .model import Reading, better_status
-from .sources import browser, discovery, inventory_api
+from .sources import discovery, inventory_api
 from .state import stamp
+
+# `browser` is imported lazily, inside poll(), because it pulls in Playwright.
+# In API-only mode (EP_USE_BROWSER=0) Playwright is not installed at all, and
+# an import at module scope would kill the process before any source ran.
 
 
 def merge(readings: List[Reading]) -> Reading:
@@ -31,7 +35,7 @@ def merge(readings: List[Reading]) -> Reading:
     return merged
 
 
-def poll(session: Optional[browser.BrowserSession] = None) -> Reading:
+def poll(session=None) -> Reading:
     """Ask every configured source once and merge the answers.
 
     The API sources run first and cost one HTTP call each; the browser is the
@@ -47,6 +51,8 @@ def poll(session: Optional[browser.BrowserSession] = None) -> Reading:
         readings.append(inventory_api.check())
 
     if config.USE_BROWSER:
+        from .sources import browser  # lazy: see the note at the top of the file
+
         readings.append(session.check() if session else browser.check())
     elif not readings:
         stub = Reading(source="none")
@@ -125,7 +131,7 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     state_mod.reset_heartbeat(st)
 
 
-def run_once(session: Optional[browser.BrowserSession] = None) -> Reading:
+def run_once(session=None) -> Reading:
     st = state_mod.load()
     try:
         reading = poll(session)
