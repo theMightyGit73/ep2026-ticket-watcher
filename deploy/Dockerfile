@@ -29,8 +29,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Chromium-flavoured browsers are exactly what this site rejects. The build
 # still works on ARM so you can experiment, but it warns, and you should
 # expect it to be blocked. Use an x86-64 host.
+# xauth is not optional despite not looking like a dependency: xvfb-run shells
+# out to it to create the X authority file, and without it fails with
+# "xauth command not found" before Chrome is ever launched. It is not pulled
+# in by the xvfb package itself.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget gnupg ca-certificates xvfb fonts-liberation \
+        wget gnupg ca-certificates xvfb xauth fonts-liberation \
     && ARCH="$(dpkg --print-architecture)" \
     && if [ "$ARCH" = "amd64" ]; then \
            wget -q -O /tmp/chrome.deb \
