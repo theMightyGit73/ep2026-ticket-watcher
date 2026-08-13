@@ -13,8 +13,11 @@ services:
       dockerfile: deploy/Dockerfile
     image: ep-watcher
     restart: unless-stopped
+    # ${HOME} rather than ~ — Compose substitutes environment variables but
+    # does NOT expand a tilde, so "~/..." is read as a literal directory name
+    # called "~" and the file is silently not found.
     env_file:
-      - ~/.ep2026-watcher/env
+      - ${HOME}/.ep2026-watcher/env
     volumes:
       - watcher-data:/data
     # Chrome needs more than the default 64MB of shared memory or it will

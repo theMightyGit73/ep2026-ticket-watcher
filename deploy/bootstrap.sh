@@ -29,8 +29,23 @@ if [ "$ARCH" != "x86_64" ]; then
 
   Continue anyway? It will build and run, and probably get blocked.
 EOF
-    read -rp "  Type 'yes' to continue: " reply
+    # Read from the terminal, not stdin: this script is usually run as
+    # `curl ... | bash`, where stdin is the pipe carrying the script itself.
+    # A plain `read` there consumes the script's own remaining lines.
+    if [ -r /dev/tty ]; then
+        read -rp "  Type 'yes' to continue: " reply < /dev/tty
+    else
+        reply="no"
+    fi
     [ "$reply" = "yes" ] || { echo "  Stopping. Use an x86-64 host."; exit 1; }
+fi
+
+# ── Base packages ────────────────────────────────────────────────────────────
+# Minimal cloud images routinely ship without git.
+if ! command -v git >/dev/null 2>&1; then
+    say "Installing git"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq git ca-certificates curl
 fi
 
 # ── Docker ───────────────────────────────────────────────────────────────────
