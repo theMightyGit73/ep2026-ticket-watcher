@@ -165,6 +165,23 @@ BLOCKED_BACKOFF_MAX_SECONDS = int(os.environ.get("EP_BACKOFF_MAX_SECONDS", "1080
 # turned up, that email already told the story.
 HEARTBEAT_HOURS = float(os.environ.get("EP_HEARTBEAT_HOURS", "1"))
 
+# ── Alternating between home Wi-Fi and the phone hotspot ─────────────────────
+# The watcher asks David to switch the MacBook's network after this long, or
+# this many searches, whichever comes first. Splitting the volume across two
+# connections keeps either from accumulating enough to be rate-limited, and
+# leaves one healthy connection to buy with if the other does get flagged.
+#
+# At the default 10-minute cadence, 6 hours is ~36 searches — comfortably
+# below the ~30-in-an-afternoon that got the home IP flagged on 2026-08-13,
+# with the search cap as a backstop if the cadence is ever lowered.
+NETWORK_ROTATE_HOURS = float(os.environ.get("EP_ROTATE_HOURS", "6"))
+NETWORK_ROTATE_SEARCHES = int(os.environ.get("EP_ROTATE_SEARCHES", "60"))
+
+# Optional. If set, this IP is labelled "home Wi-Fi" in the emails. Left
+# unset, the first connection the watcher ever sees is assumed to be home,
+# which is right if you start it at home.
+HOME_NETWORK_IP = os.environ.get("EP_HOME_IP")
+
 # Hard floor on the interval, regardless of what EP_POLL_SECONDS says.
 #
 # There is a real tension here and it is worth stating rather than hiding. A

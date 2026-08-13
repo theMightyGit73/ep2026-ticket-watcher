@@ -180,6 +180,32 @@ stopped working. The failure wasn't getting blocked — it was that nothing
 said so, because a run of quiet failures looks exactly like a quiet
 Ticketmaster.
 
+### Alternating home Wi-Fi and the phone hotspot
+
+The status emails also carry a **Network** block, and every ~6 hours (or 60
+searches, whichever comes first) it asks you to switch the MacBook between
+your home Wi-Fi and your phone's Personal Hotspot. When it does, that ask
+goes in the **subject line** — an instruction buried three paragraphs into an
+hourly "no luck yet" email is one nobody reads.
+
+The point is to halve the volume either connection sees, and to keep a second
+working connection in reserve: if one gets flagged, you can still buy on the
+other.
+
+**Switching the network is the only thing you have to do.** The watcher
+detects its own public IP, so it notices the change by itself, resets its
+counters, attributes any blocks to the connection they happened on, and tells
+you when to switch back. There is nothing to confirm and no setting to change.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `EP_ROTATE_HOURS` | `6` | Ask to switch after this long on one connection |
+| `EP_ROTATE_SEARCHES` | `60` | ...or after this many searches, whichever first |
+| `EP_HOME_IP` | — | Optional. Labels this IP "home Wi-Fi" instead of guessing |
+
+Without `EP_HOME_IP`, the first connection the watcher ever sees is assumed to
+be home — correct if you start it at home.
+
 The hourly "no luck yet" email is a liveness proof, not a status update. A
 silent watcher and a dead watcher look identical from the inbox — that
 ambiguity is exactly what the previous version hid inside for 44 days. So the

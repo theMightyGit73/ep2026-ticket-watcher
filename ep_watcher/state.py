@@ -38,6 +38,12 @@ def _defaults():
         # than leaving David to infer it from a run of quiet failures.
         "block_history": [],              # ISO8601 timestamps, pruned to 7 days
         "checks_total": 0,
+        # Alternating home Wi-Fi / phone hotspot.
+        "current_ip": None,
+        "current_ip_since": None,         # ISO8601
+        "searches_on_current_ip": 0,
+        "networks": {},                   # ip -> {first_seen, searches, blocks}
+        "rotation_asked_at": None,        # ISO8601, so we don't nag every hour
     }
 
 
@@ -205,6 +211,136 @@ def hours_since_heartbeat(state: dict):
 # how often it is being blocked and says so plainly, rather than leaving a
 # run of quiet failures to be interpreted.
 
+# ── Alternating networks ─────────────────────────────────────────────────────
+
+def note_network(state: dict, ip) -> bool:
+    """Record which connection this poll went out through.
+
+    Returns True if the connection changed since last time — which is how the
+    watcher notices David has switched networks without him having to tell it.
+    A switch resets the counters and the nag, so the advice in the next email
+    reflects the new connection rather than the old one.
+    """
+    if not ip:
+        return False
+
+    networks = dict(state.get("networks", {}))
+    entry = networks.get(ip) or {"first_seen": utc_now().isoformat(), "searches": 0, "blocks": 0}
+
+    changed = state.get("current_ip") not in (None, ip)
+    if state.get("current_ip") != ip:
+        state["current_ip"] = ip
+        state["current_ip_since"] = utc_now().isoformat()
+        state["searches_on_current_ip"] = 0
+        state["rotation_asked_at"] = None
+
+    state["searches_on_current_ip"] = state.get("searches_on_current_ip", 0) + 1
+    entry["searches"] = entry.get("searches", 0) + 1
+    networks[ip] = entry
+    state["networks"] = networks
+    return changed
+
+
+def network_label(state: dict, ip=None) -> str:
+    """Human name for a connection: "home Wi-Fi" or "phone hotspot".
+
+    There is no reliable way to tell a tethered phone from a home router by IP
+    alone, so this uses the simple rule that fits how it is actually used: the
+    first connection the watcher ever saw is home (set EP_HOME_IP to override),
+    and anything else is the hotspot.
+    """
+    ip = ip or state.get("current_ip")
+    if not ip:
+        return "an unknown connection"
+    if config.HOME_NETWORK_IP:
+        return "home Wi-Fi" if ip == config.HOME_NETWORK_IP else "phone hotspot"
+
+    networks = state.get("networks", {})
+    if not networks:
+        return "this connection"
+    first = min(networks.items(), key=lambda kv: kv[1].get("first_seen", ""))[0]
+    return "home Wi-Fi" if ip == first else "phone hotspot"
+
+
+def other_network_label(state: dict) -> str:
+    return "phone hotspot" if network_label(state) == "home Wi-Fi" else "home Wi-Fi"
+
+
+def should_rotate_network(state: dict) -> tuple:
+    """Is it time to switch the MacBook to the other connection?
+
+    Returns (bool, reason). Triggers on either elapsed time or number of
+    searches, whichever comes first — the search count is what actually
+    correlates with getting rate-limited, but the clock catches the case
+    where the cadence has been slowed right down.
+    """
+    if not state.get("current_ip"):
+        return False, ""
+
+    hours = _hours_since(state.get("current_ip_since"))
+    searches = state.get("searches_on_current_ip", 0)
+
+    reasons = []
+    if hours is not None and hours >= config.NETWORK_ROTATE_HOURS:
+        reasons.append(f"{hours:.1f}h on this connection")
+    if searches >= config.NETWORK_ROTATE_SEARCHES:
+        reasons.append(f"{searches} searches from it")
+    if not reasons:
+        return False, ""
+
+    # Already asked recently and he hasn't switched — don't repeat it every
+    # hour, that just trains him to ignore the section.
+    asked = _hours_since(state.get("rotation_asked_at"))
+    if asked is not None and asked < config.NETWORK_ROTATE_HOURS:
+        return False, ""
+
+    return True, " and ".join(reasons)
+
+
+def mark_rotation_asked(state: dict) -> None:
+    state["rotation_asked_at"] = utc_now().isoformat()
+
+
+def network_status(state: dict) -> tuple:
+    """Return (should_switch, headline, instruction) for the email."""
+    ip = state.get("current_ip")
+    if not ip:
+        return False, "Could not determine which connection is in use.", ""
+
+    label = network_label(state)
+    hours = _hours_since(state.get("current_ip_since")) or 0.0
+    searches = state.get("searches_on_current_ip", 0)
+    headline = f"On {label} ({ip}) — {searches} searches over {hours:.1f}h."
+
+    switch, reason = should_rotate_network(state)
+    if not switch:
+        return False, headline, "No need to change anything."
+
+    other = other_network_label(state)
+    if other == "phone hotspot":
+        how = (
+            "  On the MacBook: click the Wi-Fi icon in the menu bar and pick your\n"
+            "  iPhone's Personal Hotspot. (On the phone: Settings > Personal Hotspot.)"
+        )
+    else:
+        how = (
+            "  On the MacBook: click the Wi-Fi icon in the menu bar and pick your\n"
+            "  home network again. You can turn the phone's hotspot back off."
+        )
+
+    return (
+        True,
+        headline,
+        f"TIME TO SWITCH NETWORKS — {reason}.\n\n"
+        f"  Move the MacBook from {label} to your {other}.\n\n"
+        f"{how}\n\n"
+        "  Nothing else to do. The watcher notices the new connection by itself,\n"
+        "  resets its counters, and will tell you when to switch back.\n"
+        "  Splitting the load across both keeps either from being rate-limited,\n"
+        "  and leaves you a working connection to buy on if one does get flagged.",
+    )
+
+
 def record_block(state: dict) -> None:
     """Note an HTTP 403 and prune history older than a week."""
     history = list(state.get("block_history", []))
@@ -213,6 +349,17 @@ def record_block(state: dict) -> None:
     state["block_history"] = [
         ts for ts in history if (_parse(ts) or utc_now()) >= cutoff
     ]
+
+    # Attribute the block to the connection it happened on, so the emails can
+    # say "your home Wi-Fi is the one in trouble" rather than leaving it
+    # ambiguous which of the two got flagged.
+    ip = state.get("current_ip")
+    if ip:
+        networks = dict(state.get("networks", {}))
+        entry = networks.get(ip) or {"first_seen": utc_now().isoformat(), "searches": 0, "blocks": 0}
+        entry["blocks"] = entry.get("blocks", 0) + 1
+        networks[ip] = entry
+        state["networks"] = networks
 
 
 def recent_blocks(state: dict, hours: float = 24.0) -> int:

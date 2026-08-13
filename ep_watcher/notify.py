@@ -145,7 +145,18 @@ def _health_section(health) -> str:
     )
 
 
-def heartbeat(checks: int, failures: int, hours: float, reading: Reading, health=None) -> None:
+def _network_section(net) -> str:
+    """Render the "which connection, and should you switch" block."""
+    should_switch, headline, instruction = net
+    marker = "SWITCH NOW" if should_switch else "OK"
+    body = f"Network [{marker}]\n  {headline}"
+    if instruction:
+        body += f"\n\n{instruction if should_switch else '  ' + instruction}"
+    return body
+
+
+def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
+              health=None, net=None) -> None:
     """The hourly "still nothing, still trying" report.
 
     Deliberately carries the numbers rather than just the sentiment. "No
@@ -165,8 +176,18 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading, health
         )
 
     health_block = f"\n{_health_section(health)}\n" if health else ""
+    net_block = f"\n{_network_section(net)}\n" if net else ""
+    if net_block:
+        health_block += net_block
 
-    subject = f"No luck yet — still watching {config.EVENT_NAME}"
+    # Put the ask in the subject line: a "switch networks" instruction buried
+    # three paragraphs into an hourly "no luck yet" email is one nobody reads.
+    switch_now = bool(net and net[0])
+    subject = (
+        "Switch the MacBook to your other network — EP2026 watcher"
+        if switch_now
+        else f"No luck yet — still watching {config.EVENT_NAME}"
+    )
     body = (
         f"Hi David,\n\n"
         f"No ticket has appeared in the last hour. Still trying.\n\n"
@@ -267,6 +288,16 @@ def test() -> None:
         reading=Reading(source="test", primary="UNAVAILABLE", resale="UNAVAILABLE"),
         health=("ok", "No blocks in the last 24 hours — this connection looks healthy.",
                 "Nothing to do."),
+        net=(
+            True,
+            "On home Wi-Fi (86.44.208.194) — 61 searches over 6.2h.",
+            "TIME TO SWITCH NETWORKS — 6.2h on this connection and 61 searches from it.\n\n"
+            "  Move the MacBook from home Wi-Fi to your phone hotspot.\n\n"
+            "  On the MacBook: click the Wi-Fi icon in the menu bar and pick your\n"
+            "  iPhone's Personal Hotspot. (On the phone: Settings > Personal Hotspot.)\n\n"
+            "  Nothing else to do. The watcher notices the new connection by itself,\n"
+            "  resets its counters, and will tell you when to switch back.",
+        ),
     )
 
     print(f"[{stamp()}] 4/4 watchdog")

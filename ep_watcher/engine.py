@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 
-from . import config, notify, state as state_mod
+from . import config, network, notify, state as state_mod
 from .model import Reading, better_status
 from .sources import discovery, inventory_api
 from .state import stamp
@@ -72,6 +72,15 @@ def handle(reading: Reading, st: dict) -> None:
     state_mod.start_heartbeat_clock(st)
     state_mod.note_check(st, reading.failed)
     st["checks_total"] = st.get("checks_total", 0) + 1
+
+    # Which connection did this go out through? Detected rather than declared,
+    # so switching the MacBook's network is all David has to do — the watcher
+    # notices by itself and resets its counters.
+    if config.USE_BROWSER:
+        switched = state_mod.note_network(st, network.public_ip())
+        if switched:
+            print(f"[{stamp()}] network changed — now on {state_mod.network_label(st)}")
+
     if reading.blocked:
         state_mod.record_block(st)
 
@@ -138,7 +147,16 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     checks = st["checks_since_heartbeat"]
     failures = st["failures_since_heartbeat"]
     print(f"[{stamp()}] hourly report: {checks} checks, {failures} failed")
-    notify.heartbeat(checks, failures, hours, reading, health=state_mod.connection_health(st))
+    net = state_mod.network_status(st)
+    notify.heartbeat(
+        checks, failures, hours, reading,
+        health=state_mod.connection_health(st),
+        net=net,
+    )
+    if net[0]:
+        # Asked for a switch — don't ask again until the next window, whether
+        # or not he acts on it. Repeating it hourly trains him to skim past it.
+        state_mod.mark_rotation_asked(st)
     state_mod.reset_heartbeat(st)
 
 
