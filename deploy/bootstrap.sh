@@ -106,7 +106,9 @@ cat <<'EOF'
 EOF
 
 set +e
-$DOCKER run --rm --shm-size=1g --env-file "$ENV_FILE" \
+# --init is not optional: without it xvfb-run runs as PID 1 and hangs on exit
+# instead of terminating. See the note in docker-compose.yml.
+$DOCKER run --rm --init --shm-size=1g --env-file "$ENV_FILE" \
     -v ep-watcher-data:/data ep-watcher check
 RESULT=$?
 set -e

@@ -13,6 +13,13 @@ services:
       dockerfile: deploy/Dockerfile
     image: ep-watcher
     restart: unless-stopped
+
+    # Run a real init as PID 1. Without this, xvfb-run itself becomes PID 1,
+    # and PID 1 ignores the default signal dispositions its cleanup depends
+    # on — so when the Python process finishes, xvfb-run hangs forever
+    # holding Xvfb open instead of exiting. The container looks busy while
+    # doing nothing at all, which is a genuinely confusing way to fail.
+    init: true
     # ${HOME} rather than ~ — Compose substitutes environment variables but
     # does NOT expand a tilde, so "~/..." is read as a literal directory name
     # called "~" and the file is silently not found.
