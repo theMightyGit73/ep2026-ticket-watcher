@@ -65,6 +65,14 @@ INVENTORY_API_URL = "https://app.ticketmaster.com/inventory-status/v1/availabili
 DISCOVERY_KEY = os.environ.get("TM_DISCOVERY_KEY") or TM_API_KEY
 DISCOVERY_ROOT = "https://app.ticketmaster.com/discovery/v2"
 
+# How the Discovery source recognises the wanted ticket among the indexed
+# Electric Picnic events. Name matching, not id: the id in the ticketmaster.ie
+# URL is a host id that Discovery does not recognise (a direct lookup 404s).
+DISCOVERY_MATCH_WORDS = ("electric picnic", "weekend")
+# The campervan passes stay indexed permanently and are not the wanted ticket.
+# Without excluding them, the source would report "available" forever.
+DISCOVERY_EXCLUDE_WORDS = ("campervan", "caravan")
+
 # Press "Find Tickets" rather than only reading the page. On by default,
 # because it turns out there is no useful read-only mode: verified against the
 # live page, a fresh load ends at the search button and renders neither live

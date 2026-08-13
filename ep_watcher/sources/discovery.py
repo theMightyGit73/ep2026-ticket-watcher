@@ -32,18 +32,20 @@ observed on this event — is below the resolution of every one of them. This
 source is a cheap, always-on safety net, not a replacement for the browser.
 """
 
+import time
 from typing import List, Optional
 
 import requests
 
 from .. import config
-from ..model import AVAILABLE, UNAVAILABLE, UNKNOWN, Listing, Reading
+from ..model import AVAILABLE, UNAVAILABLE, Listing, Reading
 
 SOURCE = "discovery-api"
 
-#: Event statuses that mean tickets are notionally on sale.
-_ONSALE = {"onsale"}
-_OFFSALE = {"offsale", "cancelled", "postponed", "rescheduled"}
+#: Discovery allows 5 requests per second and enforces it with a spike-arrest
+#: that returns HTTP 429. Two calls back to back tripped it during testing,
+#: so they are spaced out.
+_RATE_LIMIT_PAUSE = 1.0
 
 
 def configured() -> bool:
@@ -62,6 +64,24 @@ def _get(path: str, **params) -> Optional[dict]:
 
 
 def check() -> Reading:
+    """Watch for the event *reappearing* in the Discovery index.
+
+    Measured on 2026-08-13: the Weekend Camping event is not in Discovery at
+    all. Five independent angles agree — keyword search, venue search, every
+    IE event across the festival weekend, the Electric Picnic attraction
+    record (which reports exactly two upcoming events), and the suggest
+    endpoint. Only the two campervan passes are listed.
+
+    The natural reading is that Discovery indexes purchasable inventory, and
+    a sold-out event drops out of it. That turns absence into the signal:
+    polling this event's status is impossible, but noticing it *come back*
+    is easy, and its return would mean stock went live.
+
+    What this cannot do is see a single Verified Resale listing appearing for
+    five minutes. It is a coarse net for a genuine re-release, running free
+    and with no risk to David's IP or account — not a substitute for the
+    browser.
+    """
     reading = Reading(source=SOURCE)
 
     if not configured():
@@ -69,7 +89,9 @@ def check() -> Reading:
         return reading.note("TM_DISCOVERY_KEY not set — source skipped")
 
     try:
-        event = _get(f"/events/{config.TM_EVENT_ID}.json")
+        events = search_events()
+        time.sleep(_RATE_LIMIT_PAUSE)
+        resale = find_resale_events()
     except PermissionError as exc:
         reading.failed = True
         return reading.note(str(exc))
@@ -77,71 +99,57 @@ def check() -> Reading:
         reading.failed = True
         return reading.note(f"request failed: {exc}")
 
-    if event is None:
+    if not events:
         reading.failed = True
-        return reading.note(
-            f"no Discovery event with id {config.TM_EVENT_ID} — run `resolve-id` "
-            "to find the id Discovery knows this event by"
+        return reading.note("Discovery returned no Electric Picnic events at all — unexpected")
+
+    named = [e for e in events if _is_wanted_event(e)]
+    reading.note(f"{len(events)} Electric Picnic event(s) indexed; {len(named)} match the wanted ticket")
+
+    if named:
+        reading.primary = AVAILABLE
+        for e in named:
+            reading.listings.append(
+                Listing(name=f"{e['name']} [{e.get('status')}]", price=e.get("price"), kind="primary")
+            )
+        reading.note(
+            "THE EVENT IS BACK IN THE DISCOVERY INDEX — it was absent while sold out, "
+            "so this means inventory went live"
+        )
+    else:
+        reading.primary = UNAVAILABLE
+        reading.note(
+            "wanted event still absent from the index (expected while sold out); "
+            f"indexed: {', '.join(e['name'] for e in events[:4])}"
         )
 
-    _read_status(event, reading)
-    _read_price_ranges(event, reading)
-    _read_resale(event, reading)
+    if resale:
+        reading.resale = AVAILABLE
+        for e in resale:
+            reading.listings.append(
+                Listing(name=f"TMR resale: {e['name']}", price=e.get("price"), kind="resale")
+            )
+        reading.note(f"{len(resale)} tmr-sourced event(s)")
+    else:
+        reading.resale = UNAVAILABLE
+        reading.note("no tmr-sourced events")
+
     return reading
 
 
-def _read_status(event: dict, reading: Reading) -> None:
-    code = (event.get("dates", {}).get("status", {}) or {}).get("code", "")
-    reading.note(f"event status: {code or 'unknown'}")
-    if code in _OFFSALE:
-        reading.primary = UNAVAILABLE
-    elif code in _ONSALE:
-        # "onsale" is not "buyable" — this event has read onsale throughout a
-        # period when the checkout refused every request. Deliberately not
-        # promoted to AVAILABLE, or the watcher would alert forever.
-        reading.primary = UNKNOWN
-        reading.note("status is onsale, which for this event does not imply purchasable")
-    else:
-        reading.primary = UNKNOWN
+def _is_wanted_event(event: dict) -> bool:
+    """Does this indexed event look like the ticket David actually wants?
 
-
-def _read_price_ranges(event: dict, reading: Reading) -> None:
-    ranges = event.get("priceRanges") or []
-    if not ranges:
-        reading.note("no priceRanges (expected: IE is outside the documented markets)")
-        return
-    for pr in ranges:
-        reading.note(
-            f"priceRange {pr.get('type', '?')}: "
-            f"{pr.get('min')}–{pr.get('max')} {pr.get('currency', '')}"
-        )
-
-
-def _read_resale(event: dict, reading: Reading) -> None:
-    """Look for resale inventory surfaced as tmr-sourced events."""
-    try:
-        found = find_resale_events()
-    except (requests.RequestException, PermissionError) as exc:
-        reading.note(f"resale lookup failed: {exc}")
-        reading.resale = UNKNOWN
-        return
-
-    local_date = (event.get("dates", {}).get("start", {}) or {}).get("localDate")
-    same_day = [e for e in found if e.get("date") == local_date] if local_date else found
-
-    if same_day:
-        reading.resale = AVAILABLE
-        for e in same_day:
-            reading.listings.append(
-                Listing(name=f"TMR resale event: {e['name']}", price=e.get("price"), kind="resale")
-            )
-        reading.note(f"{len(same_day)} tmr-sourced event(s) matching {local_date}")
-    elif found:
-        reading.resale = UNAVAILABLE
-        reading.note(f"{len(found)} tmr event(s) found, none on {local_date}")
-    else:
-        reading.resale = UNAVAILABLE
-        reading.note("no tmr-sourced events for Electric Picnic in IE")
+    Matched on name rather than id because the id in the ticketmaster.ie URL
+    (18006314BD813D3E) is a host id that Discovery does not recognise — a
+    direct lookup by it returns 404, confirmed.
+    """
+    name = (event.get("name") or "").lower()
+    if not all(word in name for word in config.DISCOVERY_MATCH_WORDS):
+        return False
+    # The campervan passes are permanently indexed and are not the wanted
+    # ticket; without this they would look like a permanent "available".
+    return not any(word in name for word in config.DISCOVERY_EXCLUDE_WORDS)
 
 
 def find_resale_events() -> List[dict]:
@@ -191,7 +199,7 @@ def search_events(keyword: str = "Electric Picnic", country: str = "IE") -> List
             "name": e.get("name"),
             "date": (e.get("dates", {}).get("start", {}) or {}).get("localDate"),
             "status": (e.get("dates", {}).get("status", {}) or {}).get("code"),
-            "source": (e.get("_embedded", {}) or {}).get("source") or e.get("source"),
+            "price": _first_price(e),
             "url": e.get("url"),
         }
         for e in events
