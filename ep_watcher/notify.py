@@ -6,6 +6,7 @@ lose the state write.
 """
 
 import smtplib
+import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Callable, List
@@ -300,6 +301,53 @@ def recovered(after: int) -> None:
         f"Hi David,\n\nThe watcher recovered after {after} failed checks and is "
         f"reading Ticketmaster normally again.\n\nAt: {stamp()}\n",
     )
+
+
+def verify_push() -> tuple:
+    """Publish a silent message and read it back. Returns (ok, detail).
+
+    Proves the ntfy topic is live and reachable end to end, rather than
+    assuming a POST that returned 200 arrived anywhere. It cannot prove the
+    phone is subscribed — nothing server-side can — so the detail line says
+    what was and was not established, instead of implying more than it knows.
+
+    Priority 1 and no tags, so this never buzzes a phone that IS subscribed.
+    """
+    if not config.NTFY_TOPIC:
+        return False, "NTFY_TOPIC not set — no push notifications at all"
+
+    marker = f"selfcheck-{int(time.time())}"
+    try:
+        resp = requests.post(
+            f"https://ntfy.sh/{config.NTFY_TOPIC}",
+            data=marker.encode("utf-8"),
+            headers={"Title": "EP2026 self-check", "Priority": "1", "Tags": "gear"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return False, f"ntfy rejected the publish (HTTP {resp.status_code})"
+    except requests.RequestException as exc:
+        return False, f"could not reach ntfy.sh: {exc}"
+
+    # Read it back from the topic's cache. Not instantly: ntfy accepts the
+    # publish before the message is queryable, so reading with no pause
+    # reports a perfectly working topic as broken — which it did, the first
+    # time this ran. Retry briefly rather than trusting one attempt.
+    last = "no response"
+    for delay in (1.5, 2.5, 4.0):
+        time.sleep(delay)
+        try:
+            got = requests.get(
+                f"https://ntfy.sh/{config.NTFY_TOPIC}/json",
+                params={"poll": "1", "since": "120s"},
+                timeout=15,
+            )
+            if marker in got.text:
+                return True, f"published and read back from topic {config.NTFY_TOPIC}"
+            last = "published, but the message did not appear in the topic"
+        except requests.RequestException as exc:
+            last = f"published, but read-back failed: {exc}"
+    return False, last
 
 
 def test() -> None:

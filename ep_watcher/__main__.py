@@ -441,15 +441,26 @@ def cmd_doctor(_args) -> int:
     else:
         bad("Email configured", "no Gmail app password",
             f"edit {Path.home()}/.ep2026-watcher/env, then ./run_watcher.sh test")
-    if config.NTFY_TOPIC:
-        ok("Push configured")
+    # Actually exercise push rather than just noting a topic is set — a
+    # configured topic that nothing reaches is the failure that matters, and
+    # it looks identical to a working one from here.
+    push_ok, push_detail = notify.verify_push()
+    if push_ok:
+        ok("Push delivery", push_detail)
+        print("          (proves ntfy works; only your phone can prove it is subscribed)")
+    elif config.NTFY_TOPIC:
+        bad("Push delivery", push_detail, "check NTFY_TOPIC in ~/.ep2026-watcher/env")
     else:
-        print("  [ -- ]  Push not configured (optional, but faster than email)")
+        print("  [ -- ]  Push not configured — email only, which is minutes slower")
 
-    # 4. Is the connection healthy?
+    # 4. Is the connection healthy? Report the real severity: printing [ OK ]
+    #    next to the words "being rate-limited" is contradictory, and a health
+    #    check people learn to squint at is not a health check.
     severity, headline, _ = state_mod.connection_health(st)
     if severity == "blocked":
         bad("Connection", headline, "switch networks; see the email for the full steps")
+    elif severity == "watch":
+        print(f"  [WARN]  Connection  — {headline}")
     else:
         ok("Connection", headline)
 
