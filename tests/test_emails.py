@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ep_watcher import config, notify, state as st  # noqa: E402
-from ep_watcher.model import AVAILABLE, UNAVAILABLE, Listing, Reading  # noqa: E402
+from ep_watcher.model import AVAILABLE, UNAVAILABLE, UNKNOWN, Listing, Reading  # noqa: E402
 
 failures = []
 sent = []
@@ -124,7 +124,8 @@ check_true("links to the selling page", config.EVENT_URL in last_body())
 sent.clear()
 notify.heartbeat(checks=19, failures=19, hours=1.0,
                  reading=Reading(source="t"))
-check_true("all-failed hour is called out explicitly", "EVERY check failed" in last_body())
+check_true("all-failed hour is called out explicitly",
+           "EVERY check was unhealthy" in last_body())
 
 print("\nConnection health reaches the inbox")
 
@@ -213,13 +214,20 @@ check("still quiet immediately after starting", st.should_send_heartbeat(s), Fal
 s["last_heartbeat"] = (st.utc_now() - timedelta(hours=config.HEARTBEAT_HOURS + 0.01)).isoformat()
 check("fires once the hour is up", st.should_send_heartbeat(s), True)
 
-st.note_check(s, failed=False)
-st.note_check(s, failed=True)
+st.note_check(s, unhealthy=False)
+st.note_check(s, unhealthy=True)
 check("counts checks", s["checks_since_heartbeat"], 2)
 check("counts failures separately", s["failures_since_heartbeat"], 1)
 
+st.note_degraded(s, ["browser"])
+st.note_resale_visibility(s, Reading(source="t", resale=UNKNOWN))
+st.note_resale_visibility(s, Reading(source="t", resale=UNAVAILABLE))
+check("counts partial polls", s["degraded_since_heartbeat"], 1)
+check("counts resale-blind polls only when blind", s["resale_blind_since_heartbeat"], 1)
+
 st.reset_heartbeat(s)
 check("reset clears the counters", s["checks_since_heartbeat"], 0)
+check("reset clears the coverage counters", st.coverage(s), (0, 0))
 check("reset silences it again", st.should_send_heartbeat(s), False)
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")

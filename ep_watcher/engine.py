@@ -17,6 +17,12 @@ def merge(readings: List[Reading]) -> Reading:
     merged = Reading(source=" + ".join(r.source for r in readings) or "none")
 
     merged.blocked = any(r.blocked for r in readings)
+    # Which sources came back empty-handed, kept even when others answered.
+    # Without this the merged reading cannot tell "everything is fine" from
+    # "the browser has been blocked for an hour and the free API is covering
+    # for it", and those are very different amounts of cover.
+    merged.failed_sources = [r.source for r in readings if r.failed]
+    merged.answering_sources = [r.source for r in real]
 
     if not real:
         merged.failed = True
@@ -70,7 +76,13 @@ def handle(reading: Reading, st: dict) -> None:
         print(f"    {note}")
 
     state_mod.start_heartbeat_clock(st)
-    state_mod.note_check(st, reading.failed)
+    # A partial reading counts as unhealthy, not as a clean poll. See
+    # Reading.degraded — treating it as clean is what let a blocked browser
+    # report "0 failed" for hours.
+    state_mod.note_check(st, unhealthy=reading.failed or reading.degraded)
+    if reading.degraded:
+        state_mod.note_degraded(st, reading.failed_sources)
+    state_mod.note_resale_visibility(st, reading)
     st["checks_total"] = st.get("checks_total", 0) + 1
     st["last_check_at"] = state_mod.utc_now().isoformat()
 
@@ -94,20 +106,7 @@ def handle(reading: Reading, st: dict) -> None:
     if reading.failed:
         failures = state_mod.record_failure(st)
         print(f"[{stamp()}] check failed ({failures} in a row)")
-        if state_mod.should_alert_watchdog(st):
-            if reading.blocked:
-                reason = (
-                    "Ticketmaster is rate-limiting this machine (HTTP 403). The watcher "
-                    "is backing off automatically and will resume on its own — this "
-                    "usually clears within a few hours. If it persists for a day, lower "
-                    "the polling rate with EP_POLL_SECONDS."
-                )
-            elif reading.needs_login:
-                reason = "The Ticketmaster session needs a human — it is logged out or challenged."
-            else:
-                reason = "Could not get a usable reading from Ticketmaster."
-            notify.watchdog(reason, failures, health=state_mod.connection_health(st))
-            st["last_watchdog_alert"] = state_mod.utc_now().isoformat()
+        _maybe_watchdog(reading, st, failures)
         # A run of failures must not suppress the hourly report — a silent
         # watcher and a broken one look identical from the inbox, which is
         # precisely how the last one hid for 44 days.
@@ -123,9 +122,21 @@ def handle(reading: Reading, st: dict) -> None:
     # edge detection quietly does nothing.
     new_listings = state_mod.pending_listings(st, reading)
     should, reason = state_mod.should_alert_availability(st, reading, new_listings)
-    state_mod.record_success(st, reading)
+    state_mod.record_success(st, reading, healthy=not reading.degraded)
 
-    if was_broken >= config.WATCHDOG_FAILURE_THRESHOLD:
+    # A partial reading is still a reading: whatever did answer is recorded
+    # and alerted on above, exactly as before. What changes is that it no
+    # longer clears the failure counter, so a browser that stays blocked now
+    # escalates instead of hiding behind the API that is covering for it.
+    if reading.degraded:
+        failures = st["consecutive_failures"]
+        print(
+            f"[{stamp()}] PARTIAL reading — {', '.join(reading.failed_sources)} "
+            f"failed ({failures} in a row); still answered by "
+            f"{', '.join(reading.answering_sources) or 'nothing'}"
+        )
+        _maybe_watchdog(reading, st, failures)
+    elif was_broken >= config.WATCHDOG_FAILURE_THRESHOLD:
         notify.recovered(was_broken)
         st["last_watchdog_alert"] = None
 
@@ -147,13 +158,82 @@ def handle(reading: Reading, st: dict) -> None:
     state_mod.reset_heartbeat(st)
 
 
+def watchdog_reason(reading: Reading) -> str:
+    """Plain English for why the watcher is unhappy, in priority order.
+
+    The degraded case is worded hardest on purpose. A total failure announces
+    itself — the emails stop carrying readings. A partial one does the
+    opposite: the hourly report keeps arriving, full of confident-looking
+    UNAVAILABLE lines from an API that cannot see resale, while the only
+    source that can has been walled for hours. That reads as good news.
+    """
+    if reading.blocked:
+        cause = (
+            "Ticketmaster is rate-limiting this machine (HTTP 403). The watcher "
+            "is backing off automatically and will resume on its own — this "
+            "usually clears within a few hours. If it persists for a day, lower "
+            "the polling rate with EP_POLL_SECONDS."
+        )
+    elif reading.needs_login:
+        cause = "The Ticketmaster session needs a human — it is logged out or challenged."
+    elif reading.failed:
+        cause = "Could not get a usable reading from Ticketmaster."
+    else:
+        cause = ""
+
+    if not reading.degraded:
+        return cause
+
+    # Both facts, always. The cause says why a source stopped answering; this
+    # says what stopped being visible because of it — and they are not the
+    # same news. "Rate-limited" alone reads as a temporary annoyance, when the
+    # thing worth knowing is that the emails will keep arriving looking normal
+    # while resale is dark.
+    lost = ", ".join(reading.failed_sources)
+    kept = ", ".join(reading.answering_sources) or "nothing"
+    if any("browser" in s for s in reading.failed_sources):
+        coda = (
+            f"The browser source is failing, though {kept} still answers. That "
+            "matters more than it looks: the browser is the only source that "
+            "can see a Verified Resale listing, which is how a ticket has "
+            "actually appeared on this event. The hourly emails will keep "
+            "arriving and will keep reporting on primary stock — but on resale "
+            "they are now a guess rather than a reading. Treat this as the "
+            "watcher being half blind, not merely grumpy."
+        )
+    else:
+        coda = f"The {lost} source is failing; {kept} still answers."
+
+    return f"{cause}\n\n{coda}" if cause else coda
+
+
+def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
+    """Nag if it has been broken for long enough, whether wholly or partly."""
+    if not state_mod.should_alert_watchdog(st):
+        return
+    notify.watchdog(
+        watchdog_reason(reading), failures, health=state_mod.connection_health(st)
+    )
+    st["last_watchdog_alert"] = state_mod.utc_now().isoformat()
+
+
 def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     if not state_mod.should_send_heartbeat(st):
         return
     hours = state_mod.hours_since_heartbeat(st) or config.HEARTBEAT_HOURS
     checks = st["checks_since_heartbeat"]
     failures = st["failures_since_heartbeat"]
-    print(f"[{stamp()}] hourly report: {checks} checks, {failures} failed")
+    degraded, resale_blind = state_mod.coverage(st)
+    print(
+        f"[{stamp()}] hourly report: {checks} checks, {failures} unhealthy "
+        f"({degraded} partial), resale unreadable on {resale_blind}"
+    )
+
+    # Only meaningful where a browser is running. In API-only mode every poll
+    # is structurally resale-blind — the free API cannot see a listing at all
+    # — so reporting it hourly would be a constant alarm about a known and
+    # accepted limitation rather than news.
+    cover = (degraded, resale_blind) if config.USE_BROWSER else None
 
     # Only talk about networks where there is a network to talk about. In
     # API-only mode this runs on a GitHub runner, where "switch the MacBook
@@ -165,6 +245,7 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
         checks, failures, hours, reading,
         health=state_mod.connection_health(st),
         net=net,
+        coverage=cover,
     )
     if net and net[0]:
         # Asked for a switch — don't ask again until the next window, whether

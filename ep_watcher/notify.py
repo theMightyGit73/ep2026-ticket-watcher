@@ -14,7 +14,7 @@ from typing import Callable, List
 import requests
 
 from . import config
-from .model import GOOD_STATUSES, Listing, Reading
+from .model import GOOD_STATUSES, UNKNOWN, Listing, Reading
 from .state import stamp
 
 
@@ -142,6 +142,19 @@ def reserved_in_browser(reading: Reading) -> None:
     )
 
 
+def _status_word(status: str) -> str:
+    """Spell out UNKNOWN, which is the one status that reads as reassuring.
+
+    "UNAVAILABLE" is a real answer and looks like one. "UNKNOWN" sitting in
+    the same column looks like a third flavour of no, when it actually means
+    nothing could read that market at all — which is the state most likely to
+    cost the ticket, and so the one that must not read as calm.
+    """
+    if status == UNKNOWN:
+        return "UNKNOWN — nothing could read this market"
+    return status
+
+
 def _health_section(health) -> str:
     """Render the connection-health block that goes into status emails.
 
@@ -170,23 +183,49 @@ def _network_section(net) -> str:
 
 
 def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
-              health=None, net=None) -> None:
+              health=None, net=None, coverage=None) -> None:
     """The hourly "still nothing, still trying" report.
 
     Deliberately carries the numbers rather than just the sentiment. "No
     success in the last hour" is compatible with both a healthy watcher and
     one that has been failing every attempt — which is exactly the ambiguity
     the previous watcher died in — so the counts are the point of the email.
+
+    `coverage` is (degraded, resale_blind) and answers the harder question:
+    not "did the watcher run" but "could it see". A poll that ran fine and
+    learned nothing about resale is the one that quietly costs the ticket.
     """
     healthy = failures < checks or checks == 0
-    health_line = (
-        f"Checks run in the last {hours:.1f}h : {checks}\n"
-        f"Of those, failed to read the page: {failures}"
-    )
+
+    def row(label, value):
+        return f"{label:<30}: {value}"
+
+    health_line = "\n".join([
+        row(f"Checks run in the last {hours:.1f}h", checks),
+        row("Of those, unhealthy", failures),
+    ])
+    if coverage:
+        degraded, resale_blind = coverage
+        health_line += "\n" + "\n".join([
+            row("  · partial (a source failed)", degraded),
+            row("  · resale could not be read", resale_blind),
+        ])
+        if checks and resale_blind == checks:
+            health_line += (
+                "\n\nRESALE WAS UNREADABLE ON EVERY CHECK THIS HOUR. Primary stock\n"
+                "is still being read, so the watcher looks fine — but resale is\n"
+                "the market a ticket has actually turned up on, and right now it\n"
+                "is dark. Worth running doctor."
+            )
+        elif checks and resale_blind > checks / 2:
+            health_line += (
+                f"\n\nResale was unreadable on {resale_blind} of {checks} checks — over half.\n"
+                "The searches are resolving before the resale panel renders."
+            )
     if checks and failures == checks:
         health_line += (
-            "\n\nEVERY check failed this hour. That is a broken watcher, not a\n"
-            "quiet Ticketmaster — the numbers above are the difference."
+            "\n\nEVERY check was unhealthy this hour. That is a broken watcher,\n"
+            "not a quiet Ticketmaster — the numbers above are the difference."
         )
 
     health_block = f"\n{_health_section(health)}\n" if health else ""
@@ -208,8 +247,8 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
         f"{health_line}\n"
         f"{health_block}\n"
         f"Last reading:\n"
-        f"  Box office     : {reading.primary}\n"
-        f"  Verified resale: {reading.resale}\n"
+        f"  Box office     : {_status_word(reading.primary)}\n"
+        f"  Verified resale: {_status_word(reading.resale)}\n"
         f"  Searching for  : {config.WANTED_QUANTITY} ticket\n\n"
         f"Event page: {config.EVENT_URL}\n\n"
         f"You'll get a separate, much louder email the moment anything shows up.\n"

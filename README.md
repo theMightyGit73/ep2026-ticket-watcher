@@ -105,6 +105,57 @@ one command to reach for whenever something looks wrong.
 
 ---
 
+## Running is not the same as seeing
+
+The distinction the watcher now makes explicitly, because getting it wrong
+was a live bug on 14 August 2026.
+
+Several sources answer each poll. The free Discovery API works from anywhere
+and effectively never fails; the browser is fragile and is the **only** source
+that can see a Verified Resale listing — which is how a ticket has actually
+appeared on this event. Originally a poll counted as failed only if *every*
+source failed, so once Discovery was configured, a browser blocked by HTTP 403
+produced a perfectly healthy-looking poll. The failure counter reset every
+time, the watchdog could never reach its threshold, and the hourly email
+reported `0 failed` throughout. The same 403, before and after Discovery was
+added:
+
+```text
+13 Aug 20:37  (browser only)   hourly report: 5 checks, 3 failed
+14 Aug 04:40  (+ discovery)    hourly report: 3 checks, 0 failed
+```
+
+So there are now three outcomes per poll, not two:
+
+| Outcome | Meaning | What happens |
+| --- | --- | --- |
+| **clean** | every source answered | failure counter cleared |
+| **partial** | some answered, at least one failed | data kept and alerted on normally, **and** counted as unhealthy so it escalates |
+| **failed** | nothing answered | as before |
+
+A partial poll still alerts. That half matters as much as the other: counting
+it as a plain failure would suppress a find, which is the worse of the two
+bugs. What changes is only that it no longer *clears* the failure counter, so
+a browser blocked for four polls now raises the watchdog instead of hiding
+behind the API covering for it — and the email says plainly that resale has
+gone dark rather than just "rate-limited".
+
+Two related rules follow from the same principle:
+
+- **Discovery reports resale as UNKNOWN, never UNAVAILABLE.** It cannot see an
+  individual resale listing at all, so "no resale events" is *I could not
+  look*, not *there is nothing*. Since UNAVAILABLE outranks UNKNOWN when
+  readings are merged, answering UNAVAILABLE meant the merged reading claimed
+  a confident "no resale" that no source had established.
+- **A search that resolves without learning anything is a failed read.** If
+  both primary and resale come back UNKNOWN, that is not a quiet "no tickets".
+
+`doctor` reports resale visibility as its own line, with its own denominator,
+so an old state file cannot read as a flawless 0% before anything is measured.
+Over the first day of running, resale was unreadable on about one poll in six.
+
+---
+
 ## Keeping it running
 
 Three layers, because they fail differently.
@@ -132,8 +183,9 @@ correctly stopped after the event.
 ```
 
 `doctor` checks the agent is installed, the process is running, polling is
-actually advancing, email and push work, the connection isn't blocked, and
-the Mac isn't set to sleep. Every failure prints the command that repairs it.
+actually advancing, **resale is actually readable**, email and push work, the
+connection isn't blocked, and the Mac isn't set to sleep. Every failure prints
+the command that repairs it.
 Both commands also appear in the "watcher is broken" email, so you never have
 to come back here to find them.
 

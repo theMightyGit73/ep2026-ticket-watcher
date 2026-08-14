@@ -18,7 +18,12 @@ LABEL="com.davidcoyne.ep2026watcher"
 # Overridable so the restart logic can be exercised against a fixture rather
 # than only ever being tested by waiting for a real hang.
 STATE="${EP_STATE_FILE:-$HOME/.ep2026-watcher/state.json}"
-LOG="$HOME/.ep2026-watcher/logs/watchdog.log"
+# Overridable for the same reason STATE is. The test suite runs this script
+# against fixture states, and with the log hardcoded those runs wrote lines
+# like "last poll was 90 min ago — restarting the watcher" straight into the
+# operational log. That is the log you read while diagnosing a real hang, so
+# filling it with alarming sentences about fixtures is actively harmful.
+LOG="${EP_WATCHDOG_LOG:-$HOME/.ep2026-watcher/logs/watchdog.log}"
 STALE_MINUTES="${EP_STALE_MINUTES:-45}"
 
 mkdir -p "$(dirname "$LOG")"

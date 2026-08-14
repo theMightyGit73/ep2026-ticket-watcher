@@ -4,9 +4,10 @@ Every other test covers one layer. This covers the join between them, which
 is where the previous watcher actually died: each individual piece looked
 reasonable, and the thing as a whole never alerted once in 44 days.
 
-Sources are stubbed and SMTP is captured, so this runs offline and touches
-Ticketmaster not at all. What it proves is the wiring — that a resale listing
-appearing really does end up as an email carrying the link.
+Sources are stubbed, SMTP is captured and the IP lookup is faked, so this runs
+offline and touches Ticketmaster not at all. What it proves is the wiring —
+that a resale listing appearing really does end up as an email carrying the
+link.
 
 Run with:  .venv/bin/python tests/test_end_to_end.py
 """
@@ -45,6 +46,11 @@ class FakeSMTP:
 
 smtplib.SMTP_SSL = FakeSMTP
 notify.requests = type("_NoPush", (), {"post": staticmethod(lambda *a, **kw: None)})()
+# The engine looks up the public IP on every poll to notice a network switch.
+# Left real, this suite quietly made live HTTP calls to an IP-echo service on
+# every run — slow, flaky offline, and contradicting the claim at the top of
+# this file that it touches nothing.
+engine.network = type("_FixedIP", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1")})()
 config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
 config.GMAIL_APP_PASSWORD = "test-password"
 config.NTFY_TOPIC = None

@@ -38,7 +38,7 @@ from typing import List, Optional
 import requests
 
 from .. import config
-from ..model import AVAILABLE, UNAVAILABLE, Listing, Reading
+from ..model import AVAILABLE, UNAVAILABLE, UNKNOWN, Listing, Reading
 
 SOURCE = "discovery-api"
 
@@ -131,8 +131,21 @@ def check() -> Reading:
             )
         reading.note(f"{len(resale)} tmr-sourced event(s)")
     else:
-        reading.resale = UNAVAILABLE
-        reading.note("no tmr-sourced events")
+        # UNKNOWN, emphatically not UNAVAILABLE. This API cannot see an
+        # individual Verified Resale listing — that is stated at the top of
+        # this file and was measured — so "no tmr events" is "I could not
+        # look", not "there is nothing".
+        #
+        # The distinction is load-bearing because UNAVAILABLE outranks UNKNOWN
+        # when readings are merged. Answering UNAVAILABLE here meant that on
+        # every poll where the browser could not read the resale panel, the
+        # merged reading claimed a confident "no resale" that no source had
+        # actually established, and the hourly email printed it as fact.
+        reading.resale = UNKNOWN
+        reading.note(
+            "no tmr-sourced events — but this API cannot see an individual "
+            "Verified Resale listing, so this is 'do not know', not 'none'"
+        )
 
     return reading
 

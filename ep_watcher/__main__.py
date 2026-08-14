@@ -479,6 +479,26 @@ def cmd_doctor(_args) -> int:
     else:
         ok("Polling", f"last check {age * 60:.0f} min ago")
 
+    # 2b. Running is not the same as seeing. A poll can succeed, report a
+    #     confident no on primary, and have learned nothing about resale
+    #     because the search resolved before the resale panel rendered. That
+    #     is the market a ticket actually appears on, so it gets its own line
+    #     rather than being averaged into "polling works".
+    severity, headline = state_mod.resale_visibility(st)
+    if severity == "bad":
+        bad("Resale visibility", headline,
+            f"{config.REPO_DIR}/run_watcher.sh calibrate   # dump what the page renders")
+    elif severity == "watch":
+        print(f"  [WARN]  Resale visibility  — {headline}")
+    elif severity == "unknown":
+        print(f"  [ -- ]  Resale visibility  — {headline}")
+    else:
+        ok("Resale visibility", headline)
+
+    partial = st.get("degraded_total", 0)
+    if partial:
+        print(f"          ({partial} poll(s) answered by only some sources)")
+
     # 3. Can it tell you anything?
     if config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD:
         ok("Email configured", config.ALERT_TO)

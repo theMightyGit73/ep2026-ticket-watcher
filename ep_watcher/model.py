@@ -74,6 +74,12 @@ class Reading:
     #: failure, bot wall, logged out). Distinct from "answered UNAVAILABLE" —
     #: the watchdog counts these, the alerting logic ignores them.
     failed: bool = False
+    #: On a merged reading: the sources that failed while others answered.
+    #: Populated by engine.merge(); always empty on a single source's reading.
+    failed_sources: List[str] = field(default_factory=list)
+    #: The other half of that pair — who did answer. Kept so an alert can say
+    #: which sources the reading actually rests on.
+    answering_sources: List[str] = field(default_factory=list)
     #: Set when the session needs a human: logged out, or challenged.
     needs_login: bool = False
     #: Set on an HTTP 403 — this client is rate-limited rather than merely
@@ -84,6 +90,24 @@ class Reading:
     @property
     def any_good(self) -> bool:
         return self.primary in GOOD_STATUSES or self.resale in GOOD_STATUSES
+
+    @property
+    def degraded(self) -> bool:
+        """A real answer, but not from everything that was supposed to answer.
+
+        This exists because "some source failed" and "the poll failed" are
+        different facts, and collapsing them hid a real outage. The API
+        sources answer from anywhere and essentially never fail, so once one
+        of them is configured, `failed` can only be true if even it broke —
+        and a browser that is 403-blocked for hours reads as a clean run,
+        resetting the failure counter every poll and reporting "0 failed" in
+        the hourly email. Observed in the logs on 2026-08-14.
+
+        Degradation is the missing middle: keep the data that did arrive, act
+        on it, alert on it — and still count the poll as unhealthy, because
+        the browser is the only source that can see a resale listing.
+        """
+        return bool(self.failed_sources) and not self.failed
 
     def note(self, msg: str) -> "Reading":
         self.notes.append(msg)

@@ -96,34 +96,9 @@ def check() -> Reading:
     return reading
 
 
-# ── Setup helper ─────────────────────────────────────────────────────────────
-
-def resolve_event_id(api_key: str) -> list:
-    """Find the Discovery 'universal' event id for the event.
-
-    The id in the ticketmaster.ie URL (18006314BD813D3E) is a host/legacy id.
-    Inventory Status wants the universal one, and they are not always the same
-    string, so guessing is how you end up staring at INVALID_EVENT_ID.
-    """
-    resp = requests.get(
-        config.DISCOVERY_API_URL,
-        params={
-            "apikey": api_key,
-            "keyword": "Electric Picnic",
-            "countryCode": "IE",
-            "size": 50,
-        },
-        timeout=20,
-    )
-    resp.raise_for_status()
-    events = resp.json().get("_embedded", {}).get("events", [])
-    return [
-        {
-            "id": e.get("id"),
-            "name": e.get("name"),
-            "date": e.get("dates", {}).get("start", {}).get("localDate"),
-            "status": e.get("dates", {}).get("status", {}).get("code"),
-            "url": e.get("url"),
-        }
-        for e in events
-    ]
+# The event-id lookup that used to live here has been removed rather than
+# repaired. It referenced config.DISCOVERY_API_URL, which does not exist, so
+# any call would have raised AttributeError — and nothing called it, because
+# `python -m ep_watcher resolve-id` uses discovery.search_events() instead.
+# Two implementations of one lookup, one of them broken and unreachable, is
+# worse than one.

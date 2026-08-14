@@ -318,7 +318,7 @@ class BrowserSession:
             time.sleep(1.0)
         return "timeout"
 
-    def _await_resale_panel(self, timeout_s: int = 12) -> bool:
+    def _await_resale_panel(self, timeout_s: int = 25) -> bool:
         """Wait for the resale panel, which arrives after the rejection does.
 
         The rejection message and the resale panel are two different responses:
@@ -327,6 +327,13 @@ class BrowserSession:
         Parsing the moment the rejection appears therefore reads the page
         before resale has landed, and records a real listing as "no resale
         panel" — a missed alert on the one signal that matters most.
+
+        The wait was 12s and measured too short: over the first day of
+        running, 9 of 59 polls gave up before the panel arrived. It is 25s
+        now, and the reason to fix it by waiting rather than by re-searching
+        is the scarce resource. Waiting costs nothing at all; a second search
+        costs another request against the rate limit that got this client
+        blocked three times in that same day. Time is the cheap thing here.
         """
         deadline = time.time() + timeout_s
         while time.time() < deadline:
@@ -481,6 +488,17 @@ class BrowserSession:
         if not searched:
             reading.failed = True
             reading.note("could not complete a single search")
+        elif reading.primary == UNKNOWN and reading.resale == UNKNOWN:
+            # Searched, and came away knowing nothing about either market.
+            # That is a failed read, not a quiet "no tickets" — the same rule
+            # the Inventory Status source already applies. Without this the
+            # poll counts as a clean success, resets the failure counter, and
+            # records UNKNOWN as though it were an answer.
+            reading.failed = True
+            reading.note(
+                "searched, but learned nothing — primary and resale are both "
+                "UNKNOWN. Treating as a failed read, not as 'no tickets'."
+            )
         return reading
 
     # ── diagnostics ──────────────────────────────────────────────────────────

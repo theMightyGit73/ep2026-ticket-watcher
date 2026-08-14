@@ -38,6 +38,20 @@ def _defaults():
         "last_heartbeat": None,           # ISO8601
         "checks_since_heartbeat": 0,
         "failures_since_heartbeat": 0,
+        # Coverage, as opposed to mere liveness. A poll can succeed and still
+        # have learned nothing about resale — because the browser was blocked,
+        # or because the resale panel never rendered. Counting those is the
+        # difference between "the watcher is running" and "the watcher can
+        # see", and only the second one catches a ticket.
+        "degraded_since_heartbeat": 0,
+        "degraded_total": 0,
+        "resale_blind_since_heartbeat": 0,
+        "resale_blind_total": 0,
+        # Its own denominator, deliberately not checks_total. A state file
+        # written before this was tracked has a large checks_total and a zero
+        # blind count, which would render as a flawless 0% instead of "not
+        # measured yet" — a health check that flatters itself on no evidence.
+        "resale_checks_total": 0,
         # Connection health. Every HTTP 403 is recorded with a timestamp so
         # the emails can say whether this connection is in trouble, rather
         # than leaving David to infer it from a run of quiet failures.
@@ -151,14 +165,22 @@ def pending_listings(state: dict, reading) -> list:
     return [l.describe() for l in reading.listings if l.describe() not in previous]
 
 
-def record_success(state: dict, reading) -> list:
+def record_success(state: dict, reading, healthy: bool = True) -> list:
     """Fold a good reading into state. Returns newly-seen listing descriptions.
 
     Call this AFTER should_alert_availability() — it overwrites the fields
     that decision compares against.
+
+    `healthy=False` is the partial case: a source failed but another answered.
+    The data is real and is kept, but the run must not clear the failure
+    counter, or a browser blocked for hours never escalates to the watchdog
+    because every poll keeps resetting it to zero.
     """
     new = pending_listings(state, reading)
-    state["consecutive_failures"] = 0
+    if healthy:
+        state["consecutive_failures"] = 0
+    else:
+        state["consecutive_failures"] += 1
     state["last_success"] = utc_now().isoformat()
     state["known_listings"] = [l.describe() for l in reading.listings]
     state["last_primary"] = reading.primary
@@ -204,16 +226,85 @@ def start_heartbeat_clock(state: dict) -> None:
         state["last_heartbeat"] = utc_now().isoformat()
 
 
-def note_check(state: dict, failed: bool) -> None:
+def note_check(state: dict, unhealthy: bool) -> None:
+    """Count a poll. `unhealthy` covers both total and partial failure.
+
+    Named for what it means rather than for `reading.failed`: a poll where
+    the browser was blocked but the free API answered is not a clean check,
+    and counting it as one is what made the hourly email report "0 failed"
+    through a real outage.
+    """
     state["checks_since_heartbeat"] += 1
-    if failed:
+    if unhealthy:
         state["failures_since_heartbeat"] += 1
+
+
+def note_degraded(state: dict, sources) -> None:
+    """Record that the poll answered, but not from everything that should have."""
+    state["degraded_since_heartbeat"] = state.get("degraded_since_heartbeat", 0) + 1
+    state["degraded_total"] = state.get("degraded_total", 0) + 1
+
+
+def note_resale_visibility(state: dict, reading) -> None:
+    """Record whether anything could actually read resale on this poll.
+
+    Tracked separately from failure because the two come apart. A poll can
+    succeed, report a confident UNAVAILABLE on primary, and still have no
+    idea about resale — the search resolved before the resale panel arrived.
+    Measured over the first day of running, that was about one poll in six,
+    and nothing surfaced it. Resale is the market a ticket has actually
+    appeared on, so being blind to it is the failure that matters most.
+    """
+    state["resale_checks_total"] = state.get("resale_checks_total", 0) + 1
+    if reading.resale == UNKNOWN:
+        state["resale_blind_since_heartbeat"] = (
+            state.get("resale_blind_since_heartbeat", 0) + 1
+        )
+        state["resale_blind_total"] = state.get("resale_blind_total", 0) + 1
+
+
+def coverage(state: dict) -> tuple:
+    """(degraded, resale_blind) polls since the last heartbeat."""
+    return (
+        state.get("degraded_since_heartbeat", 0),
+        state.get("resale_blind_since_heartbeat", 0),
+    )
+
+
+def resale_visibility(state: dict) -> tuple:
+    """Return (severity, headline) for how often resale can actually be read.
+
+    Answers the question the rest of the health checks do not: not "is the
+    watcher running" but "can it see the market a ticket appears on". Over
+    the first day of running that was about one poll in six, and nothing
+    reported it.
+    """
+    total = state.get("resale_checks_total", 0)
+    blind = state.get("resale_blind_total", 0)
+    if not total:
+        return "unknown", "not measured yet — starts on the next poll"
+
+    # Thresholds set against what a blind poll costs rather than against a
+    # tidy round number. A resale listing on this event was observed living
+    # about five minutes — roughly one poll interval — so each blind poll is
+    # very nearly one missed chance, not a fractional one. One in ten is
+    # already worth saying out loud; one in three is a watcher that is mostly
+    # not doing its job.
+    pct = 100.0 * blind / total
+    headline = f"resale readable on {total - blind}/{total} polls ({100 - pct:.0f}%)"
+    if pct >= 33:
+        return "bad", headline + " — blind on a third of polls or more"
+    if pct >= 10:
+        return "watch", headline + " — each blind poll is a listing that could be missed"
+    return "ok", headline
 
 
 def reset_heartbeat(state: dict) -> None:
     state["last_heartbeat"] = utc_now().isoformat()
     state["checks_since_heartbeat"] = 0
     state["failures_since_heartbeat"] = 0
+    state["degraded_since_heartbeat"] = 0
+    state["resale_blind_since_heartbeat"] = 0
 
 
 def hours_since_heartbeat(state: dict):
