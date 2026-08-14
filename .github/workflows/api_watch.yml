@@ -112,6 +112,21 @@ jobs:
           NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
         run: python -m ep_watcher run
 
+      # The one failure the Mac cannot report on itself: being switched off.
+      # Every safeguard on that laptop — launchd, the watchdog — assumes the
+      # laptop is running, and when it is not, the emails simply stop. This
+      # runs off the Mac entirely, so a shut lid or a flat battery cannot
+      # silence it. continue-on-error: it is a separate concern from the
+      # ticket check above, and must never mask that job's own result.
+      - name: Is the Mac watcher still alive?
+        if: steps.guard.outputs.configured == 'true'
+        continue-on-error: true
+        env:
+          NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
+          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python -m ep_watcher check-mac
+
       # State is cached rather than committed. The old workflow pushed a
       # commit on every run, which is where ~1000 junk commits came from and
       # did nothing for its scheduling priority.

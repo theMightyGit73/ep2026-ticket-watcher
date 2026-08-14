@@ -227,6 +227,43 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
         )
 
 
+def mac_watcher_silent(hours: float) -> None:
+    """Sent from GitHub when the Mac has stopped checking in.
+
+    This is the alert nothing on the Mac could ever send, because by
+    definition the Mac is the thing that stopped. It goes out from GitHub's
+    infrastructure, which is why it survives a shut lid, a flat battery or a
+    dropped Wi-Fi connection.
+    """
+    subject = "EP2026: your Mac watcher has gone quiet"
+    body = (
+        f"Hi David,\n\n"
+        f"The watcher on your MacBook has not checked in for {hours:.1f} hours.\n"
+        f"This message comes from GitHub, not from the Mac — which is the point:\n"
+        f"if the laptop is shut, flat, or off the network, nothing on it could\n"
+        f"tell you.\n\n"
+        f"The GitHub backstop is still running, but it can only see a coarse\n"
+        f"re-release. It cannot see a Verified Resale listing, which is how a\n"
+        f"ticket has actually appeared so far. So right now you have much less\n"
+        f"cover than you think.\n\n"
+        f"To fix, on the MacBook:\n\n"
+        f"  1. Wake it, and make sure it is on Wi-Fi or the hotspot.\n"
+        f"  2. cd {config.REPO_DIR} && ./run_watcher.sh doctor\n"
+        f"  3. If anything is wrong:  ./restart.sh\n\n"
+        f"You should see this stop within about 15 minutes of the watcher\n"
+        f"running again.\n\n"
+        f"Noticed at: {stamp()}\n"
+    )
+    _safe("mac-silent-email", _send_email, subject, body)
+    _safe(
+        "mac-silent-push", _send_ntfy,
+        title="EP2026: Mac watcher is down",
+        message=f"No check-in for {hours:.1f}h. The sharp watcher is not running.",
+        priority="high",
+        tags=["warning"],
+    )
+
+
 def watchdog(reason: str, failures: int, health=None) -> None:
     health_block = f"\n{_health_section(health)}\n" if health else ""
 

@@ -378,6 +378,42 @@ def cmd_resolve_id(_args) -> int:
     return 0
 
 
+def cmd_check_mac(_args) -> int:
+    """Has the Mac watcher checked in recently? Run from GitHub, not the Mac.
+
+    The one failure no local safeguard can cover: if the laptop is off, every
+    watchdog on it is off too, and the emails simply stop. Something outside
+    the Mac has to notice, and the only thing that qualifies is the hourly
+    Actions job.
+    """
+    from . import liveness
+
+    if not liveness.topic():
+        print("  No NTFY_TOPIC configured — cannot check the Mac's heartbeat.")
+        return 0
+
+    age = liveness.age_seconds()
+    limit_h = config.MAC_SILENT_HOURS
+
+    if age is None:
+        # Deliberately not an alarm. No heartbeat within the cache window is
+        # also what an ntfy outage looks like, and crying wolf here would
+        # teach David to ignore the alert that says his watcher is really down.
+        print(f"  No heartbeat found in the last 12h for topic {liveness.topic()}.")
+        print("  Cannot distinguish 'Mac is off' from 'ntfy unreachable' — not alerting.")
+        return 0
+
+    hours = age / 3600.0
+    print(f"  Mac last checked in {hours:.2f}h ago (limit {limit_h}h).")
+    if hours < limit_h:
+        print("  Mac watcher is alive.")
+        return 0
+
+    print("  Mac watcher looks DOWN — alerting.")
+    notify.mac_watcher_silent(hours)
+    return 1
+
+
 def cmd_doctor(_args) -> int:
     """Check everything, and for anything wrong print the exact fix to paste.
 
@@ -421,6 +457,14 @@ def cmd_doctor(_args) -> int:
     else:
         bad("Service running", "not loaded, or loaded but not started", reinstall)
 
+    # Nothing watches the watchdog. If it gets unloaded, hang-detection is
+    # silently gone and everything still looks fine — so check it explicitly.
+    if "com.davidcoyne.ep2026watchdog" in listed.stdout:
+        ok("Watchdog loaded", "hang detection active")
+    else:
+        bad("Watchdog loaded", "nothing would restart a hung watcher",
+            f"{config.REPO_DIR}/restart.sh")
+
     # 2. Is it actually doing work, or merely alive? A hung process passes
     #    every check above and does nothing at all.
     st = state_mod.load()
@@ -452,6 +496,23 @@ def cmd_doctor(_args) -> int:
         bad("Push delivery", push_detail, "check NTFY_TOPIC in ~/.ep2026-watcher/env")
     else:
         print("  [ -- ]  Push not configured — email only, which is minutes slower")
+
+    # Is the off-Mac dead man's switch actually armed? It is what covers the
+    # laptop being off, so it failing quietly would remove the last line of
+    # defence without any visible change.
+    from . import liveness
+
+    if liveness.topic():
+        age = liveness.age_seconds()
+        if age is None:
+            print("  [ -- ]  Remote heartbeat  — none published yet (starts on the next poll)")
+        elif age / 3600.0 < config.MAC_SILENT_HOURS:
+            ok("Remote heartbeat", f"last {age / 60:.0f} min ago — GitHub can see this Mac")
+        else:
+            bad("Remote heartbeat", f"stale ({age / 3600.0:.1f}h)",
+                f"{config.REPO_DIR}/restart.sh")
+    else:
+        print("  [ -- ]  Remote heartbeat not configured (needs NTFY_TOPIC)")
 
     # 4. Is the connection healthy? Report the real severity: printing [ OK ]
     #    next to the words "being rate-limited" is contradictory, and a health
@@ -524,6 +585,7 @@ COMMANDS = {
     "test": cmd_test,
     "selftest": cmd_selftest,
     "doctor": cmd_doctor,
+    "check-mac": cmd_check_mac,
     "calibrate": cmd_calibrate,
     "resolve-id": cmd_resolve_id,
     "status": cmd_status,

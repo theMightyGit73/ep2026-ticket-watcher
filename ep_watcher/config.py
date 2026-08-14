@@ -159,7 +159,16 @@ AVAILABILITY_RENAG_HOURS = 1
 # to keep working, and a watcher that gets itself blocked on day two catches
 # nothing on day nine. Lower it during a known onsale if you want, and accept
 # that it may cost you the rest of the fortnight.
-POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "600"))
+# 5 minutes during the day. Raised from 10 after a real listing on
+# 2026-08-13 lived roughly one poll interval: detected at 22:09, gone before
+# it could be opened. At 10 minutes a listing that short is missed outright
+# about half the time.
+#
+# The cost is ~12 searches an hour rather than 6, against the ~20/hour that
+# got the home IP flagged. Acceptable now that the watcher alternates
+# networks every 3 hours, resets its browser profile on a block, and backs
+# off exponentially — none of which existed when that block happened.
+POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "300"))
 
 # Overnight, poll far less often.
 #
@@ -211,6 +220,12 @@ BLOCKED_BACKOFF_MAX_SECONDS = int(os.environ.get("EP_BACKOFF_MAX_SECONDS", "1080
 # The clock resets whenever a real availability alert goes out — if a ticket
 # turned up, that email already told the story.
 HEARTBEAT_HOURS = float(os.environ.get("EP_HEARTBEAT_HOURS", "1"))
+
+# How long the Mac may go without checking in before GitHub declares it down.
+# Generously above the poll interval and the overnight slowdown, so a slow
+# poll or a brief network drop never triggers it — this alert must only fire
+# when the Mac is genuinely not running.
+MAC_SILENT_HOURS = float(os.environ.get("EP_MAC_SILENT_HOURS", "1.5"))
 
 # ── Alternating between home Wi-Fi and the phone hotspot ─────────────────────
 # The watcher asks David to switch the MacBook's network after this long, or

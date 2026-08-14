@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 
-from . import config, network, notify, state as state_mod
+from . import config, liveness, network, notify, state as state_mod
 from .model import Reading, better_status
 from .sources import discovery, inventory_api
 from .state import stamp
@@ -84,6 +84,12 @@ def handle(reading: Reading, st: dict) -> None:
 
     if reading.blocked:
         state_mod.record_block(st)
+
+    # Tell the outside world the Mac is still alive. Every local safeguard
+    # assumes the laptop is on; this is the only signal that survives it
+    # being shut, flat, or off the network.
+    if config.USE_BROWSER:
+        liveness.publish(f"poll {st.get('checks_total', 0)} at {stamp()}")
 
     if reading.failed:
         failures = state_mod.record_failure(st)
