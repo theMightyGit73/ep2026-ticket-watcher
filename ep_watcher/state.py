@@ -120,7 +120,34 @@ def event_state(state: dict, slug: str) -> dict:
         "last_resale": UNKNOWN,
         "last_availability_alert": None,
         "known_listings": [],
+        # Failures are counted per event too, and that is not a detail.
+        # A single shared counter meant a healthy page reset the count a
+        # broken one had just incremented — so one page could fail on every
+        # cycle for a fortnight while the watchdog never fired and the hourly
+        # email reported everything fine. Reproduced before it was fixed.
+        "consecutive_failures": 0,
     })
+
+
+def worst_event(state: dict) -> tuple:
+    """(slug, failures) for whichever event is doing worst. ("", 0) if all fine."""
+    worst_slug, worst_count = "", 0
+    for slug, ev in state.get("events", {}).items():
+        count = ev.get("consecutive_failures", 0)
+        if count > worst_count:
+            worst_slug, worst_count = slug, count
+    return worst_slug, worst_count
+
+
+def _sync_global_failures(state: dict) -> None:
+    """Global counter = the worst event's.
+
+    Kept so everything that reads state["consecutive_failures"] — the
+    watchdog gate, the emails, doctor — keeps working unchanged, while no
+    longer being resettable by a *different* event succeeding.
+    """
+    _, worst = worst_event(state)
+    state["consecutive_failures"] = worst
 
 
 def should_alert_availability(state: dict, reading, new_listings=()) -> tuple:
@@ -198,10 +225,12 @@ def record_success(state: dict, reading, healthy: bool = True) -> list:
     because every poll keeps resetting it to zero.
     """
     new = pending_listings(state, reading)
+    ev_fail = event_state(state, getattr(reading, "event_slug", ""))
     if healthy:
-        state["consecutive_failures"] = 0
+        ev_fail["consecutive_failures"] = 0
     else:
-        state["consecutive_failures"] += 1
+        ev_fail["consecutive_failures"] = ev_fail.get("consecutive_failures", 0) + 1
+    _sync_global_failures(state)
     state["last_success"] = utc_now().isoformat()
 
     # Per event, matching should_alert_availability() and pending_listings().
@@ -215,8 +244,20 @@ def record_success(state: dict, reading, healthy: bool = True) -> list:
     return new
 
 
-def record_failure(state: dict) -> int:
-    state["consecutive_failures"] += 1
+def record_failure(state: dict, reading=None) -> int:
+    """Count a failed read against the event it happened to.
+
+    Returns the worst event's streak, which is what the watchdog gates on —
+    so one page failing forever escalates even while the other is fine.
+    """
+    if reading is None:
+        # No event context (older callers, and the single-event tests).
+        state["consecutive_failures"] += 1
+        return state["consecutive_failures"]
+
+    ev = event_state(state, getattr(reading, "event_slug", ""))
+    ev["consecutive_failures"] = ev.get("consecutive_failures", 0) + 1
+    _sync_global_failures(state)
     return state["consecutive_failures"]
 
 

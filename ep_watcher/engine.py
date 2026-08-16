@@ -121,7 +121,7 @@ def handle(reading: Reading, st: dict) -> None:
         liveness.publish(f"poll {st.get('checks_total', 0)} at {stamp()}")
 
     if reading.failed:
-        failures = state_mod.record_failure(st)
+        failures = state_mod.record_failure(st, reading)
         print(f"[{stamp()}] check failed ({failures} in a row)")
         _maybe_watchdog(reading, st, failures)
         # A run of failures must not suppress the hourly report — a silent
@@ -232,9 +232,25 @@ def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
     """Nag if it has been broken for long enough, whether wholly or partly."""
     if not state_mod.should_alert_watchdog(st):
         return
-    notify.watchdog(
-        watchdog_reason(reading), failures, health=state_mod.connection_health(st)
-    )
+
+    # Name the page that is actually broken. With more than one being
+    # watched, "the watcher has failed 6 checks" leaves you to guess which —
+    # and the likeliest cause of one page failing while the other is fine is
+    # that page's URL having changed, which is a five-second fix once you
+    # know where to look.
+    reason = watchdog_reason(reading)
+    slug, count = state_mod.worst_event(st)
+    if slug and len(config.EVENTS) > 1:
+        name = next((e.name for e in config.EVENTS if e.slug == slug), slug)
+        healthy = [
+            e.name for e in config.EVENTS
+            if state_mod.event_state(st, e.slug).get("consecutive_failures", 0) == 0
+        ]
+        reason += f"\n\nWorst affected: {name} ({count} failed checks in a row)."
+        if healthy:
+            reason += "\nStill working: " + ", ".join(healthy) + "."
+
+    notify.watchdog(reason, failures, health=state_mod.connection_health(st))
     st["last_watchdog_alert"] = state_mod.utc_now().isoformat()
 
 

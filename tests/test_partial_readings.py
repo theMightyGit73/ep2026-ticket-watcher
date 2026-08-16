@@ -107,7 +107,10 @@ check("total failure is failed, not degraded", (m_all_dead.failed, m_all_dead.de
 print("\nA partial poll does not count as a clean one")
 
 s = dict(st._defaults())
-s["consecutive_failures"] = 2
+# Seeded per event, not globally: the global count became a derived value
+# (the worst event's) when a second ticket page was added, so that a healthy
+# page could no longer reset a broken page's streak.
+st.event_state(s, "")["consecutive_failures"] = 2
 st.record_success(s, quiet_discovery(), healthy=False)
 check("the failure counter keeps climbing", s["consecutive_failures"], 3)
 
