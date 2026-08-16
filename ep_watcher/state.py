@@ -104,6 +104,25 @@ def _hours_since(iso: Optional[str]) -> Optional[float]:
 
 # ── Alert gating ─────────────────────────────────────────────────────────────
 
+def event_state(state: dict, slug: str) -> dict:
+    """This event's own availability history, created on first sight.
+
+    Availability is tracked per event and everything else — failures, blocks,
+    networks, heartbeat — stays global, because those describe the watcher
+    rather than any one ticket page. Sharing availability across events would
+    mean a listing on one updating the "last seen" values for the other and
+    silencing its alert entirely.
+    """
+    slug = slug or "default"
+    events = state.setdefault("events", {})
+    return events.setdefault(slug, {
+        "last_primary": UNKNOWN,
+        "last_resale": UNKNOWN,
+        "last_availability_alert": None,
+        "known_listings": [],
+    })
+
+
 def should_alert_availability(state: dict, reading, new_listings=()) -> tuple:
     """Decide whether this reading deserves an email, and why.
 
@@ -123,11 +142,12 @@ def should_alert_availability(state: dict, reading, new_listings=()) -> tuple:
     push notification shouldn't cost the ticket, but neither should a stuck
     'available' spam the inbox every minute for a day.
     """
+    ev = event_state(state, getattr(reading, "event_slug", ""))
     reasons = []
-    if reading.primary in GOOD_STATUSES and state["last_primary"] not in GOOD_STATUSES:
-        reasons.append(f"primary stock went {state['last_primary']} → {reading.primary}")
-    if reading.resale in GOOD_STATUSES and state["last_resale"] not in GOOD_STATUSES:
-        reasons.append(f"resale went {state['last_resale']} → {reading.resale}")
+    if reading.primary in GOOD_STATUSES and ev["last_primary"] not in GOOD_STATUSES:
+        reasons.append(f"primary stock went {ev['last_primary']} → {reading.primary}")
+    if reading.resale in GOOD_STATUSES and ev["last_resale"] not in GOOD_STATUSES:
+        reasons.append(f"resale went {ev['last_resale']} → {reading.resale}")
     if new_listings:
         reasons.append(f"new listing(s): {', '.join(new_listings)}")
 
@@ -135,7 +155,7 @@ def should_alert_availability(state: dict, reading, new_listings=()) -> tuple:
         return True, "; ".join(reasons)
 
     if reading.any_good:
-        since = _hours_since(state["last_availability_alert"])
+        since = _hours_since(ev["last_availability_alert"])
         if since is None or since >= config.AVAILABILITY_RENAG_HOURS:
             return True, "still available — periodic reminder"
 
@@ -161,7 +181,8 @@ def pending_listings(state: dict, reading) -> list:
     see this *before* state is updated, and folding the two together is what
     made the edge detection silently useless.
     """
-    previous = set(state.get("known_listings", []))
+    ev = event_state(state, getattr(reading, "event_slug", ""))
+    previous = set(ev.get("known_listings", []))
     return [l.describe() for l in reading.listings if l.describe() not in previous]
 
 
@@ -182,9 +203,15 @@ def record_success(state: dict, reading, healthy: bool = True) -> list:
     else:
         state["consecutive_failures"] += 1
     state["last_success"] = utc_now().isoformat()
-    state["known_listings"] = [l.describe() for l in reading.listings]
-    state["last_primary"] = reading.primary
-    state["last_resale"] = reading.resale
+
+    # Per event, matching should_alert_availability() and pending_listings().
+    # These three have to agree about where availability history lives: while
+    # the reads moved here and this write did not, every second sighting of
+    # the same listing looked new and re-alerted.
+    ev = event_state(state, getattr(reading, "event_slug", ""))
+    ev["known_listings"] = [l.describe() for l in reading.listings]
+    ev["last_primary"] = reading.primary
+    ev["last_resale"] = reading.resale
     return new
 
 

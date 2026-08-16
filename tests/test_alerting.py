@@ -30,6 +30,18 @@ def fresh():
     return dict(st._defaults())
 
 
+def ev(state):
+    """This event's availability history.
+
+    Availability moved under state["events"][slug] when a second ticket page
+    was added, so that a listing on one could not update the "last seen"
+    values for the other and silence its alert. These tests use the default
+    slug; what matters is that they read and write the same place the code
+    does, rather than the old top-level keys the code no longer looks at.
+    """
+    return st.event_state(state, "")
+
+
 print("\nAvailability alerting")
 
 # Resale appearing from nothing must alert.
@@ -40,12 +52,12 @@ check("resale UNAVAILABLE -> AVAILABLE alerts", should, True)
 
 # Once recorded and alerted, an unchanged repeat must stay quiet.
 st.record_success(s, r)
-s["last_availability_alert"] = st.utc_now().isoformat()
+ev(s)["last_availability_alert"] = st.utc_now().isoformat()
 should, _ = st.should_alert_availability(s, r)
 check("same state repeated stays quiet", should, False)
 
 # ...but it re-nags once the clock runs out, so one missed push isn't fatal.
-s["last_availability_alert"] = (
+ev(s)["last_availability_alert"] = (
     st.utc_now() - timedelta(hours=config.AVAILABILITY_RENAG_HOURS + 0.1)
 ).isoformat()
 should, _ = st.should_alert_availability(s, r)
@@ -54,8 +66,8 @@ check("re-nags after the renag window", should, True)
 # Primary appearing while resale was ALREADY available must still alert —
 # a single flat boolean would have swallowed this.
 s = fresh()
-s["last_resale"], s["last_primary"] = AVAILABLE, UNAVAILABLE
-s["last_availability_alert"] = st.utc_now().isoformat()
+ev(s)["last_resale"], ev(s)["last_primary"] = AVAILABLE, UNAVAILABLE
+ev(s)["last_availability_alert"] = st.utc_now().isoformat()
 r2 = Reading(source="t", primary=AVAILABLE, resale=AVAILABLE)
 should, why = st.should_alert_availability(s, r2)
 check("primary appearing under available resale alerts", should, True)
@@ -63,7 +75,7 @@ print(f"        reason: {why}")
 
 # A failed read must never look like "sold out".
 s = fresh()
-s["last_resale"] = AVAILABLE
+ev(s)["last_resale"] = AVAILABLE
 r3 = Reading(source="t", primary=UNKNOWN, resale=UNKNOWN)
 check("UNKNOWN is not 'good'", r3.any_good, False)
 

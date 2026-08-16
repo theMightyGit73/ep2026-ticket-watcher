@@ -64,9 +64,34 @@ def cmd_login(_args) -> int:
 
 
 def cmd_check(_args) -> int:
-    """Read once and print the result. Sends nothing."""
-    _banner("Manual check (no notifications)")
-    reading = engine.poll()
+    """Read every watched event once and print the results. Sends nothing."""
+    print(f"\n[{stamp()}] Manual check of {len(config.EVENTS)} event(s) — no notifications\n")
+
+    worst = 0
+    session = None
+    try:
+        if config.USE_BROWSER:
+            # One browser for all events rather than a cold start each: the
+            # page load is the cheap part, launching Chrome is not.
+            #
+            # Its own profile, because Chrome locks a user-data-dir and the
+            # service is usually running — checking by hand must not require
+            # stopping the thing being checked.
+            session = _browser().BrowserSession(
+                profile_dir=config.PROFILE_DIR.parent / "chrome-profile-check"
+            )
+            session.start()
+        for event in config.EVENTS:
+            worst = max(worst, _print_reading(engine.poll(session, event)))
+    finally:
+        if session:
+            session.close()
+    return worst
+
+
+def _print_reading(reading) -> int:
+    print(f"  {reading.event_name}")
+    print(f"  {reading.event_url}")
 
     print("─" * 68)
     print(f"  Primary (box office) : {reading.primary}")

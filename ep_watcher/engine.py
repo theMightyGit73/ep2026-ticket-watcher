@@ -41,32 +41,49 @@ def merge(readings: List[Reading]) -> Reading:
     return merged
 
 
-def poll(session=None) -> Reading:
-    """Ask every configured source once and merge the answers.
+def poll(session=None, event=None) -> Reading:
+    """Ask every configured source about one event and merge the answers.
 
     The API sources run first and cost one HTTP call each; the browser is the
     expensive one. With EP_USE_BROWSER=0 the browser is skipped entirely,
     which is what lets the watcher run somewhere that has no Chrome — at the
     cost of everything only the browser can see.
     """
+    event = event or config.EVENTS[0]
     readings = []
 
     if discovery.configured():
-        readings.append(discovery.check())
+        readings.append(discovery.check(event))
     if inventory_api.configured():
         readings.append(inventory_api.check())
 
     if config.USE_BROWSER:
         from .sources import browser  # lazy: see the note at the top of the file
 
-        readings.append(session.check() if session else browser.check())
+        readings.append(session.check(event) if session else browser.check(event))
     elif not readings:
         stub = Reading(source="none")
         stub.failed = True
         stub.note("browser disabled and no API key set — nothing can answer")
         readings.append(stub)
 
-    return merge(readings)
+    merged = merge(readings)
+    # merge() builds a fresh Reading, so the event identity has to be put back
+    # or every alert would be unable to say which page it is about.
+    merged.event_slug = event.slug
+    merged.event_name = event.name
+    merged.event_url = event.url
+    return merged
+
+
+def poll_all(session=None) -> list:
+    """One reading per watched event.
+
+    Every event is searched on every cycle rather than round-robin, so a
+    listing on the quieter page is never up to a full cycle stale. The cost is
+    paid in the interval instead — see config.poll_interval().
+    """
+    return [poll(session, event) for event in config.EVENTS]
 
 
 def handle(reading: Reading, st: dict) -> None:
@@ -151,7 +168,11 @@ def handle(reading: Reading, st: dict) -> None:
         notify.reserved_in_browser(reading)
     else:
         notify.available(reading, reason, new_listings)
-    st["last_availability_alert"] = state_mod.utc_now().isoformat()
+    # Per event, or alerting on one page would start the re-nag clock for the
+    # other and swallow its next find.
+    state_mod.event_state(st, reading.event_slug)["last_availability_alert"] = (
+        state_mod.utc_now().isoformat()
+    )
 
     # A ticket turned up and David has been told properly. Restart the hourly
     # clock rather than following the good news with "no success this hour".
@@ -255,10 +276,36 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
 
 
 def run_once(session=None) -> Reading:
+    """One full cycle across every watched event.
+
+    Returns the most significant reading — a find beats a block beats a plain
+    'nothing', so callers that inspect the result (the watch loop deciding
+    whether to back off, or to stop and let David check out) still see the
+    thing that matters rather than whichever event happened to be last.
+
+    State is saved once at the end, not per event, so a crash midway cannot
+    leave one event's history advanced and the other's behind.
+    """
     st = state_mod.load()
     try:
-        reading = poll(session)
-        handle(reading, st)
-        return reading
+        readings = []
+        for reading in poll_all(session):
+            handle(reading, st)
+            readings.append(reading)
+        return _most_significant(readings)
     finally:
         state_mod.save(st)
+
+
+def _most_significant(readings: list) -> Reading:
+    if not readings:
+        stub = Reading(source="none")
+        stub.failed = True
+        return stub
+    for found in (r for r in readings if r.any_good):
+        return found
+    for blocked in (r for r in readings if r.blocked):
+        return blocked
+    for failed in (r for r in readings if r.failed):
+        return failed
+    return readings[0]

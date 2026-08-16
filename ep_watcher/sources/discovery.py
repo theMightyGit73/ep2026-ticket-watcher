@@ -63,7 +63,7 @@ def _get(path: str, **params) -> Optional[dict]:
     return resp.json()
 
 
-def check() -> Reading:
+def check(event=None) -> Reading:
     """Watch for the event *reappearing* in the Discovery index.
 
     Measured on 2026-08-13: the Weekend Camping event is not in Discovery at
@@ -82,7 +82,13 @@ def check() -> Reading:
     and with no risk to David's IP or account — not a substitute for the
     browser.
     """
-    reading = Reading(source=SOURCE)
+    event = event or config.EVENTS[0]
+    reading = Reading(
+        source=SOURCE,
+        event_slug=event.slug,
+        event_name=event.name,
+        event_url=event.url,
+    )
 
     if not configured():
         reading.failed = True
@@ -103,7 +109,7 @@ def check() -> Reading:
         reading.failed = True
         return reading.note("Discovery returned no Electric Picnic events at all — unexpected")
 
-    named = [e for e in events if _is_wanted_event(e)]
+    named = [e for e in events if _is_wanted_event(e, event)]
     reading.note(f"{len(events)} Electric Picnic event(s) indexed; {len(named)} match the wanted ticket")
 
     if named:
@@ -150,15 +156,16 @@ def check() -> Reading:
     return reading
 
 
-def _is_wanted_event(event: dict) -> bool:
+def _is_wanted_event(indexed: dict, event=None) -> bool:
     """Does this indexed event look like the ticket David actually wants?
 
     Matched on name rather than id because the id in the ticketmaster.ie URL
     (18006314BD813D3E) is a host id that Discovery does not recognise — a
     direct lookup by it returns 404, confirmed.
     """
-    name = (event.get("name") or "").lower()
-    if not all(word in name for word in config.DISCOVERY_MATCH_WORDS):
+    event = event or config.EVENTS[0]
+    name = (indexed.get("name") or "").lower()
+    if not all(word in name for word in event.match_words):
         return False
     # The campervan passes are permanently indexed and are not the wanted
     # ticket; without this they would look like a permanent "available".

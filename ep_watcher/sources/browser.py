@@ -74,8 +74,18 @@ def _normalise(text: str) -> str:
 class BrowserSession:
     """A warm Chrome, intended to be held open across many polls."""
 
-    def __init__(self, headless: Optional[bool] = None):
+    def __init__(self, headless: Optional[bool] = None, profile_dir=None):
+        """`profile_dir` overrides the shared profile.
+
+        Chrome takes an exclusive lock on a user-data-dir, so a manual
+        `check` while the service is running fails with "profile already in
+        use" — a diagnostic that only works when the thing being diagnosed is
+        stopped is not much of a diagnostic. Passing a scratch directory lets
+        the two coexist. The cost is that a fresh profile has to clear the
+        bot check from cold, which it does.
+        """
         self.headless = config.HEADLESS if headless is None else headless
+        self.profile_dir = Path(profile_dir) if profile_dir else config.PROFILE_DIR
         self._pw = None
         self._ctx = None
         self._page = None
@@ -88,7 +98,7 @@ class BrowserSession:
         self.close()
 
     def start(self):
-        config.PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
         args = ["--disable-blink-features=AutomationControlled"]
         if config.OFFSCREEN and not self.headless:
             # Still a real headed browser as far as Chrome and the bot check
@@ -97,7 +107,7 @@ class BrowserSession:
             args += ["--window-position=-2400,-2400"]
         self._pw = sync_playwright().start()
         self._ctx = self._pw.chromium.launch_persistent_context(
-            user_data_dir=str(config.PROFILE_DIR),
+            user_data_dir=str(self.profile_dir),
             channel=config.BROWSER_CHANNEL,
             headless=self.headless,
             viewport={"width": 1440, "height": 900},
@@ -143,7 +153,7 @@ class BrowserSession:
         import shutil
 
         self.close()
-        target = config.PROFILE_DIR
+        target = self.profile_dir
         try:
             if target.exists():
                 shutil.rmtree(target)
@@ -180,7 +190,7 @@ class BrowserSession:
                 continue
         return False
 
-    def _load(self, reading: Reading) -> Optional[str]:
+    def _load(self, reading: Reading, url: str = None) -> Optional[str]:
         """Navigate until we have the real event page. Returns normalised text.
 
         The 401-then-reload dance is expected, not exceptional — see the module
@@ -189,7 +199,7 @@ class BrowserSession:
         last_status = None
         for attempt in range(1, 4):
             try:
-                resp = self.page.goto(config.EVENT_URL, wait_until="domcontentloaded")
+                resp = self.page.goto(url or config.EVENT_URL, wait_until="domcontentloaded")
                 last_status = resp.status if resp else None
             except PlaywrightTimeout:
                 reading.note(f"attempt {attempt}: navigation timed out")
@@ -414,10 +424,16 @@ class BrowserSession:
         reading.note("search did not resolve within the timeout")
 
     # ── the public call ──────────────────────────────────────────────────────
-    def check(self) -> Reading:
-        reading = Reading(source=SOURCE)
+    def check(self, event=None) -> Reading:
+        event = event or config.EVENTS[0]
+        reading = Reading(
+            source=SOURCE,
+            event_slug=event.slug,
+            event_name=event.name,
+            event_url=event.url,
+        )
 
-        text = self._load(reading)
+        text = self._load(reading, event.url)
         if text is None:
             return reading
 
@@ -435,15 +451,16 @@ class BrowserSession:
             )
             return reading
 
-        return self._search_quantities(reading, text)
+        return self._search_quantities(reading, text, event)
 
-    def _search_quantities(self, reading: Reading, text: str) -> Reading:
+    def _search_quantities(self, reading: Reading, text: str, event=None) -> Reading:
         """Search each wanted quantity, keeping the best answer found.
 
         Stops early on a basket, because at that point there is a live hold
         with a countdown and continuing to click things is the last thing we
         want to be doing.
         """
+        event = event or config.EVENTS[0]
         searched = 0
         for index, qty in enumerate(config.WANTED_QUANTITIES):
             if index > 0:
@@ -453,7 +470,7 @@ class BrowserSession:
                 # when it gives up, which would throw away a perfectly good
                 # answer already collected from an earlier quantity.
                 reload_probe = Reading(source=SOURCE)
-                if self._load(reload_probe) is None:
+                if self._load(reload_probe, event.url) is None:
                     reading.notes.extend(f"qty={qty}: {n}" for n in reload_probe.notes)
                     reading.note(f"could not reload for qty={qty} — ending the sweep here")
                     break
@@ -526,7 +543,7 @@ class BrowserSession:
         return base
 
 
-def check() -> Reading:
+def check(event=None) -> Reading:
     """One-shot check. Cold-starts a browser; prefer `watch` for repeat polls."""
     with BrowserSession() as session:
-        return session.check()
+        return session.check(event)

@@ -65,6 +65,12 @@ class Reading:
     say anything useful about either.
     """
     source: str
+    #: Which ticket page this reading is about. Carried on the reading itself
+    #: so an alert can never name the wrong event — with more than one page
+    #: being watched, "a ticket is available" is useless without saying which.
+    event_slug: str = ""
+    event_name: str = ""
+    event_url: str = ""
     primary: str = UNKNOWN
     resale: str = UNKNOWN
     listings: List[Listing] = field(default_factory=list)
@@ -114,4 +120,5 @@ class Reading:
         return self
 
     def summary(self) -> str:
-        return f"primary={self.primary} resale={self.resale} (via {self.source})"
+        who = f"{self.event_slug}: " if self.event_slug else ""
+        return f"{who}primary={self.primary} resale={self.resale} (via {self.source})"

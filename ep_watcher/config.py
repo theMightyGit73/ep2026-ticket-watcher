@@ -8,12 +8,56 @@ import os
 from pathlib import Path
 
 # ── The event ────────────────────────────────────────────────────────────────
-EVENT_URL = (
-    "https://www.ticketmaster.ie"
-    "/electric-picnic-2026-weekend-camping-co-laois-28-08-2026"
-    "/event/18006314BD813D3E"
-)
-EVENT_NAME = "Electric Picnic 2026 - Weekend Camping"
+class Event:
+    """One ticket page to watch.
+
+    `slug` keys this event's own availability history in state.json. Without
+    per-event history, a listing appearing on one page would update the
+    shared "last seen" values and silence the alert for the other — the two
+    are separate products and have to be tracked separately.
+    """
+
+    def __init__(self, slug: str, name: str, url: str, match_words=()):
+        self.slug = slug
+        self.name = name
+        self.url = url
+        #: Words that identify this event in the Discovery index, lowercase.
+        self.match_words = tuple(w.lower() for w in match_words)
+
+    def __repr__(self):
+        return f"Event({self.slug})"
+
+
+EVENTS = [
+    Event(
+        slug="weekend-camping",
+        name="Electric Picnic 2026 - Weekend Camping",
+        url=(
+            "https://www.ticketmaster.ie"
+            "/electric-picnic-2026-weekend-camping-co-laois-28-08-2026"
+            "/event/18006314BD813D3E"
+        ),
+        match_words=("electric picnic", "weekend"),
+    ),
+    # The instalment-plan listing for the same festival. A separate page with
+    # its own inventory and its own resale panel, so it needs watching in its
+    # own right — a ticket can appear on one and not the other.
+    Event(
+        slug="weekend-camping-instalment",
+        name="Electric Picnic 2026 - Weekend Camping Instalment Plan",
+        url=(
+            "https://www.ticketmaster.ie"
+            "/electric-picnic-2026-weekend-camping-instalment-co-laois-28-08-2026"
+            "/event/18006314CFB4A99E"
+        ),
+        match_words=("electric picnic", "weekend", "instalment"),
+    ),
+]
+
+# The first event stays the default for anything that still speaks in the
+# singular (the `login` and `calibrate` commands, mainly).
+EVENT_URL = EVENTS[0].url
+EVENT_NAME = EVENTS[0].name
 
 # Last day the watcher runs. The festival opens on the 28th, so a ticket
 # found that morning is still usable — this is the last watching day, and it
@@ -168,7 +212,26 @@ AVAILABILITY_RENAG_HOURS = 1
 # got the home IP flagged. Acceptable now that the watcher alternates
 # networks every 3 hours, resets its browser profile on a block, and backs
 # off exponentially — none of which existed when that block happened.
-POLL_INTERVAL_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "300"))
+_POLL_PER_EVENT_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "300"))
+
+
+def poll_interval() -> int:
+    """Seconds between polls, scaled so total request volume stays flat.
+
+    Every event is searched on every poll, so N events means N searches per
+    cycle. Holding the interval fixed while adding a second event would
+    double the hourly rate to ~24 searches — above the ~20/hour that got the
+    home IP flagged, which is the one outcome that costs the ticket outright.
+    Scaling instead trades per-event frequency for coverage, honestly and
+    visibly, rather than quietly buying the second event with risk.
+
+    Set EP_POLL_SECONDS to the per-event budget; the cycle is that times the
+    number of events.
+    """
+    return _POLL_PER_EVENT_SECONDS * max(1, len(EVENTS))
+
+
+POLL_INTERVAL_SECONDS = poll_interval()
 
 # Overnight, poll far less often.
 #

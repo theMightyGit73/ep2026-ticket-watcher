@@ -47,7 +47,13 @@ def _send_email(subject: str, body: str) -> None:
     print(f"[{stamp()}] Email sent to {config.ALERT_TO}")
 
 
-def _send_ntfy(title: str, message: str, priority: str = "default", tags=None) -> None:
+def _send_ntfy(title: str, message: str, priority: str = "default", tags=None,
+               click: str = None) -> None:
+    """`click` is where tapping the notification takes you.
+
+    Defaulting it to the first event was fine with one page; with two it
+    would open the wrong one, at speed, while the real listing sold.
+    """
     if not config.NTFY_TOPIC:
         return
     requests.post(
@@ -57,7 +63,7 @@ def _send_ntfy(title: str, message: str, priority: str = "default", tags=None) -
             "Title": _mark(title),
             "Priority": priority,
             "Tags": ",".join(tags or []),
-            "Click": config.EVENT_URL,
+            "Click": click or config.EVENT_URL,
         },
         timeout=10,
     )
@@ -91,26 +97,34 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     if new_listings:
         new_block = "\nNew since the last check:\n" + "\n".join(f"  • {n}" for n in new_listings) + "\n"
 
-    subject = f"TICKETS AVAILABLE ({where}): {config.EVENT_NAME}"
+    # Name the event from the reading, never from config: with more than one
+    # page being watched, an alert that says the wrong one sends you to a page
+    # with nothing on it while the real listing sells.
+    name = reading.event_name or config.EVENT_NAME
+    url = reading.event_url or config.EVENT_URL
+
+    subject = f"TICKETS AVAILABLE ({where}): {name}"
     body = (
         f"Hi David,\n\n"
-        f"A ticket has shown up for {config.EVENT_NAME} on the {where}.\n\n"
+        f"A ticket has shown up for {name} on the {where}.\n\n"
         f"What the watcher saw:\n{_listing_block(reading.listings)}\n{new_block}\n"
         f"Trigger : {reason}\n"
         f"Source  : {reading.source}\n"
         f"Wanted  : {config.WANTED_QUANTITY} ticket(s)\n\n"
         f"Go buy it now — this can be gone in under a minute, and the watcher\n"
         f"deliberately does not buy on your behalf.\n\n"
-        f"{config.EVENT_URL}\n\n"
+        f"{url}\n\n"
         f"Checked at: {stamp()}\n"
     )
     _safe("available-email", _send_email, subject, body)
     _safe(
         "available-push", _send_ntfy,
         title=f"EP2026: ticket on the {where}",
-        message=_listing_block(reading.listings) + "\n\nTap to open Ticketmaster.",
+        message=f"{name}\n\n" + _listing_block(reading.listings)
+                + "\n\nTap to open this event.",
         priority="urgent",
         tags=["tickets", "rotating_light"],
+        click=url,
     )
 
 
