@@ -235,8 +235,12 @@ class FakeSession(browser.BrowserSession):
     def _await_result(self, timeout_s=45):
         return self.outcome
 
-    def _await_resale_panel(self, timeout_s=25):
-        return browser.RESALE_HEADING in browser._normalise(self.page_text)
+    def _await_resale_panel(self, timeout_s=25, render_s=8.0, settle_s=2.0):
+        # (readable, why) — the same contract the real method has, so a
+        # future change to it breaks here rather than in production.
+        if browser.RESALE_HEADING in browser._normalise(self.page_text):
+            return True, "panel rendered"
+        return False, "no resale call in this fixture"
 
     def visible_text(self):
         return self.page_text

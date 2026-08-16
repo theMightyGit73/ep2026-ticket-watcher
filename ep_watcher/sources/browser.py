@@ -75,6 +75,22 @@ def _normalise(text: str) -> str:
     return re.sub(r"[’'`]", "", text or "").lower()
 
 
+def _is_listing_row(line: str) -> bool:
+    """Is this line one actual resale listing?
+
+    Whole-line equality, never a substring test, and that is not fussiness.
+    The panel's heading is "Verified Resale Tickets" and it *contains*
+    "Verified Resale Ticket" — so `RESALE_MARKER in text` is true for a panel
+    that is rendered and completely empty. Anything asking "are there
+    listings" has to use this one rule, or the answers drift apart.
+    """
+    return line.strip().lower() == RESALE_MARKER
+
+
+def _has_listing_rows(text: str) -> bool:
+    return any(_is_listing_row(line) for line in (text or "").splitlines())
+
+
 class BrowserSession:
     """A warm Chrome, intended to be held open across many polls."""
 
@@ -356,8 +372,9 @@ class BrowserSession:
             time.sleep(1.0)
         return "timeout"
 
-    def _await_resale_panel(self, timeout_s: int = 25) -> bool:
-        """Wait for the resale panel, which arrives after the rejection does.
+    def _await_resale_panel(self, timeout_s: int = 25, render_s: float = 8.0,
+                            settle_s: float = 2.0) -> tuple:
+        """Wait until the resale panel can actually be READ. Returns (ok, why).
 
         The rejection message and the resale panel are two different responses:
         the search resolves, and only then does a separate call to
@@ -366,24 +383,69 @@ class BrowserSession:
         before resale has landed, and records a real listing as "no resale
         panel" — a missed alert on the one signal that matters most.
 
-        The wait was 12s and measured too short: over the first day of
-        running, 9 of 59 polls gave up before the panel arrived. It is 25s
-        now, and the reason to fix it by waiting rather than by re-searching
-        is the scarce resource. Waiting costs nothing at all; a second search
-        costs another request against the rate limit that got this client
-        blocked three times in that same day. Time is the cheap thing here.
+        The network response and the painted panel are not the same event,
+        and treating them as one is what made this go wrong. Watching for the
+        resale call is the right trigger, because it fires even when the panel
+        is empty. But a Playwright `response` event fires when the response
+        *headers* arrive, and the panel is rendered some way after that.
+        Returning there meant the caller read the page before the panel
+        existed and recorded a perfectly good poll as resale-blind: measured
+        across 2026-08-16, that took the blind rate from 12% of polls to 30%.
+
+        So the response is used for the thing it is genuinely good at —
+        knowing how long to stay patient — and the DOM still decides. Once
+        the call has answered, the panel gets `render_s` to paint, and if it
+        does not, we stop and say so rather than spending the whole timeout on
+        a page that was never going to show one.
+
+        Waiting is the right currency to pay in. It costs nothing; a second
+        search costs another request against the rate limit that blocked this
+        client three times in a single day.
         """
         deadline = time.time() + timeout_s
+        give_up_at = None
+
         while time.time() < deadline:
-            # The network response settles it: once the resale call has come
-            # back, the panel's state is known, empty or not.
-            if self._resale_response is not None:
-                return True
-            text = _normalise(self.visible_text())
-            if RESALE_HEADING in text or "other options" in text:
-                return True
+            # The success condition is *exactly* what _parse_resale keys on.
+            # That agreement is deliberate. While the two disagreed — this
+            # accepted a bare "Other Options", the parser demanded the
+            # heading — a poll could be declared readable and then parsed as
+            # resale-blind, with nothing in the log to explain the gap.
+            if RESALE_HEADING in _normalise(self.visible_text()):
+                return True, self._settle_resale(settle_s)
+
+            if self._resale_response is not None and give_up_at is None:
+                give_up_at = min(time.time() + render_s, deadline)
+            if give_up_at is not None and time.time() >= give_up_at:
+                status = (self._resale_response or {}).get("status")
+                return False, (
+                    f"the resale call answered (HTTP {status}) but the panel did "
+                    f"not render within {render_s:.0f}s"
+                )
             time.sleep(0.5)
-        return False
+
+        if self._resale_response is not None:
+            return False, "the resale call answered but the panel never rendered"
+        return False, (
+            f"no resale call in {timeout_s}s — the search may not have completed"
+        )
+
+    def _settle_resale(self, settle_s: float) -> str:
+        """Give the listing rows a moment to paint under the heading.
+
+        The heading arrives before the rows do, so parsing on the heading
+        alone can see an empty panel and record UNAVAILABLE for a page that is
+        about to show a listing. That is the one error worse than being blind:
+        UNKNOWN merely wastes the poll, while UNAVAILABLE is a confident wrong
+        answer, and better_status() ranks it above UNKNOWN — so it would win
+        the merge and be printed in the hourly email as fact.
+        """
+        deadline = time.time() + settle_s
+        while time.time() < deadline:
+            if _has_listing_rows(self.visible_text()):
+                return "panel rendered with listing(s)"
+            time.sleep(0.4)
+        return "panel rendered"
 
     # ── reading the answer ───────────────────────────────────────────────────
     def _parse_resale(self, text: str, reading: Reading) -> None:
@@ -398,7 +460,7 @@ class BrowserSession:
         listings: List[Listing] = []
 
         for i, line in enumerate(lines):
-            if line.lower() != RESALE_MARKER:
+            if not _is_listing_row(line):
                 continue
             section = None
             if i > 0:
@@ -514,8 +576,14 @@ class BrowserSession:
             searched += 1
 
             outcome = self._await_result()
-            if outcome == "rejected" and not self._await_resale_panel():
-                reading.note(f"qty={qty}: resale panel never arrived")
+            if outcome == "rejected":
+                readable, why = self._await_resale_panel()
+                # Say which of the two failures this was. "The call never came
+                # back" and "the call came back and nothing painted" have
+                # different fixes, and the old single note could not tell them
+                # apart — so a resale-blind run left no evidence of its cause.
+                if not readable:
+                    reading.note(f"qty={qty}: resale unreadable — {why}")
             text = _normalise(self.visible_text())
 
             attempt = Reading(source=SOURCE)
