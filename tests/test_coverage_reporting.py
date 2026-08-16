@@ -57,10 +57,10 @@ check("a large check count alone proves nothing",
 print("\nOnce it is measuring, the rate is reported honestly")
 
 s = dict(st._defaults())
-for _ in range(10):
+for _ in range(st.MIN_RESALE_SAMPLE):
     poll(s, UNAVAILABLE)
 check("all readable is OK", st.resale_visibility(s)[0], "ok")
-check("counted every poll", s["resale_checks_total"], 10)
+check("counted every poll", s["resale_checks_total"], st.MIN_RESALE_SAMPLE)
 check("and none as blind", s["resale_blind_total"], 0)
 
 s = dict(st._defaults())
@@ -72,9 +72,10 @@ check("the odd blind poll is tolerated", st.resale_visibility(s)[0], "ok")
 # One in ten is the line, because a blind poll is close to a whole missed
 # chance: the listing observed on this event lived about one poll interval.
 s = dict(st._defaults())
-for _ in range(9):
+for _ in range(st.MIN_RESALE_SAMPLE * 9 // 10):
     poll(s, UNAVAILABLE)
-poll(s, UNKNOWN)
+for _ in range(st.MIN_RESALE_SAMPLE - st.MIN_RESALE_SAMPLE * 9 // 10):
+    poll(s, UNKNOWN)
 check("one in ten is worth saying out loud", st.resale_visibility(s)[0], "watch")
 
 # The rate actually observed in production on 2026-08-14.
@@ -88,9 +89,10 @@ check("the real observed rate raises a warning", severity, "watch")
 check("and reports the fraction", "50/59" in headline, True)
 
 s = dict(st._defaults())
-for _ in range(4):
+for _ in range(st.MIN_RESALE_SAMPLE):
     poll(s, UNKNOWN)
-poll(s, UNAVAILABLE)
+for _ in range(3):
+    poll(s, UNAVAILABLE)
 check("mostly blind is a failure", st.resale_visibility(s)[0], "bad")
 
 print("\nA real find is never counted as blindness")
@@ -113,8 +115,15 @@ check("hourly counters cleared", st.coverage(s), (0, 0))
 check("lifetime blind count survives", s["resale_blind_total"], 3)
 check("lifetime partial count survives", s["degraded_total"], 1)
 check("lifetime denominator survives", s["resale_checks_total"], 3)
-check("so the doctor still has a rate to report",
-      st.resale_visibility(s)[0], "bad")
+# Three polls is deliberately below MIN_RESALE_SAMPLE: a percentage from a
+# handful of readings is noise, and reporting one after a fresh start turned a
+# single slow panel into a FAIL for a watcher that was working perfectly.
+check("but three polls is too few to draw a verdict from",
+      st.resale_visibility(s)[0], "unknown")
+
+for _ in range(st.MIN_RESALE_SAMPLE):
+    poll(s, UNKNOWN)
+check("once there is a real sample, it reports", st.resale_visibility(s)[0], "bad")
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

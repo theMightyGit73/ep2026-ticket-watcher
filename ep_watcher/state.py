@@ -339,6 +339,12 @@ def coverage(state: dict) -> tuple:
     )
 
 
+#: Polls needed before a resale-visibility percentage means anything. Twelve
+#: is about an hour at the current cadence — long enough to include a slow
+#: cold start without being dominated by it.
+MIN_RESALE_SAMPLE = 12
+
+
 def resale_visibility(state: dict) -> tuple:
     """Return (severity, headline) for how often resale can actually be read.
 
@@ -351,6 +357,18 @@ def resale_visibility(state: dict) -> tuple:
     blind = state.get("resale_blind_total", 0)
     if not total:
         return "unknown", "not measured yet — starts on the next poll"
+
+    # A rate needs a denominator worth dividing by. Straight after a fresh
+    # start there are two polls, and the first one spends its time clearing
+    # the cookie dialog and the bot check — so a single slow panel reads as
+    # 50% blind and reports FAIL for a watcher that is working perfectly.
+    # Crying wolf on two data points is how a health check gets ignored.
+    if total < MIN_RESALE_SAMPLE:
+        return (
+            "unknown",
+            f"only {total} poll(s) so far — too few to judge "
+            f"(needs {MIN_RESALE_SAMPLE})",
+        )
 
     # Thresholds set against what a blind poll costs rather than against a
     # tidy round number. A resale listing on this event was observed living
