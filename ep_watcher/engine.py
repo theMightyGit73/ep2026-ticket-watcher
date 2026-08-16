@@ -241,12 +241,18 @@ def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
     reason = watchdog_reason(reading)
     slug, count = state_mod.worst_event(st)
     if slug and len(config.EVENTS) > 1:
-        name = next((e.name for e in config.EVENTS if e.slug == slug), slug)
+        broken = next((e for e in config.EVENTS if e.slug == slug), None)
+        name = broken.name if broken else slug
         healthy = [
             e.name for e in config.EVENTS
             if state_mod.event_state(st, e.slug).get("consecutive_failures", 0) == 0
         ]
         reason += f"\n\nWorst affected: {name} ({count} failed checks in a row)."
+        # The URL, not just the name. The likeliest cause of one page failing
+        # while the other is fine is that page's URL having changed, and
+        # checking that takes seconds once you have the link to open.
+        if broken:
+            reason += f"\n{broken.url}"
         if healthy:
             reason += "\nStill working: " + ", ".join(healthy) + "."
 
@@ -283,6 +289,10 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
         health=state_mod.connection_health(st),
         net=net,
         coverage=cover,
+        # Every page's own last reading, rather than whichever one happened to
+        # trip the clock. Which page a status belongs to is the whole question
+        # when two are being watched.
+        events=state_mod.event_summaries(st),
     )
     if net and net[0]:
         # Asked for a switch — don't ask again until the next window, whether

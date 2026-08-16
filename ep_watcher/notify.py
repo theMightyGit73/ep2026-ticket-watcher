@@ -79,6 +79,38 @@ def _safe(label: str, fn: Callable, *args, **kwargs) -> None:
 
 # ── The alerts ───────────────────────────────────────────────────────────────
 
+def _event_of(reading: Reading) -> tuple:
+    """(name, url) for the page a reading is about. Never guessed from config.
+
+    Two pages are watched — an ordinary Weekend Camping ticket and the
+    Weekend Camping Instalment Plan — and they are separate products with
+    separate inventory. An alert that takes its name and link from
+    config.EVENT_* always describes the first one, so a find on the instalment
+    page would send David to a page with nothing on it while the real listing
+    sold. The config values remain only as the fallback for a reading that
+    genuinely carries no event, which is the single-event and test case.
+    """
+    name = getattr(reading, "event_name", "") or config.EVENT_NAME
+    url = getattr(reading, "event_url", "") or config.EVENT_URL
+    return name, url
+
+
+def _which_ticket(name: str) -> str:
+    """The one-line distinction between the two pages, spelled out.
+
+    Both are "Weekend Camping" and the names differ only by a trailing
+    "Instalment Plan", which is easy to skim past on a phone at speed. Since
+    the two cost differently and are bought differently, the email says which
+    kind it is in its own words rather than relying on the reader spotting a
+    suffix.
+    """
+    if "instalment" in (name or "").lower():
+        return ("This is the INSTALMENT PLAN page — the pay-in-stages listing, "
+                "not the standard one.")
+    return ("This is the STANDARD Weekend Camping page — the pay-in-full "
+            "listing, not the instalment plan.")
+
+
 def _listing_block(listings: List[Listing]) -> str:
     if not listings:
         return "  (the source reported availability but named no specific tier)"
@@ -100,13 +132,13 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     # Name the event from the reading, never from config: with more than one
     # page being watched, an alert that says the wrong one sends you to a page
     # with nothing on it while the real listing sells.
-    name = reading.event_name or config.EVENT_NAME
-    url = reading.event_url or config.EVENT_URL
+    name, url = _event_of(reading)
 
     subject = f"TICKETS AVAILABLE ({where}): {name}"
     body = (
         f"Hi David,\n\n"
         f"A ticket has shown up for {name} on the {where}.\n\n"
+        f"{_which_ticket(name)}\n\n"
         f"What the watcher saw:\n{_listing_block(reading.listings)}\n{new_block}\n"
         f"Trigger : {reason}\n"
         f"Source  : {reading.source}\n"
@@ -133,26 +165,38 @@ def reserved_in_browser(reading: Reading) -> None:
 
     A successful reserve holds the ticket for a few minutes only, so this
     alert is worded to get David to the already-open browser window fast.
+
+    Every identifying detail comes from the reading. This alert used to read
+    them from config, which meant the loudest, most time-critical message the
+    watcher can send — the one with a countdown on it — always named the
+    standard Weekend Camping page and linked to it, whichever page had
+    actually reserved. available() was fixed for that; this was not, and the
+    only real find so far was on the instalment page.
     """
-    subject = f"IN THE BASKET — finish checkout now: {config.EVENT_NAME}"
+    name, url = _event_of(reading)
+
+    subject = f"IN THE BASKET — finish checkout now: {name}"
     body = (
         f"Hi David,\n\n"
         f"The watcher pressed 'Find Tickets' and Ticketmaster ACCEPTED it —\n"
         f"{config.WANTED_QUANTITY} ticket(s) are held in a basket right now.\n\n"
+        f"Event: {name}\n"
+        f"{_which_ticket(name)}\n\n"
         f"{_listing_block(reading.listings)}\n\n"
         f"This hold expires in a couple of minutes. The Chrome window the\n"
         f"watcher used has been left open on the checkout page — go finish it\n"
         f"there, or open the link below and the basket should still be yours.\n\n"
-        f"{config.EVENT_URL}\n\n"
+        f"{url}\n\n"
         f"Reserved at: {stamp()}\n"
     )
     _safe("reserved-email", _send_email, subject, body)
     _safe(
         "reserved-push", _send_ntfy,
         title="EP2026: TICKET HELD — check out NOW",
-        message="A reserve succeeded. The hold expires in minutes.",
+        message=f"{name}\n\nA reserve succeeded. The hold expires in minutes.",
         priority="urgent",
         tags=["rotating_light", "shopping_cart"],
+        click=url,
     )
 
 
@@ -196,8 +240,41 @@ def _network_section(net) -> str:
     return body
 
 
+def _reading_block(events, reading: Reading) -> str:
+    """What every watched page last said.
+
+    The hourly report used to print whichever single reading happened to
+    trigger it, beneath a link hardcoded to the first event — so a report
+    could show the instalment plan's statuses under the standard page's URL,
+    and there was no way to tell from the email which one it meant. It now
+    reports both pages, from each page's own history, every hour.
+
+    `events` is a list of (name, url, primary, resale) from
+    state.event_summaries(). Without it this falls back to the single reading,
+    which is the API-only and single-event case.
+    """
+    if not events:
+        name, url = _event_of(reading)
+        return (
+            f"Last reading — {name}\n"
+            f"  Box office     : {_status_word(reading.primary)}\n"
+            f"  Verified resale: {_status_word(reading.resale)}\n"
+            f"  {url}"
+        )
+
+    lines = ["Last reading, page by page:"]
+    for name, url, primary, resale in events:
+        lines.append(
+            f"\n  {name}\n"
+            f"    Box office     : {_status_word(primary)}\n"
+            f"    Verified resale: {_status_word(resale)}\n"
+            f"    {url}"
+        )
+    return "\n".join(lines)
+
+
 def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
-              health=None, net=None, coverage=None) -> None:
+              health=None, net=None, coverage=None, events=None) -> None:
     """The hourly "still nothing, still trying" report.
 
     Deliberately carries the numbers rather than just the sentiment. "No
@@ -214,8 +291,14 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
     def row(label, value):
         return f"{label:<30}: {value}"
 
+    # Say what is being counted. Every watched page is polled on every cycle
+    # and counted separately, so with two pages this number is twice the
+    # number of cycles — which reads as a suspiciously busy watcher unless
+    # the email says so.
+    pages = len(events) if events else len(config.EVENTS)
+    across = f" (across {pages} pages)" if pages > 1 else ""
     health_line = "\n".join([
-        row(f"Checks run in the last {hours:.1f}h", checks),
+        row(f"Page checks in the last {hours:.1f}h", f"{checks}{across}"),
         row("Of those, unhealthy", failures),
     ])
     if coverage:
@@ -253,20 +336,18 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
     subject = (
         "Switch the MacBook to your other network — EP2026 watcher"
         if switch_now
-        else f"No luck yet — still watching {config.EVENT_NAME}"
+        else f"No luck yet — still watching {config.WATCH_LABEL}"
     )
     body = (
         f"Hi David,\n\n"
         f"No ticket has appeared in the last hour. Still trying.\n\n"
         f"{health_line}\n"
         f"{health_block}\n"
-        f"Last reading:\n"
-        f"  Box office     : {_status_word(reading.primary)}\n"
-        f"  Verified resale: {_status_word(reading.resale)}\n"
-        f"  Searching for  : {config.WANTED_QUANTITY} ticket\n\n"
-        f"Event page: {config.EVENT_URL}\n\n"
-        f"You'll get a separate, much louder email the moment anything shows up.\n"
-        f"This one just proves the watcher is still alive.\n\n"
+        f"{_reading_block(events, reading)}\n\n"
+        f"Searching for {config.WANTED_QUANTITY} ticket(s) on each page.\n\n"
+        f"You'll get a separate, much louder email the moment anything shows up,\n"
+        f"naming which of the pages above it is. This one just proves the\n"
+        f"watcher is still alive.\n\n"
         f"Checked at: {stamp()}\n"
     )
     _safe("heartbeat-email", _send_email, subject, body)
@@ -354,12 +435,13 @@ def stopped(checks_total: int) -> None:
     "no more emails" should never leave you wondering whether it died or
     finished.
     """
-    subject = f"Watcher stopped — {config.EVENT_NAME}"
+    subject = f"Watcher stopped — {config.WATCH_LABEL}"
+    pages = "\n".join(f"  · {e.name}" for e in config.EVENTS)
     body = (
         f"Hi David,\n\n"
         f"The watcher has reached its stop date ({config.STOP_AFTER_DATE}) and shut\n"
         f"itself down. This is the last email you'll get from it.\n\n"
-        f"It ran {checks_total} checks in total.\n\n"
+        f"It ran {checks_total} checks in total, across:\n{pages}\n\n"
         f"Nothing is left running on a schedule. If you want to tidy up:\n\n"
         f"  launchctl unload ~/Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist\n"
         f"  sudo pmset -a disablesleep 0\n\n"
@@ -451,17 +533,28 @@ def test() -> None:
     global TEST_MODE
     TEST_MODE = True
 
-    print(f"[{stamp()}] 1/4 connectivity")
+    pages = "\n".join(f"  · {e.name}\n    {e.url}" for e in config.EVENTS)
+    print(f"[{stamp()}] 1/5 connectivity")
     _send_email(
-        f"{config.EVENT_NAME} watcher is wired up",
+        f"{config.WATCH_LABEL} watcher is wired up",
         f"Hi David,\n\nIf you can read this, Gmail credentials work and mail is\n"
-        f"reaching you. The next three are samples of the real alerts.\n\n"
+        f"reaching you. The next four are samples of the real alerts.\n\n"
+        f"Watching {len(config.EVENTS)} page(s):\n{pages}\n\n"
         f"At: {stamp()}\n",
     )
 
-    print(f"[{stamp()}] 2/4 availability alert")
+    # Deliberately the LAST configured page — the instalment plan, if there is
+    # one. Every alert used to describe the first event whatever had actually
+    # been found, so a drill built on the first event proved nothing. This one
+    # is wrong the moment that regresses.
+    found_on = config.EVENTS[-1]
+
+    print(f"[{stamp()}] 2/5 availability alert")
     sample = Reading(
         source="test",
+        event_slug=found_on.slug,
+        event_name=found_on.name,
+        event_url=found_on.url,
         primary="UNAVAILABLE",
         resale="AVAILABLE",
         listings=[Listing(name="Verified Resale — Section STNDN1 (WEEKEND CAMPING)",
@@ -469,10 +562,31 @@ def test() -> None:
     )
     available(sample, "TEST — this is what a real find looks like", [])
 
-    print(f"[{stamp()}] 3/4 hourly report")
+    print(f"[{stamp()}] 3/5 basket alert")
+    # The loudest one the watcher can send, and the one that arrives with a
+    # checkout timer already running. Worth seeing once in advance.
+    reserved_in_browser(
+        Reading(
+            source="test",
+            event_slug=found_on.slug,
+            event_name=found_on.name,
+            event_url=found_on.url,
+            primary="AVAILABLE",
+            listings=[Listing(name="General Admission (in basket)",
+                              price="€310.50", kind="primary")],
+        )
+    )
+
+    print(f"[{stamp()}] 4/5 hourly report")
     heartbeat(
-        checks=19, failures=0, hours=1.0,
+        checks=12, failures=0, hours=1.0,
         reading=Reading(source="test", primary="UNAVAILABLE", resale="UNAVAILABLE"),
+        # Shown exactly as the real hourly report renders it: every watched
+        # page, with its own statuses and its own link.
+        events=[
+            (e.name, e.url, "UNAVAILABLE", "UNAVAILABLE" if i == 0 else "UNKNOWN")
+            for i, e in enumerate(config.EVENTS)
+        ],
         health=("ok", "No blocks in the last 24 hours — this connection looks healthy.",
                 "Nothing to do."),
         net=(
@@ -487,7 +601,7 @@ def test() -> None:
         ),
     )
 
-    print(f"[{stamp()}] 4/4 watchdog")
+    print(f"[{stamp()}] 5/5 watchdog")
     # Sent with the worst-case health block on purpose: this is the email that
     # has to be useful on the day the connection is actually in trouble, so
     # the sample should show the full set of instructions, not the calm case.
@@ -511,7 +625,11 @@ def test() -> None:
         tags=["test_tube"],
     )
     TEST_MODE = False
-    print(f"\n  Four emails sent to {config.ALERT_TO}, each subject prefixed")
+    print(f"\n  Five emails sent to {config.ALERT_TO}, each subject prefixed")
     print("  '[TEST — not real]' so you can tell them from the genuine article.")
     print("  Check they arrived AND that none landed in spam — mark them")
     print("  'not spam' now if they did, not on the day it matters.")
+    print()
+    print(f"  The find and basket samples are about: {found_on.name}")
+    print("  Check they name and link THAT page — the two pages differ only by")
+    print("  a suffix, and an alert pointing at the wrong one costs the ticket.")

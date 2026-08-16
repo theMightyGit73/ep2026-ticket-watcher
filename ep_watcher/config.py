@@ -56,8 +56,22 @@ EVENTS = [
 
 # The first event stays the default for anything that still speaks in the
 # singular (the `login` and `calibrate` commands, mainly).
+#
+# Nothing that alerts should reach for these. An alert must take its event
+# from the reading that produced it, or it will name the wrong page — see
+# notify._event_of. These two are the fallback for commands that genuinely
+# operate on one page, not a convenience for the alerting path.
 EVENT_URL = EVENTS[0].url
 EVENT_NAME = EVENTS[0].name
+
+# What to call the whole watch in an email that covers every page at once.
+#
+# Set explicitly rather than derived from the event names. The two pages share
+# a prefix that is itself one of their names ("...Weekend Camping" is a prefix
+# of "...Weekend Camping Instalment Plan"), so deriving a common label would
+# title a two-page report with the first page's name — the exact confusion
+# this exists to remove.
+WATCH_LABEL = os.environ.get("EP_WATCH_LABEL", "Electric Picnic 2026")
 
 # Last day the watcher runs. The festival opens on the 28th, so a ticket
 # found that morning is still usable — this is the last watching day, and it
