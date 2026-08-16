@@ -62,6 +62,10 @@ RESALE_MARKER = "verified resale ticket"
 BASKET_MARKERS = ("time left to complete", "your tickets are reserved", "proceed to checkout")
 SOLD_OUT_HINTS = ("tickets are currently unavailable", "this event is sold out")
 
+#: The call that populates "Other Options → Verified Resale Tickets".
+#: Captured from the live page: GET /api/quickpicks/{eventId}/resale?qty=...
+RESALE_API_RE = re.compile(r"/api/quickpicks/[^/]+/resale", re.I)
+
 PRICE_RE = re.compile(r"€\s?(\d{1,4}[.,]\d{2})")
 SECTION_RE = re.compile(r"^section\s+(.+)$", re.I)
 
@@ -89,6 +93,10 @@ class BrowserSession:
         self._pw = None
         self._ctx = None
         self._page = None
+        # Defined here as well as in start(), so anything touching it before a
+        # browser exists — the parser tests, an early failure path — gets None
+        # rather than an AttributeError.
+        self._resale_response = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def __enter__(self):
@@ -117,7 +125,24 @@ class BrowserSession:
         )
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         self._page.set_default_timeout(config.PAGE_TIMEOUT_MS)
+
+        # Watch for the call that actually fills the resale panel. Polling the
+        # rendered text for it is guesswork — it cannot distinguish "the panel
+        # is still loading" from "the panel arrived and is empty", so a slow
+        # response gets recorded as resale-blind. Roughly one poll in seven was
+        # landing there. The network response is the fact; the DOM is its echo.
+        self._resale_response = None
+        self._page.on("response", self._note_resale_response)
         return self
+
+    def _note_resale_response(self, response) -> None:
+        try:
+            if RESALE_API_RE.search(response.url):
+                self._resale_response = {"url": response.url, "status": response.status}
+        except Exception:
+            # A listener that raises would break the page, and this is only
+            # ever an optimisation over reading the DOM.
+            pass
 
     def close(self):
         for closer in (lambda: self._ctx.close(), lambda: self._pw.stop()):
@@ -301,6 +326,9 @@ class BrowserSession:
             reading.note(f"could not set quantity ({type(exc).__name__}) — using the page default")
 
     def _press_search(self, reading: Reading, qty: int) -> bool:
+        # Cleared before every search, so a stale response from the previous
+        # quantity or the previous event cannot be mistaken for this one's.
+        self._resale_response = None
         try:
             button = self.page.get_by_role("button", name=SEARCH_BUTTONS).first
             button.wait_for(state="visible", timeout=15_000)
@@ -347,6 +375,10 @@ class BrowserSession:
         """
         deadline = time.time() + timeout_s
         while time.time() < deadline:
+            # The network response settles it: once the resale call has come
+            # back, the panel's state is known, empty or not.
+            if self._resale_response is not None:
+                return True
             text = _normalise(self.visible_text())
             if RESALE_HEADING in text or "other options" in text:
                 return True

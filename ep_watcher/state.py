@@ -571,11 +571,18 @@ def connection_health(state: dict) -> tuple:
             "Nothing to do.",
         )
 
-    if hour == 0 and day <= 3:
+    # No blocks in the last hour means recovered, however many there were
+    # earlier in the day. Gating this on a low 24h count meant that after a
+    # busy day the next branch fired instead and reported "0 blocks in the
+    # last hour ... being rate-limited" — a sentence that contradicts its own
+    # first clause, and the sort of thing that teaches you to skim past the
+    # health line entirely.
+    if hour == 0:
         return (
             "watch",
             f"{day} block(s) in the last 24h, none in the last hour — recovered.",
-            "Nothing to do. The watcher backs off on its own when this happens.",
+            "Nothing to do. The watcher backs off and resets its browser profile "
+            "on its own when this happens.",
         )
 
     if hour <= 2:
