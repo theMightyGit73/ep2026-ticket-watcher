@@ -1,7 +1,16 @@
 # EP2026 Ticket Watcher
 
-Watches [Electric Picnic 2026 — Weekend Camping](https://www.ticketmaster.ie/electric-picnic-2026-weekend-camping-co-laois-28-08-2026/event/18006314BD813D3E)
-and emails `davidcoyne73@gmail.com` when a ticket is actually buyable.
+Watches Electric Picnic 2026 and emails `davidcoyne73@gmail.com` when a ticket
+is actually buyable. Two pages, not one:
+
+- [Weekend Camping](https://www.ticketmaster.ie/electric-picnic-2026-weekend-camping-co-laois-28-08-2026/event/18006314BD813D3E)
+  — the standard, pay-in-full listing
+- [Weekend Camping Instalment Plan](https://www.ticketmaster.ie/electric-picnic-2026-weekend-camping-instalment-co-laois-28-08-2026/event/18006314CFB4A99E)
+  — the same weekend, paid in stages
+
+They are separate products with separate inventory and separate resale panels.
+A ticket can appear on one and not the other, so both are watched and every
+alert says **which**. See [Two pages, watched separately](#two-pages-watched-separately).
 
 It works by doing what you do by hand: setting the quantity, pressing
 **Find Tickets**, and reading the answer — including the **Verified Resale**
@@ -49,7 +58,7 @@ and your home IP is the one you need in order to actually buy.
 3. Reload. Now you get the real page.
 4. Set the quantity, press **Find Tickets**, read the result.
 
-Two findings that invert the obvious implementation:
+Four findings that invert the obvious implementation:
 
 - **The resale panel does not exist until you search.** A fresh page load ends
   at the Find Tickets button. "Other Options → Verified Resale Tickets" is
@@ -58,10 +67,67 @@ Two findings that invert the obvious implementation:
 - **"Resale Tickets will appear below when they are available." is a static
   caption.** It sits there permanently, including directly above a real
   listing. Reading it as an empty-state marker inverts your result.
+- **The panel arrives in three stages, and they are not the same event.** The
+  search resolves; then a *separate* call, `GET /api/quickpicks/{id}/resale`,
+  answers; then the panel paints; then the listing rows paint under its
+  heading. Treating any earlier stage as the later one costs you readings —
+  see [Watching the response is not watching the panel](#watching-the-response-is-not-watching-the-panel).
+- **"Verified Resale Tickets" contains "Verified Resale Ticket".** The panel
+  heading is the plural; one listing row is the singular. A substring test
+  therefore finds a listing in a panel that is rendered and completely empty.
+  Match whole lines. Everything in the codebase that asks "are there
+  listings?" goes through one function for exactly this reason.
 
 To answer your question directly: **yes, it is possible, and pressing the
 button is not just possible but required.** There is no read-only version of
 this that works.
+
+---
+
+## Two pages, watched separately
+
+Electric Picnic sells the same weekend twice — an ordinary ticket and an
+instalment plan — on two pages with separate inventory. Both are watched on
+every cycle, and that has consequences worth knowing:
+
+**Request volume does not grow with the page count.** Every page is searched
+every cycle, so the *cycle* interval scales with the number of pages:
+`EP_POLL_SECONDS` is the per-page budget and the cycle is that times the
+number of pages. Holding the interval fixed while adding a second page would
+have doubled the hourly rate to ~24 searches, above the ~20/hour that got the
+home IP flagged. Coverage was traded for frequency deliberately, rather than
+buying the second page with risk.
+
+**Each page keeps its own availability history.** Sharing one set of "last
+seen" values across two pages means the quiet page's poll overwrites the busy
+one's history — so either a listing re-alerts forever, or the next real one is
+silent. Failures are counted per page too: a single shared counter let a
+healthy page reset the count a broken one had just incremented, so one page
+could fail every cycle for a fortnight while the watchdog never fired.
+
+**Every alert names and links the page it is about**, and says which *kind* of
+ticket in its own words:
+
+```text
+This is the INSTALMENT PLAN page — the pay-in-stages listing, not the
+standard one.
+```
+
+That sentence exists because the two names differ only by a trailing
+suffix, which is easy to skim past on a phone in the ninety seconds a resale
+listing survives — and the two are paid for differently. The hourly report
+lists **both** pages, each with its own statuses and its own link.
+
+This was a real bug, and an instructive one. `available()` took its name and
+link from the reading; the basket alert did not, so the loudest message the
+watcher can send — the one arriving with a checkout countdown already
+running — always described the standard page whichever page had actually
+reserved. The hourly report was worse than wrong, it was *undetectable*: it
+printed one page's statuses beneath the other page's URL, which looks exactly
+like a correct email. The only real find so far was on the instalment page.
+
+The tests for this run against every configured event rather than a fixed
+one, so adding a third page cannot quietly reintroduce it.
 
 ---
 
@@ -154,6 +220,47 @@ Two related rules follow from the same principle:
 so an old state file cannot read as a flawless 0% before anything is measured.
 Over the first day of running, resale was unreadable on about one poll in six.
 
+### Watching the response is not watching the panel
+
+The correction to that one-in-six, and a caution about how it was fixed the
+first time.
+
+The panel is filled by its own API call, so waiting for it by polling the
+rendered text is guesswork: while that call is in flight, "still loading" and
+"arrived and empty" look identical. Listening for the network response
+instead is the right instinct — it fires whether or not the panel has
+anything in it.
+
+But a Playwright `response` event fires when the response **headers** arrive,
+and the panel is painted some way after that. Returning there meant the page
+was read in the gap, and a perfectly good poll was recorded as resale-blind.
+Measured on the logs for 2026-08-16, split at the restart that deployed it:
+
+```text
+before   resale unreadable on 10/80 polls   12%
+after    resale unreadable on 22/74 polls   30%
+```
+
+The fix keeps the response for the thing it is genuinely good at — knowing
+**how long to stay patient** — and lets the DOM decide. Once the call
+answers, the panel gets a few seconds to paint; if it does not, that is
+reported rather than guessed at, instead of spending the whole timeout on a
+page that was never going to show one. The two failures are distinguishable
+in the log, because "the call never came back" and "the call came back and
+nothing painted" have different fixes.
+
+Two rules came out of it, both worth keeping:
+
+- **Whatever decides the panel is readable must agree with whatever parses
+  it.** While those disagreed — the wait accepted a bare "Other Options", the
+  parser demanded the heading — a poll could be declared readable and then
+  parsed as blind, with nothing in the log to explain the gap. A test asserts
+  that agreement directly rather than trusting it.
+- **Wait for the listing rows, not just the heading.** The heading paints
+  first, so parsing on it alone can report a confident `UNAVAILABLE` for a
+  page about to show a listing. That is worse than being blind: `UNAVAILABLE`
+  outranks `UNKNOWN` when readings are merged, so the wrong answer wins.
+
 ---
 
 ## Keeping it running
@@ -188,6 +295,21 @@ connection isn't blocked, and the Mac isn't set to sleep. Every failure prints
 the command that repairs it.
 Both commands also appear in the "watcher is broken" email, so you never have
 to come back here to find them.
+
+**Read the closing summary, and note that `[WARN]` counts.** It used to tally
+only hard failures, so it printed "Everything is working. Nothing to do."
+directly beneath two warnings — resale unreadable on 28% of polls, and the
+connection being rate-limited. The summary is the line you actually read; one
+that disagrees with its own body teaches you to stop reading either. Warnings
+now appear in it, while still leaving the exit code at 0, because nothing
+there needs a command run:
+
+```text
+  Nothing is broken, but 2 thing(s) worth an eye:
+
+    · Resale visibility: resale readable on 78/102 polls (76%)
+    · Connection: 4 block(s) in the last 24h, none in the last hour — recovered.
+```
 
 ```bash
 tail -f ~/.ep2026-watcher/logs/watcher.log     # what it is doing
@@ -227,7 +349,8 @@ Environment variables, all optional:
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `WANTED_QUANTITIES` | `1` | Quantities to search per poll |
-| `EP_POLL_SECONDS` | `600` | Seconds between polls, jittered ±25% |
+| `EP_POLL_SECONDS` | `300` | Seconds **per page**. The cycle is this × the number of pages, so 600s with two — jittered ±25% |
+| `EP_WATCH_LABEL` | `Electric Picnic 2026` | What to call the watch in emails covering every page |
 | `EP_HEARTBEAT_HOURS` | `1` | How often to send the "still nothing" report |
 | `EP_OFFSCREEN` | `1` | Park the Chrome window off-desktop |
 | `EP_HEADLESS` | `0` | **Leave this alone.** Headless is always blocked |
@@ -252,27 +375,54 @@ Set `WANTED_QUANTITIES=1,2,3` to sweep several per poll instead.
 
 ## The emails
 
-Four kinds, all to `davidcoyne73@gmail.com`, all carrying a link to the event
-page:
+Four kinds, all to `davidcoyne73@gmail.com`, each naming and linking the page
+it is about — never "the event page" in the abstract:
 
 | Email | When |
 | --- | --- |
 | **Tickets available** | A listing appears on the box office or verified resale |
 | **In the basket** | A reserve actually succeeded — there is a live hold, with a countdown |
-| **No luck yet** | Hourly while nothing has turned up |
+| **No luck yet** | Hourly while nothing has turned up — reports **both** pages |
 | **Watcher is broken** | 4 consecutive failed checks, then every 6h until fixed |
 
+Plus one **Watcher stopped** email on the stop date, and a **Mac watcher has
+gone quiet** alert sent from GitHub when the laptop stops checking in.
+
+The "watcher is broken" email names the worst-affected page *and its URL*: the
+likeliest cause of one page failing while the other is fine is that page's URL
+having changed, which takes seconds to check once you have the link.
+
 The status emails carry a **Connection health** block — `[OK]`, `[WATCH]` or
-`[BLOCKED]` — showing how many times Ticketmaster has rate-limited this
-connection in the last hour and day, and what to do about it. At `[BLOCKED]`
-it spells out the steps: stop the watcher, browse over mobile data, sign in,
-wait, and slow the cadence before restarting.
+`[BLOCKED]` — showing how many times Ticketmaster has rate-limited **the
+connection you are currently on** in the last hour and day, and what to do
+about it. At `[BLOCKED]` it spells out the steps: stop the watcher, browse
+over mobile data, sign in, wait, and slow the cadence before restarting.
 
 That block exists because of what happened on 2026-08-13: the watcher polled
 too fast, the block escalated to the home IP, and ordinary manual browsing
 stopped working. The failure wasn't getting blocked — it was that nothing
 said so, because a run of quiet failures looks exactly like a quiet
 Ticketmaster.
+
+**Blocks follow the connection, not the clock.** Each 403 records which
+connection it happened on, and the verdict is computed for the connection in
+use — with any *other* connection that is in trouble named alongside it:
+
+```text
+Connection health [OK]
+  No blocks on phone hotspot in the last 24 hours — it looks healthy.
+
+  Note: home Wi-Fi (86.44.208.194) took 4 block(s) in the last 24h — that is
+  the connection in trouble, not this one.
+```
+
+Counting blocks by time alone meant that switching networks — the exact thing
+the watcher had just asked for — produced an email saying the *fresh*
+connection was rate-limited, on the strength of blocks the old one collected.
+Advice that punishes you for following it is worse than no advice. Blocks
+recorded before this existed still count, but no longer get a connection
+*named*: nothing recorded which one they were, and a confident wrong name
+points you away from the one that is really burnt.
 
 ### Alternating home Wi-Fi and the phone hotspot
 
@@ -290,6 +440,8 @@ other.
 detects its own public IP, so it notices the change by itself, resets its
 counters, attributes any blocks to the connection they happened on, and tells
 you when to switch back. There is nothing to confirm and no setting to change.
+The IP is looked up once per cycle rather than once per page, and a momentary
+failure to reach the IP-echo service is not treated as a network change.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -298,12 +450,21 @@ you when to switch back. There is nothing to confirm and no setting to change.
 | `EP_HOME_IP` | — | Optional. Labels this IP "home Wi-Fi" instead of guessing |
 
 Switching more often does **not** reduce the daily total per connection —
-that is set by the poll rate, and ~144 searches a day split two ways is ~72
+that is set by the poll rate, and ~230 searches a day split two ways is ~115
 each however often you alternate. What it reduces is how many land on one IP
 inside any given hour, which is what a rate limit actually measures.
 
-Without `EP_HOME_IP`, the first connection the watcher ever sees is assumed to
-be home — correct if you start it at home.
+**Set `EP_HOME_IP`.** Without it the watcher assumes the first connection it
+ever saw is home, which is only reliable if you started it at home *and*
+there are exactly two connections. A phone hotspot is usually issued a
+different IP each time you tether, so on the third or fourth address the
+guess quietly stops meaning anything — and the label is what tells you which
+connection is safe to buy on.
+
+The scheme only helps if you act on the ask. On 2026-08-16 the watcher sat on
+home Wi-Fi from 11:18 to 18:23 — 82 of that day's 86 searches, about 2.7× the
+30-search budget — and every one of the day's four blocks landed on it. That
+is the connection you need working in order to buy.
 
 The hourly "no luck yet" email is a liveness proof, not a status update. A
 silent watcher and a dead watcher look identical from the inbox — that
@@ -319,16 +480,23 @@ never followed by "no success this hour".
 
 ```bash
 .venv/bin/python -m ep_watcher selftest   # offline: nothing sent, no credentials
-.venv/bin/python -m ep_watcher test       # sends one real example of all four
+.venv/bin/python -m ep_watcher test       # sends one real example of each
 ```
 
-`selftest` checks that each email goes to the right address and contains the
-link and the listing details, and that a dead SMTP server can never take down a
-run. `test` puts the real thing in your inbox.
+`selftest` runs every suite in `tests/` — offline, no credentials, safe to run
+while the watcher is running. It checks that each email goes to the right
+address, names and links the right page, carries the listing details, and that
+a dead SMTP server can never take down a run.
 
-**Run `test` once and check none of them landed in spam.** The alert that
-matters arrives exactly once, under time pressure — mark them "not spam" now,
-not on the day.
+`test` puts five real samples in your inbox, including the basket alert, which
+was missing from the drill for a while — the one message you least want to see
+for the first time under a countdown. The find and basket samples are built on
+the **instalment** page on purpose: a drill built on the first page proves
+nothing about an alert that always named the first page.
+
+**Run `test` once and check two things**: that none landed in spam, and that
+the samples name the page they claim to. The alert that matters arrives
+exactly once, under time pressure — mark them "not spam" now, not on the day.
 
 ---
 
@@ -500,11 +668,19 @@ What the watcher does about it:
 - **It backs off exponentially** — 30 minutes, doubling to a 3-hour cap —
   and resets the moment a real reading comes back. Being blocked and carrying
   on at the normal cadence is how a short rate-limit becomes a long one.
-- **The default cadence is 10 minutes.** Over a fortnight that is ~2,000
-  searches rather than the ~6,700 a 3-minute cadence would send.
+- **The default cycle is 10 minutes** — `EP_POLL_SECONDS=300` per page, two
+  pages. That is 12 searches an hour, against the ~20/hour that got the home
+  IP flagged — roughly 3,250 over a fortnight once the overnight slowdown is
+  counted, rather than the ~13,000 a 3-minute cycle would send. Adding the
+  second page did not raise the hourly rate: the cycle scales with the page
+  count instead.
+- **Overnight it drops to 30 minutes** (`EP_NIGHT_POLL_SECONDS`, midnight to
+  07:00 local). A headstart is worth nothing while you are asleep, and those
+  hours otherwise accumulate volume on the connection unattended, with nobody
+  awake to notice a block.
 
 The tension is real and worth stating plainly: a resale listing observed
-during testing lived about **five minutes**, so a 10-minute cadence genuinely
+during testing lived about **five minutes**, so a 10-minute cycle genuinely
 will miss some. But a blocked watcher misses *all* of them. A watcher that
 gets itself banned on day two catches nothing on day nine.
 
@@ -555,6 +731,15 @@ you wondering whether it finished or died.
   ten minutes during testing. That is the behaviour the watcher exists for, and
   the reason alerts are edge-triggered per market with an hourly re-nag rather
   than fired once and latched.
+- **A blind poll is close to a missed chance, not a fraction of one.** A
+  listing lives about one poll interval, so "resale readable on 76% of polls"
+  is not a comfortable margin. Watch that line in `doctor`; it is the one
+  health number that measures whether the watcher can do its job, as opposed
+  to whether it is running.
+- **The watcher is only as current as its last restart.** It runs from this
+  checkout, so pulling or editing changes nothing until `./restart.sh`. The
+  GitHub Actions backstop is the opposite — it checks out `origin/main`, so it
+  is only as current as the last **push**.
 
 ---
 
