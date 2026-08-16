@@ -129,6 +129,27 @@ def event_state(state: dict, slug: str) -> dict:
     })
 
 
+def event_summaries(state: dict) -> list:
+    """[(name, url, primary, resale)] for every watched page, from its history.
+
+    Lets the hourly report speak about all the pages rather than about
+    whichever single reading happened to trip the heartbeat clock. The old
+    report printed that one reading beneath a link hardcoded to the first
+    event, so it could show the instalment plan's statuses under the standard
+    page's URL with nothing to signal the mismatch.
+    """
+    out = []
+    for event in config.EVENTS:
+        ev = event_state(state, event.slug)
+        out.append((
+            event.name,
+            event.url,
+            ev.get("last_primary", UNKNOWN),
+            ev.get("last_resale", UNKNOWN),
+        ))
+    return out
+
+
 def worst_event(state: dict) -> tuple:
     """(slug, failures) for whichever event is doing worst. ("", 0) if all fine."""
     worst_slug, worst_count = "", 0
@@ -545,18 +566,41 @@ def network_status(state: dict) -> tuple:
     )
 
 
+def _block_entries(state: dict) -> list:
+    """Block history as (timestamp, ip) pairs, whatever shape it is on disk.
+
+    Entries used to be bare ISO strings with no connection attached. Those are
+    read as belonging to no particular connection, and counted against
+    whichever one is current — the conservative reading, since over-warning
+    about the connection in use is much cheaper than staying quiet about it.
+    """
+    out = []
+    for entry in state.get("block_history", []):
+        if isinstance(entry, dict):
+            out.append((entry.get("at"), entry.get("ip")))
+        else:
+            out.append((entry, None))
+    return out
+
+
 def record_block(state: dict) -> None:
-    """Note an HTTP 403 and prune history older than a week."""
-    history = list(state.get("block_history", []))
-    history.append(utc_now().isoformat())
+    """Note an HTTP 403 against the connection it happened on, and prune.
+
+    The timestamp alone is not enough. Blocks follow the connection, not the
+    clock: after switching from a flagged home Wi-Fi to a clean hotspot, a
+    time-only history keeps reporting the block for another 24 hours — and it
+    reports it against the new connection, which is the opposite of the truth
+    and directly contradicts the advice to switch.
+    """
+    history = _block_entries(state)
+    history.append((utc_now().isoformat(), state.get("current_ip")))
     cutoff = utc_now() - timedelta(days=7)
     state["block_history"] = [
-        ts for ts in history if (_parse(ts) or utc_now()) >= cutoff
+        {"at": ts, "ip": ip} for ts, ip in history if (_parse(ts) or utc_now()) >= cutoff
     ]
 
-    # Attribute the block to the connection it happened on, so the emails can
-    # say "your home Wi-Fi is the one in trouble" rather than leaving it
-    # ambiguous which of the two got flagged.
+    # Also kept as a running per-connection tally, which survives the 7-day
+    # prune and answers "which of the two is burnt" at a glance.
     ip = state.get("current_ip")
     if ip:
         networks = dict(state.get("networks", {}))
@@ -566,26 +610,105 @@ def record_block(state: dict) -> None:
         state["networks"] = networks
 
 
-def recent_blocks(state: dict, hours: float = 24.0) -> int:
+#: Sentinel for recent_blocks(ip=...): count every connection.
+ANY_IP = object()
+
+
+def recent_blocks(state: dict, hours: float = 24.0, ip=ANY_IP) -> int:
+    """Blocks in the last `hours`. Pass `ip` to count only that connection.
+
+    An unattributed entry (from before blocks carried an IP) counts for any
+    connection asked about, so old history never silently disappears.
+    """
     cutoff = utc_now() - timedelta(hours=hours)
-    return sum(
-        1 for ts in state.get("block_history", []) if (_parse(ts) or cutoff) >= cutoff
-    )
+    total = 0
+    for ts, at_ip in _block_entries(state):
+        if (_parse(ts) or cutoff) < cutoff:
+            continue
+        if ip is ANY_IP or at_ip is None or at_ip == ip:
+            total += 1
+    return total
+
+
+def _block_counts(state: dict, hours: float, ip) -> tuple:
+    """(attributed_to_ip, unattributed) blocks inside the window.
+
+    Kept apart so the wording can stay honest. An entry written before blocks
+    carried an IP still counts — going quiet about a real block is the
+    expensive mistake — but it cannot support a sentence naming the
+    connection it happened on, because nothing recorded which one that was.
+    """
+    cutoff = utc_now() - timedelta(hours=hours)
+    mine = unknown = 0
+    for ts, at_ip in _block_entries(state):
+        if (_parse(ts) or cutoff) < cutoff:
+            continue
+        if at_ip is None:
+            unknown += 1
+        elif at_ip == ip:
+            mine += 1
+    return mine, unknown
+
+
+def blocks_elsewhere(state: dict, hours: float = 24.0) -> list:
+    """[(label, ip, count)] for connections other than the current one.
+
+    So an email can say "your home Wi-Fi is the one in trouble, you are now on
+    the hotspot and it is clean" instead of leaving David to work out which of
+    the two a block belonged to.
+    """
+    current = state.get("current_ip")
+    cutoff = utc_now() - timedelta(hours=hours)
+    counts = {}
+    for ts, at_ip in _block_entries(state):
+        if at_ip is None or at_ip == current:
+            continue
+        if (_parse(ts) or cutoff) < cutoff:
+            continue
+        counts[at_ip] = counts.get(at_ip, 0) + 1
+    return [(network_label(state, ip), ip, n) for ip, n in sorted(counts.items())]
 
 
 def connection_health(state: dict) -> tuple:
-    """Return (severity, headline, what-to-do) for the current connection.
+    """Return (severity, headline, what-to-do) for the CURRENT connection.
 
     Severity is one of "ok", "watch", "blocked" — used to decide whether an
     email needs to shout.
+
+    Counted per connection, not per hour of wall clock. Counting every block
+    regardless of where it happened meant that switching networks — the exact
+    thing the watcher had just asked for — produced an email telling him the
+    fresh connection was rate-limited, on the strength of blocks the old one
+    had collected. Advice that punishes the reader for following it is worse
+    than none.
     """
-    day = recent_blocks(state, 24)
-    hour = recent_blocks(state, 1)
+    ip = state.get("current_ip")
+    day_mine, day_unknown = _block_counts(state, 24, ip)
+    hour_mine, hour_unknown = _block_counts(state, 1, ip)
+    day, hour = day_mine + day_unknown, hour_mine + hour_unknown
+    here = network_label(state) if ip else "this connection"
+
+    # Name the connection only when the history actually says so. Asserting
+    # "4 blocks on your phone hotspot" about entries that recorded no
+    # connection at all is a confident claim built on nothing, and it would
+    # point him away from the connection that is really burnt.
+    on_here = f" on {here}" if day and not day_unknown else ""
+
+    # Whatever the current connection's verdict, name any other connection
+    # that is in trouble. That is the one he must not go and buy on.
+    elsewhere = blocks_elsewhere(state, 24)
+    others = ""
+    if elsewhere:
+        others = "\n\n  " + "\n  ".join(
+            f"Note: {label} ({other_ip}) took {n} block(s) in the last 24h — "
+            f"that is the connection in trouble, not this one."
+            for label, other_ip, n in elsewhere
+        )
 
     if day == 0:
         return (
             "ok",
-            "No blocks in the last 24 hours — this connection looks healthy.",
+            f"No blocks on {here} in the last 24 hours — it looks healthy." + others,
             "Nothing to do.",
         )
 
@@ -598,7 +721,8 @@ def connection_health(state: dict) -> tuple:
     if hour == 0:
         return (
             "watch",
-            f"{day} block(s) in the last 24h, none in the last hour — recovered.",
+            f"{day} block(s){on_here} in the last 24h, none in the last hour "
+            f"— recovered." + others,
             "Nothing to do. The watcher backs off and resets its browser profile "
             "on its own when this happens.",
         )
@@ -606,7 +730,8 @@ def connection_health(state: dict) -> tuple:
     if hour <= 2:
         return (
             "watch",
-            f"{hour} block(s) in the last hour ({day} in 24h) — being rate-limited.",
+            f"{hour} block(s){on_here} in the last hour ({day} in 24h) "
+            f"— being rate-limited." + others,
             "No action needed yet: the watcher is already backing off and will "
             "resume by itself. If you need to browse Ticketmaster right now, use "
             "mobile data rather than this connection.",
@@ -614,7 +739,8 @@ def connection_health(state: dict) -> tuple:
 
     return (
         "blocked",
-        f"{hour} blocks in the last hour ({day} in 24h) — this connection is blocked.",
+        f"{hour} blocks{on_here} in the last hour ({day} in 24h) "
+        f"— this connection is blocked." + others,
         "Act on this one:\n"
         "  1. Stop the watcher. Repeated attempts extend the block.\n"
         "     macOS:  launchctl unload ~/Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist\n"
