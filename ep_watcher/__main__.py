@@ -175,8 +175,7 @@ def cmd_watch(args) -> int:
         print("  Browser DISABLED — API sources only\n")
         return _watch_apis_only(interval)
 
-    session = _browser().BrowserSession()
-    session.start()
+    session = _start_session()
     backoff = 0
     tried_profile_reset = False
     was_night = config.is_night()
@@ -250,6 +249,41 @@ def cmd_watch(args) -> int:
         return 0
     finally:
         session.close()
+
+
+def _start_session(attempts: int = 3):
+    """Open the browser, retrying a held profile lock rather than dying on it.
+
+    Chrome takes an exclusive lock on its user-data-dir, and restart.sh kills
+    the old Chrome moments before launchd starts the new watcher. If that lock
+    has not been released yet, start() raises — and this happens *before* the
+    poll loop, so it escaped the loop's own error handling and killed the
+    process. launchd does bring it back, but the one command David is told to
+    run when something is wrong must not have a chance of leaving nothing
+    running at all. Observed as a double start during the 2026-08-16 restart.
+
+    Gives up after `attempts` and re-raises, because a browser that genuinely
+    cannot start is a real failure and exiting lets launchd retry with a clean
+    process rather than looping here forever.
+    """
+    last = None
+    for attempt in range(1, attempts + 1):
+        session = _browser().BrowserSession()
+        try:
+            session.start()
+            if attempt > 1:
+                print(f"[{stamp()}] browser started on attempt {attempt}")
+            return session
+        except Exception as exc:
+            last = exc
+            print(
+                f"[{stamp()}] browser start failed "
+                f"(attempt {attempt}/{attempts}): {type(exc).__name__}: {exc}"
+            )
+            session.close()
+            if attempt < attempts:
+                time.sleep(5 * attempt)
+    raise last
 
 
 def _stop_if_past_date() -> bool:
@@ -451,6 +485,7 @@ def cmd_doctor(_args) -> int:
 
     print(f"\n  EP2026 watcher — health check at {stamp()}\n")
     problems = []
+    warnings = []
 
     def ok(label, detail=""):
         print(f"  [ OK ]  {label}{'  — ' + detail if detail else ''}")
@@ -458,6 +493,18 @@ def cmd_doctor(_args) -> int:
     def bad(label, detail, fix):
         print(f"  [FAIL]  {label}  — {detail}")
         problems.append((label, fix))
+
+    def warn(label, detail):
+        """Not broken, but not fine either — and it must reach the summary.
+
+        These used to print and then vanish: the closing line counted only
+        hard failures, so doctor could report "Everything is working. Nothing
+        to do." directly beneath a warning that resale — the market a ticket
+        has actually appeared on — was unreadable on a third of polls. A
+        summary that contradicts its own body teaches you to stop reading it.
+        """
+        print(f"  [WARN]  {label}  — {detail}")
+        warnings.append((label, detail))
 
     # 1. Is the service installed and running?
     plist = Path.home() / "Library/LaunchAgents/com.davidcoyne.ep2026watcher.plist"
@@ -514,7 +561,7 @@ def cmd_doctor(_args) -> int:
         bad("Resale visibility", headline,
             f"{config.REPO_DIR}/run_watcher.sh calibrate   # dump what the page renders")
     elif severity == "watch":
-        print(f"  [WARN]  Resale visibility  — {headline}")
+        warn("Resale visibility", headline)
     elif severity == "unknown":
         print(f"  [ -- ]  Resale visibility  — {headline}")
     else:
@@ -566,7 +613,7 @@ def cmd_doctor(_args) -> int:
     if severity == "blocked":
         bad("Connection", headline, "switch networks; see the email for the full steps")
     elif severity == "watch":
-        print(f"  [WARN]  Connection  — {headline}")
+        warn("Connection", headline)
     else:
         ok("Connection", headline)
 
@@ -594,16 +641,45 @@ def cmd_doctor(_args) -> int:
         return 0
 
     print()
-    if not problems:
-        print("  Everything is working. Nothing to do.\n")
-        return 0
+    summary, code = doctor_summary(problems, warnings)
+    print(summary)
+    return code
 
-    print(f"  {len(problems)} problem(s). Fixes, in order:\n")
-    for name, fix in problems:
-        print(f"    # {name}")
-        print(f"    {fix}\n")
-    print(f"  Or just re-run everything:  {config.REPO_DIR}/restart.sh\n")
-    return 1
+
+def doctor_summary(problems, warnings) -> tuple:
+    """Render doctor's closing verdict. Returns (text, exit code).
+
+    Split out so it can be checked directly. The rule it enforces is the one
+    that was broken: a warning must reach the summary. doctor used to count
+    only hard failures, so it printed "Everything is working. Nothing to do."
+    underneath a WARN line saying resale — the market a ticket has actually
+    appeared on — was unreadable on a third of polls. A summary that
+    contradicts its own body is worse than no summary, because it is the line
+    people read instead of the body.
+
+    Warnings do not make the exit code non-zero: nothing here needs a command
+    run, and the code is what the watchdog and the scripts branch on. But
+    "nothing to run" is not "nothing to know".
+    """
+    if not problems and not warnings:
+        return "  Everything is working. Nothing to do.\n", 0
+
+    out = []
+    if problems:
+        out.append(f"  {len(problems)} problem(s). Fixes, in order:\n")
+        for name, fix in problems:
+            out.append(f"    # {name}")
+            out.append(f"    {fix}\n")
+        out.append(f"  Or just re-run everything:  {config.REPO_DIR}/restart.sh\n")
+
+    if warnings:
+        head = "Nothing is broken, but" if not problems else "Also"
+        out.append(f"  {head} {len(warnings)} thing(s) worth an eye:\n")
+        for name, detail in warnings:
+            out.append(f"    · {name}: {detail}")
+        out.append("")
+
+    return "\n".join(out), (1 if problems else 0)
 
 
 def cmd_status(_args) -> int:
