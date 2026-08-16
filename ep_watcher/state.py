@@ -64,6 +64,14 @@ def _defaults():
         "networks": {},                   # ip -> {first_seen, searches, blocks}
         "rotation_asked_at": None,        # ISO8601, so we don't nag every hour
         "stop_notified": False,           # the final "watcher stopped" email
+        # When a deliberate 403 backoff is due to end. While this is in the
+        # future the watcher is *supposed* to be idle, and neither the
+        # watchdog nor doctor should treat the still timestamp as a hang.
+        "backoff_until": None,            # ISO8601
+        # When the next poll is due. Lets the watchdog judge lateness against
+        # the cadence actually in force — which changes overnight — instead
+        # of a fixed threshold that only ever matched the daytime one.
+        "next_poll_due": None,            # ISO8601
     }
 
 
@@ -416,6 +424,54 @@ def reset_heartbeat(state: dict) -> None:
 
 def hours_since_heartbeat(state: dict):
     return _hours_since(state["last_heartbeat"])
+
+
+def note_backoff(state: dict, seconds: float) -> None:
+    """Record that the watcher is deliberately idle until `seconds` from now.
+
+    A watcher backing off from a 403 and a watcher wedged on a hung Chrome
+    look identical from outside: in both cases last_check_at stops advancing.
+    But the correct response is opposite — one must be left alone, the other
+    must be restarted — so the difference has to be written down rather than
+    inferred.
+
+    The consequence of getting it wrong is not cosmetic. The backoff doubles,
+    30 minutes to a 3-hour cap, and past 45 minutes the watchdog would start
+    restarting a watcher that is deliberately resting. Each restart polls
+    immediately, against the connection that is already rate-limited, at
+    3am with nobody awake — turning a short block into a long one and
+    defeating the exact mechanism meant to protect the IP needed for buying.
+    """
+    state["backoff_until"] = (utc_now() + timedelta(seconds=seconds)).isoformat()
+
+
+def clear_backoff(state: dict) -> None:
+    state["backoff_until"] = None
+
+
+def note_next_poll(state: dict, seconds: float) -> None:
+    """Record when the next poll is actually due.
+
+    The watchdog used to judge staleness against a fixed 45 minutes, a number
+    that only ever matched the daytime cadence. Overnight the interval is 30
+    minutes jittered to 37.5, and the gap measured start-to-start includes the
+    poll itself: a real 38-minute gap was observed on 2026-08-17, leaving
+    seven minutes before a healthy watcher would have been restarted.
+
+    Rather than keep a second copy of the cadence rules in a shell script and
+    hope the two stay in step, the watcher simply says when it will be back.
+    The watchdog then measures overdue-ness against that, which stays correct
+    through night mode, a changed EP_POLL_SECONDS, or another watched page.
+    """
+    state["next_poll_due"] = (utc_now() + timedelta(seconds=seconds)).isoformat()
+
+
+def backoff_remaining(state: dict) -> float:
+    """Seconds left of a deliberate backoff, or 0.0 if not resting."""
+    until = _parse(state.get("backoff_until"))
+    if until is None:
+        return 0.0
+    return max(0.0, (until - utc_now()).total_seconds())
 
 
 def hours_since_check(state: dict):

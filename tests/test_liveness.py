@@ -24,7 +24,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from ep_watcher import state as st  # noqa: E402
+from ep_watcher import config, state as st  # noqa: E402
 
 failures = []
 
@@ -105,6 +105,113 @@ check("no timestamp yet — watcher may be starting up",
       run_watchdog({}), False)
 check("unreadable timestamp is not treated as stale",
       run_watchdog({"last_check_at": "nonsense"}), False)
+
+print("\nA deliberate 403 backoff is not a hang, and must not be restarted")
+# The two look identical from outside — in both cases last_check_at stops
+# advancing — but the right response is opposite. The backoff doubles to a
+# three-hour cap, so past 45 minutes the watchdog would restart a watcher
+# that is resting on purpose. Each restart polls the rate-limited connection
+# again immediately, unattended, turning a short block into a long one.
+
+stale = (st.utc_now() - timedelta(minutes=90)).isoformat()
+resting = (st.utc_now() + timedelta(minutes=40)).isoformat()
+
+check("a stale clock alone still restarts",
+      run_watchdog({"last_check_at": stale}), True)
+check("...but not while a backoff is still running",
+      run_watchdog({"last_check_at": stale, "backoff_until": resting}), False)
+
+expired = (st.utc_now() - timedelta(minutes=5)).isoformat()
+check("once the backoff has expired it is a hang again",
+      run_watchdog({"last_check_at": stale, "backoff_until": expired}), True)
+check("a garbled backoff marker never blocks a needed restart",
+      run_watchdog({"last_check_at": stale, "backoff_until": "nonsense"}), True)
+check("nor does a null one",
+      run_watchdog({"last_check_at": stale, "backoff_until": None}), True)
+
+print("\nLateness is judged against the cadence in force, not a fixed number")
+# The flat 45-minute limit only ever matched the daytime cycle. Overnight the
+# interval is 30 minutes jittered to 37.5, and the gap includes the poll
+# itself — a real 38-minute gap was seen on 2026-08-17, seven minutes short of
+# restarting a healthy watcher. The watcher now says when it will be back.
+
+soon = (st.utc_now() + timedelta(minutes=25)).isoformat()
+check("a watcher sleeping out a long overnight interval is left alone",
+      run_watchdog({"last_check_at": stale, "next_poll_due": soon}), False)
+
+just_due = (st.utc_now() - timedelta(minutes=5)).isoformat()
+check("...and is still given time to actually run the poll",
+      run_watchdog({"last_check_at": stale, "next_poll_due": just_due}), False)
+
+well_overdue = (st.utc_now() - timedelta(minutes=25)).isoformat()
+check("but a poll long overdue is a hang",
+      run_watchdog({"last_check_at": stale, "next_poll_due": well_overdue}), True)
+
+# By day this is stricter than the old flat limit, which is the right way
+# round: a wedge at noon is caught in ~25 minutes rather than 45.
+day_wedge = (st.utc_now() - timedelta(minutes=30)).isoformat()
+check("a daytime wedge is caught sooner than the old flat limit",
+      run_watchdog({"last_check_at": day_wedge,
+                    "next_poll_due": (st.utc_now() - timedelta(minutes=20)).isoformat()}),
+      True)
+
+check("older state without the marker still uses the flat limit",
+      run_watchdog({"last_check_at": stale}), True)
+check("...and a garbled marker does not disable the fallback",
+      run_watchdog({"last_check_at": stale, "next_poll_due": "nonsense"}), True)
+
+# A backoff outranks all of it: resting is not lateness.
+check("a backoff still wins over an overdue poll",
+      run_watchdog({"last_check_at": stale,
+                    "next_poll_due": well_overdue,
+                    "backoff_until": resting}), False)
+
+print("\nThe same distinction, in state and in doctor")
+
+s = dict(st._defaults())
+check("a fresh state is not resting", st.backoff_remaining(s), 0.0)
+
+st.note_backoff(s, 1800)
+left = st.backoff_remaining(s)
+check("a marked backoff has time left", 1700 < left <= 1800, True)
+
+st.clear_backoff(s)
+check("clearing it ends the rest", st.backoff_remaining(s), 0.0)
+
+st.note_backoff(s, -60)      # already elapsed
+check("an elapsed backoff reads as finished", st.backoff_remaining(s), 0.0)
+
+s["backoff_until"] = "not a timestamp"
+check("garbage does not read as resting", st.backoff_remaining(s), 0.0)
+
+print("\nDoctor's staleness limit must follow the overnight cadence")
+# It was derived from the daytime cycle alone, so once the overnight
+# slowdown kicked in every ordinary gap looked wedged. On the night of
+# 2026-08-16 real gaps reached 36 minutes against a 30-minute threshold —
+# doctor reported a perfectly healthy watcher as broken, all night.
+
+saved = config.NIGHT_START_HOUR, config.NIGHT_END_HOUR
+
+config.NIGHT_START_HOUR, config.NIGHT_END_HOUR = 0, 0        # never night
+day_interval, is_night = config.poll_interval_now()
+check("by day the cadence is the normal cycle", is_night, False)
+day_limit = max(day_interval * 2, 900) / 60
+
+config.NIGHT_START_HOUR, config.NIGHT_END_HOUR = 0, 24       # always night
+night_interval, is_night = config.poll_interval_now()
+check("at night it is the slow one", is_night, True)
+night_limit = max(night_interval * 2, 900) / 60
+
+check("the night limit is more generous than the day one",
+      night_limit > day_limit, True)
+# The number that actually mattered: a 36-minute gap is normal overnight.
+check("a real overnight gap is under the night limit", 36 < night_limit, True)
+check("...and would have tripped the old day-derived limit",
+      36 > max(config.POLL_INTERVAL_SECONDS * 3, 900) / 60, True)
+# Still tight enough to catch a genuine overnight hang before the morning.
+check("but a genuinely wedged watcher is still caught", night_limit < 90, True)
+
+config.NIGHT_START_HOUR, config.NIGHT_END_HOUR = saved
 
 print("\nAnd it must not scribble on the log used to diagnose real hangs")
 

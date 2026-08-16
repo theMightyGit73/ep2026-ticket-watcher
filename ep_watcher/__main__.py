@@ -203,15 +203,24 @@ def cmd_watch(args) -> int:
                         continue
                     backoff = min(backoff * 2 or config.BLOCKED_BACKOFF_SECONDS,
                                   config.BLOCKED_BACKOFF_MAX_SECONDS)
+                    resting = backoff * random.uniform(0.85, 1.15)
                     print(
                         f"[{stamp()}] still blocked with a fresh profile — this is the "
-                        f"network. Sleeping {backoff // 60} min."
+                        f"network. Sleeping {resting // 60:.0f} min."
                     )
-                    time.sleep(backoff * random.uniform(0.85, 1.15))
+                    # Say so in state before sleeping. Otherwise the frozen
+                    # last_check_at is indistinguishable from a hang, and past
+                    # 45 minutes the watchdog restarts a watcher that is
+                    # resting on purpose — which polls the rate-limited
+                    # connection again immediately and deepens the block.
+                    _mark_backoff(resting)
+                    time.sleep(resting)
+                    _mark_backoff(None)
                     continue
                 if backoff or tried_profile_reset:
                     print(f"[{stamp()}] recovered from rate limiting")
                     backoff = 0
+                    _mark_backoff(None)
                 tried_profile_reset = False
                 # A live basket has a countdown on it; stop polling and leave
                 # the window alone so David can actually finish the checkout.
@@ -243,12 +252,39 @@ def cmd_watch(args) -> int:
                     )
                 )
                 was_night = night
-            time.sleep(wait * random.uniform(0.75, 1.25))
+            # Tell the watchdog when to expect the next poll, so it judges
+            # lateness against the cadence actually in force rather than
+            # against a fixed number that only matched daytime.
+            sleeping = wait * random.uniform(0.75, 1.25)
+            _mark_next_poll(sleeping)
+            time.sleep(sleeping)
     except KeyboardInterrupt:
         print(f"\n[{stamp()}] Stopped.")
         return 0
     finally:
         session.close()
+
+
+def _mark_backoff(seconds) -> None:
+    """Write the deliberate-idle marker, or clear it with None.
+
+    Loaded and saved on its own rather than threaded through engine.run_once,
+    because the backoff happens *between* cycles — run_once has already saved
+    and closed its copy, so there is nothing to race with.
+    """
+    st = state_mod.load()
+    if seconds is None:
+        state_mod.clear_backoff(st)
+    else:
+        state_mod.note_backoff(st, seconds)
+    state_mod.save(st)
+
+
+def _mark_next_poll(seconds: float) -> None:
+    """Record when the next poll is due, for the watchdog to measure against."""
+    st = state_mod.load()
+    state_mod.note_next_poll(st, seconds)
+    state_mod.save(st)
 
 
 def _start_session(attempts: int = 3):
@@ -540,16 +576,33 @@ def cmd_doctor(_args) -> int:
     # 2. Is it actually doing work, or merely alive? A hung process passes
     #    every check above and does nothing at all.
     st = state_mod.load()
-    stale_after = max(config.POLL_INTERVAL_SECONDS * 3, 900) / 3600.0
+    # Night-aware, because it was not and that made it lie every night.
+    # The threshold was derived from the daytime cycle alone, so once the
+    # overnight slowdown kicked in — a 30-minute interval, jittered to as
+    # much as 38 — every ordinary gap exceeded it and doctor reported a
+    # perfectly healthy watcher as wedged. Measured on the night of
+    # 2026-08-16: gaps reached 36 minutes against a 30-minute threshold.
+    interval, night = config.poll_interval_now()
+    stale_after = max(interval * 2, 900) / 3600.0
+    cadence = f"{interval // 60} min cadence{' overnight' if night else ''}"
+
     age = state_mod.hours_since_check(st)
+    resting = state_mod.backoff_remaining(st)
     if age is None:
         bad("Polling", "no check has ever been recorded",
             f"tail -20 {config.LOG_DIR}/watcher.log")
+    elif resting:
+        # Deliberately waiting out a rate limit is not being wedged, and the
+        # two must not look alike: restarting during a backoff is how a short
+        # block becomes a long one.
+        ok("Polling", f"backing off after a 403 — resumes in {resting / 60:.0f} min")
     elif age > stale_after:
-        bad("Polling", f"last check was {age * 60:.0f} min ago — looks wedged",
+        bad("Polling",
+            f"last check was {age * 60:.0f} min ago, over the "
+            f"{stale_after * 60:.0f} min limit for a {cadence} — looks wedged",
             f"launchctl kickstart -k gui/$(id -u)/{label}")
     else:
-        ok("Polling", f"last check {age * 60:.0f} min ago")
+        ok("Polling", f"last check {age * 60:.0f} min ago ({cadence})")
 
     # 2b. Running is not the same as seeing. A poll can succeed, report a
     #     confident no on primary, and have learned nothing about resale

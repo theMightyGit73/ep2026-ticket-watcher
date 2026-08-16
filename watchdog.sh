@@ -40,6 +40,33 @@ if [ ! -f "$STATE" ]; then
     exit 0
 fi
 
+# Is the watcher deliberately resting out a 403 backoff? If so its clock is
+# supposed to be still, and restarting would poll the rate-limited connection
+# again immediately — turning a short block into a long one, unattended, at
+# whatever hour it happens. The backoff doubles to a 3-hour cap, so past the
+# 45-minute threshold below this is the difference between backing off and
+# hammering.
+RESTING=$(/usr/bin/python3 - "$STATE" <<'PY' 2>/dev/null
+import json, sys
+from datetime import datetime, timezone
+try:
+    with open(sys.argv[1]) as f:
+        until = json.load(f).get("backoff_until")
+    if not until:
+        print(0)
+    else:
+        left = (datetime.fromisoformat(until) - datetime.now(timezone.utc)).total_seconds()
+        print(int(max(0, left) // 60))
+except Exception:
+    print(0)
+PY
+)
+
+if [ -n "$RESTING" ] && [ "$RESTING" -gt 0 ] 2>/dev/null; then
+    say "backing off from a 403 for another ${RESTING} min — leaving it alone"
+    exit 0
+fi
+
 # Age of the last poll, in minutes.
 LAST=$(/usr/bin/python3 - "$STATE" <<'PY' 2>/dev/null
 import json, sys
@@ -62,11 +89,44 @@ if [ -z "$LAST" ] || [ "$LAST" -lt 0 ] 2>/dev/null; then
     exit 0
 fi
 
-if [ "$LAST" -le "$STALE_MINUTES" ]; then
-    exit 0   # healthy, and deliberately silent so the log stays readable
-fi
+# How overdue is the next poll? The watcher writes next_poll_due before every
+# sleep, so this follows the cadence actually in force — 10 minutes by day, 30
+# overnight — instead of a fixed threshold that only ever matched the daytime
+# one. Measured start-to-start, a normal overnight gap reached 38 minutes on
+# 2026-08-17, seven minutes short of restarting a perfectly healthy watcher.
+#
+# GRACE is time for the poll itself to finish once it is due: two pages, each
+# a page load, a search and a wait for the resale panel.
+GRACE_MINUTES="${EP_GRACE_MINUTES:-15}"
+OVERDUE=$(/usr/bin/python3 - "$STATE" <<'PY' 2>/dev/null
+import json, sys
+from datetime import datetime, timezone
+try:
+    with open(sys.argv[1]) as f:
+        due = json.load(f).get("next_poll_due")
+    if not due:
+        print("none")      # not recorded — fall back to the flat limit
+    else:
+        late = (datetime.now(timezone.utc) - datetime.fromisoformat(due)).total_seconds()
+        # Negative means not due yet, which is a perfectly normal state and
+        # must stay distinguishable from "not recorded" — conflating the two
+        # sent every sleeping watcher down the flat-limit path.
+        print(int(late // 60))
+except Exception:
+    print("none")
+PY
+)
 
-say "last poll was ${LAST} min ago (limit ${STALE_MINUTES}) — restarting the watcher"
+if [ -n "$OVERDUE" ] && [ "$OVERDUE" != "none" ] && [ "$OVERDUE" -eq "$OVERDUE" ] 2>/dev/null; then
+    if [ "$OVERDUE" -le "$GRACE_MINUTES" ]; then
+        exit 0   # not due yet, or not long overdue — silent by design
+    fi
+    say "poll is ${OVERDUE} min overdue (grace ${GRACE_MINUTES}) — restarting the watcher"
+elif [ "$LAST" -le "$STALE_MINUTES" ]; then
+    exit 0   # healthy, and deliberately silent so the log stays readable
+else
+    say "last poll was ${LAST} min ago (limit ${STALE_MINUTES}) — restarting the watcher"
+fi
 
 # Lets the decision be exercised without actually bouncing the service, so
 # the test suite can check "would it restart?" without disrupting a watcher
