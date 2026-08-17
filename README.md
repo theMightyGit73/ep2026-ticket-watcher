@@ -84,6 +84,38 @@ this that works.
 
 ---
 
+## What it has actually caught
+
+Two Verified Resale listings on 2026-08-17, both on the standard Weekend
+Camping page, both alerted by email and push inside the same minute:
+
+| Seen | Listing | Price | Gone by |
+| --- | --- | --- | --- |
+| 07:49 UTC | Section STNDN1 | €366.39 | 08:10 (≤ 20 min) |
+| 16:02 UTC | Section STNDN2 | €366.39 | 16:14 (≤ 12 min) |
+
+Three things worth taking from that.
+
+**€366.39 twice** — same price, adjacent sections, hours apart. That reads as
+face value plus fees rather than opportunistic reselling, which means you can
+decide in advance whether it is worth paying instead of working it out in the
+ninety seconds you will have.
+
+**Both lived 12–20 minutes**, not the five minutes seen during testing. Still
+comfortably inside a 10-minute cycle, but only just, and a blind poll in that
+window would have missed one outright.
+
+**Both were on the page whose resale panel was going blind 22% of the time**
+before the fix described in
+[Watching the response is not watching the panel](#watching-the-response-is-not-watching-the-panel).
+
+The 07:49 find is recorded in the log as a bare count, because listing details
+were not logged until that afternoon. The 16:02 one is preserved in full. That
+is the whole argument for logging what a thing *was* rather than that it
+happened.
+
+---
+
 ## Two pages, watched separately
 
 Electric Picnic sells the same weekend twice — an ordinary ticket and an
@@ -277,10 +309,41 @@ it dies — but deliberately *not* when it exits cleanly on its stop date.
 **3. Hangs — the one the first two miss.** A wedged Chrome keeps its PID and
 looks perfectly healthy to launchd while doing nothing whatsoever. So the
 watcher writes `last_check_at` on every poll, and a second LaunchAgent runs
-[watchdog.sh](watchdog.sh) every 15 minutes: if that timestamp has stopped
-advancing for 45 minutes, it kicks the watcher. It stays silent when things
-are fine, and won't "repair" a watcher that is merely starting up or has
-correctly stopped after the event.
+[watchdog.sh](watchdog.sh) every 15 minutes to check that it is advancing. It
+stays silent when things are fine, and won't "repair" a watcher that is merely
+starting up or has correctly stopped after the event.
+
+### Three states that look identical from outside
+
+A still `last_check_at` has three quite different causes, and telling them
+apart is the difference between fixing a hang and making a rate limit worse.
+
+| State | Looks like | Right response |
+| --- | --- | --- |
+| Sleeping between polls | clock still | leave alone |
+| Backing off from a 403 | clock still | **leave alone** |
+| Wedged Chrome | clock still | restart |
+
+So the watcher writes down which it is, rather than leaving the watchdog to
+guess from a fixed threshold:
+
+- **`next_poll_due`**, written before every sleep, is when the next poll is
+  actually expected. The watchdog measures lateness against that plus a
+  15-minute grace. A flat 45-minute limit only ever matched the daytime
+  cadence — overnight, where the interval is 30 minutes jittered to 37.5 and
+  the gap includes the poll itself, a real 38-minute gap was observed with
+  seven minutes to spare. This also makes it *stricter* by day: a wedge at
+  noon is caught in ~25 minutes rather than 45.
+- **`backoff_until`**, written before a deliberate 403 backoff, marks the
+  watcher as resting on purpose. That backoff doubles to a three-hour cap, so
+  past 45 minutes the watchdog would otherwise restart it — and each restart
+  polls the rate-limited connection again immediately, unattended, turning a
+  short block into a long one. Both the watchdog and `doctor` leave it alone.
+
+`doctor`'s own staleness limit follows the cadence in force and says which it
+used (`last check 3 min ago (30 min cadence overnight)`). Deriving it from the
+daytime cycle alone meant it reported a perfectly healthy watcher as wedged
+every night between midnight and seven.
 
 ### When something looks wrong
 
@@ -352,6 +415,10 @@ Environment variables, all optional:
 | `EP_POLL_SECONDS` | `300` | Seconds **per page**. The cycle is this × the number of pages, so 600s with two — jittered ±25% |
 | `EP_WATCH_LABEL` | `Electric Picnic 2026` | What to call the watch in emails covering every page |
 | `EP_HEARTBEAT_HOURS` | `1` | How often to send the "still nothing" report |
+| `EP_NIGHT_POLL_SECONDS` | `1800` | Overnight cycle. `0` disables the slowdown |
+| `EP_SEARCH_TIMEOUT` | `45` | Seconds to wait for a search to resolve |
+| `EP_NIGHT_SEARCH_TIMEOUT` | `90` | The same, overnight, when the page is slower |
+| `EP_GRACE_MINUTES` | `15` | How late a poll may be before the watchdog restarts it |
 | `EP_OFFSCREEN` | `1` | Park the Chrome window off-desktop |
 | `EP_HEADLESS` | `0` | **Leave this alone.** Headless is always blocked |
 | `PRESS_THE_BUTTON` | `1` | Set `0` and it can no longer answer the question |
@@ -375,18 +442,70 @@ Set `WANTED_QUANTITIES=1,2,3` to sweep several per poll instead.
 
 ## The emails
 
-Four kinds, all to `davidcoyne73@gmail.com`, each naming and linking the page
-it is about — never "the event page" in the abstract:
+All to `davidcoyne73@gmail.com`, and every one that concerns a ticket names
+and links the page it is about — never "the event page" in the abstract:
 
-| Email | When |
-| --- | --- |
-| **Tickets available** | A listing appears on the box office or verified resale |
-| **In the basket** | A reserve actually succeeded — there is a live hold, with a countdown |
-| **No luck yet** | Hourly while nothing has turned up — reports **both** pages |
-| **Watcher is broken** | 4 consecutive failed checks, then every 6h until fixed |
+| Email | When | Push? |
+| --- | --- | --- |
+| **Tickets available** | A listing appears on the box office or verified resale | yes, urgent |
+| **In the basket** | A reserve actually succeeded — a live hold, with a countdown | yes, urgent |
+| **No luck yet** | Hourly while nothing has turned up — reports **both** pages | only if failing |
+| **Watcher is broken** | 4 consecutive failed checks, then every 6h until fixed | yes |
+| **Working again** | It recovered from a run of failures | low |
+| **Session summary** | Whenever day/night settings change — twice a day | no |
+| **Connection changed** | The MacBook moved to a different network | no |
+| **Watcher stopped** | Once, on the stop date | low |
+| **Mac has gone quiet** | Sent *from GitHub* when the laptop stops checking in | yes |
 
-Plus one **Watcher stopped** email on the stop date, and a **Mac watcher has
-gone quiet** alert sent from GitHub when the laptop stops checking in.
+The push column is deliberate. Three of these are scheduled or
+self-inflicted — a session summary, a network switch you just made, the
+retirement notice — and buzzing a phone for them trains you to swipe away the
+channel that carries the ticket alert. That channel has to stay worth looking
+at.
+
+The "watcher is broken" email names the worst-affected page *and its URL*: the
+likeliest cause of one page failing while the other is fine is that page's URL
+having changed, which takes seconds to check once you have the link.
+
+### Session summaries, at each change of settings
+
+The watcher runs in two modes with different settings and used to cross
+between them silently. Now each crossing sends one email: what changed, why,
+and what the finished session did.
+
+```text
+SETTINGS CHANGED
+  Poll cycle                : every 10 min  →  every 30 min
+  Search timeout            : 45s  →  90s
+  Next change               : 07:00 local (or the first poll after), back to daytime
+
+DAYTIME SESSION JUST ENDED
+  Ran for                   : 16.5 hours
+  Page checks               : 200
+  Of those, unhealthy       : 0
+  Resale readable           : 198/200 (99%)
+  Rate-limit blocks         : 0
+  Tickets found             : 1
+
+  What turned up:
+    • 07:49 UTC — Weekend Camping: Verified Resale — Section STNDN1 — €366.39
+```
+
+Two reasons it exists. A watcher that quietly starts polling three times more
+slowly is one you cannot reason about from the inbox, and every ambiguity of
+that kind here has eventually cost something. And the hourly report can only
+ever show an hour, so "how did the night go" previously had no answer short of
+reading the log by hand — which is how a resale regression went unnoticed for
+six hours.
+
+**It reports what a listing *was*, not just that there was one.** A listing
+lives minutes, so by the time the summary arrives it has sold; a bare count
+teaches you nothing about what these go for. Kept per session, capped at 20 so
+a fortnight cannot grow `state.json` without limit.
+
+It is found by comparing the *stored* mode against the current one rather than
+by catching the instant of the change, so a restart across the boundary still
+reports the finished session instead of swallowing it.
 
 The "watcher is broken" email names the worst-affected page *and its URL*: the
 likeliest cause of one page failing while the other is fine is that page's URL
@@ -442,6 +561,51 @@ counters, attributes any blocks to the connection they happened on, and tells
 you when to switch back. There is nothing to confirm and no setting to change.
 The IP is looked up once per cycle rather than once per page, and a momentary
 failure to reach the IP-echo service is not treated as a network change.
+
+It also **emails you the moment it moves**, rather than waiting up to an hour
+to mention it in a report headed "no luck yet". Which connection is in use
+decides where blocks land, and the burnt one is the one you must not try to
+buy on, so the change is worth saying at the time. The email names what was
+left, what is now in use, the health of each, and what the old connection
+collected while it was in service.
+
+Two cases are told apart, because they look identical in the state file:
+
+- **A switch you made** (home ↔ hotspot). Always emailed.
+- **A new address on the same connection.** A tethered phone is usually given
+  a fresh address each time it reconnects — observed twice on 2026-08-17 —
+  and calling that "you switched networks" would be wrong. Reported as a
+  re-addressing, and limited to one email per ten minutes so a flapping
+  tether cannot fill the inbox with mail about something you did not do. A
+  genuine switch is never suppressed, however recent the last email.
+
+Switching **onto** an already rate-limited connection puts `CAUTION` in the
+subject. Switching is meant to buy a clean connection; landing on a burnt one
+silently would defeat the whole scheme.
+
+### Ask only for the IPv4 address
+
+The IP lookups are pinned to the IPv4-only form of each service, and that is
+load-bearing rather than tidy. Measured from the home connection on
+2026-08-17, the unpinned hostnames disagreed with each other:
+
+```text
+api.ipify.org    -> 86.44.208.194
+ifconfig.me/ip   -> 2001:bb6:4cb5:f000:81f0:2eb3:1625:7556
+icanhazip.com    -> 2001:bb6:4cb5:f000:81f0:2eb3:1625:7556
+```
+
+A dual-stack connection has both addresses, so which one comes back depends on
+which service answered rather than on which network you are using. The watcher
+treats a different address as a different connection, so a v6 answer looks like
+a switch that never happened: counters reset, a switch email sent, and —
+because the v6 address is not `EP_HOME_IP` — **the home connection labelled
+"phone hotspot"**. Blocks on home would then be recorded against a connection
+that does not exist, and the health line would call the connection you need
+for buying clean while it was being throttled.
+
+If no service returns a v4 address the answer is "don't know", which leaves
+the known connection untouched — better than inventing a switch.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -730,7 +894,15 @@ you wondering whether it finished or died.
 - **Resale listings flicker.** One appeared, vanished, and reappeared within
   ten minutes during testing. That is the behaviour the watcher exists for, and
   the reason alerts are edge-triggered per market with an hourly re-nag rather
-  than fired once and latched.
+  than fired once and latched. The two real listings caught on 2026-08-17
+  lived 12 and 20 minutes — longer than the five-minute worst case, but not by
+  enough to relax about a missed poll.
+- **The overnight timeout is a hypothesis, not a measurement.** Every
+  non-resolving search so far fell between 22:08 and 01:00, so the search wait
+  is longer in that window. Five clustered observations say the page is slow
+  then; they do not say 90 seconds is enough. If timeouts continue at that
+  value the cause is something other than slowness, and a bigger number will
+  not find it.
 - **A blind poll is close to a missed chance, not a fraction of one.** A
   listing lives about one poll interval, so "resale readable on 76% of polls"
   is not a comfortable margin. Watch that line in `doctor`; it is the one
