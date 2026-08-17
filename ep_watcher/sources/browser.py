@@ -719,6 +719,8 @@ class BrowserSession:
             attempt = Reading(source=SOURCE)
             self._parse_primary(outcome, text, attempt, qty)
             self._parse_resale(text, attempt)
+            if attempt.any_good:
+                self._record_find(attempt, qty)
             reading.notes.extend(f"qty={qty}: {n}" for n in attempt.notes)
 
             for listing in attempt.listings:
@@ -749,6 +751,46 @@ class BrowserSession:
         return reading
 
     # ── diagnostics ──────────────────────────────────────────────────────────
+    def _record_find(self, reading: Reading, qty: int) -> None:
+        """Keep everything about the one moment that cannot be reproduced.
+
+        A find needs a real listing present while the watcher happens to be
+        looking — it cannot be rehearsed, and by the next poll it is usually
+        gone. So the whole state is written down at that instant: the API
+        response with a populated `picks` (whose shape has never been seen,
+        and which the parser currently guesses at), the rendered page, and a
+        screenshot.
+
+        Answering "what exactly did a real listing look like?" afterwards is
+        otherwise impossible, and the answer decides how precisely alerts can
+        describe the next one — possibly including whether there is an id to
+        link straight to.
+        """
+        import json
+
+        try:
+            config.DIAG_DIR.mkdir(parents=True, exist_ok=True)
+            base = config.DIAG_DIR / f"find-{time.strftime('%Y%m%d-%H%M%S')}-qty{qty}"
+
+            record = getattr(self, "_resale_response", None)
+            payload = {
+                "when": stamp(),
+                "quantity_searched": qty,
+                "url": self.page.url,
+                "primary": reading.primary,
+                "resale": reading.resale,
+                "listings": [l.describe() for l in reading.listings],
+                "notes": list(reading.notes),
+                "resale_api": record,
+            }
+            base.with_suffix(".json").write_text(json.dumps(payload, indent=2, default=str))
+            base.with_suffix(".txt").write_text(self.visible_text())
+            self.page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+            print(f"[{stamp()}] find recorded: {base.with_suffix('.json')}")
+        except Exception as exc:
+            # Never let record-keeping cost the alert it is recording.
+            print(f"[{stamp()}] could not record the find: {type(exc).__name__}: {exc}")
+
     def diagnose(self, label: str = "diag", search: bool = True) -> Path:
         """Dump screenshot + visible text + HTML, after searching by default.
 
