@@ -164,6 +164,37 @@ check("a new block upgrades the whole history to the new shape",
       all(isinstance(e, dict) for e in s["block_history"]), True)
 check("without dropping the old entries", len(s["block_history"]), 4)
 
+print("\nAn unattributed block from before a connection existed is not its fault")
+# Seen live on 2026-08-17: after switching to a hotspot first used at 11:47,
+# the health line reported four blocks in the last 24h — every one of them
+# from the previous afternoon, on a connection that had not been in use yet.
+# Counting them was the conservative fallback overreaching into a claim that
+# is not merely unproven but impossible.
+
+s = on_connection(HOTSPOT)
+s["networks"][HOTSPOT]["first_seen"] = (st.utc_now() - timedelta(minutes=30)).isoformat()
+# Bare strings: the shape written before blocks carried an IP.
+s["block_history"] = [
+    (st.utc_now() - timedelta(hours=5)).isoformat(),      # before we had this IP
+    (st.utc_now() - timedelta(hours=4)).isoformat(),      # before
+    (st.utc_now() - timedelta(minutes=10)).isoformat(),   # after — could be ours
+]
+check("only the ones it could have caused count",
+      st.recent_blocks(s, 24, ip=HOTSPOT), 1)
+check("the unfiltered count still sees them all", st.recent_blocks(s, 24), 3)
+
+_, headline, _ = st.connection_health(s)
+check_true("so a fresh connection is not blamed for the old ones",
+           "1 block" in headline)
+
+# A connection we have never seen has no first_seen, so nothing is excluded —
+# the conservative fallback still applies where there is no evidence either way.
+s2 = on_connection(HOTSPOT)
+s2["networks"].pop(HOTSPOT)
+s2["block_history"] = [(st.utc_now() - timedelta(hours=5)).isoformat()] * 3
+check("with no first_seen, every unattributed block still counts",
+      st.recent_blocks(s2, 24, ip=HOTSPOT), 3)
+
 print("\n...but an unattributed block must not be blamed on a named connection")
 # Counting them against the current connection is the right call; *saying*
 # they happened on it is not. Nothing recorded which connection they were,

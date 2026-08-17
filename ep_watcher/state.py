@@ -749,14 +749,18 @@ def recent_blocks(state: dict, hours: float = 24.0, ip=ANY_IP) -> int:
     An unattributed entry (from before blocks carried an IP) counts for any
     connection asked about, so old history never silently disappears.
     """
-    cutoff = utc_now() - timedelta(hours=hours)
-    total = 0
-    for ts, at_ip in _block_entries(state):
-        if (_parse(ts) or cutoff) < cutoff:
-            continue
-        if ip is ANY_IP or at_ip is None or at_ip == ip:
-            total += 1
-    return total
+    if ip is ANY_IP:
+        cutoff = utc_now() - timedelta(hours=hours)
+        return sum(1 for ts, _ in _block_entries(state)
+                   if (_parse(ts) or cutoff) >= cutoff)
+    mine, unknown = _block_counts(state, hours, ip)
+    return mine + unknown
+
+
+def first_seen(state: dict, ip) -> Optional[datetime]:
+    """When this connection was first used, if we have ever seen it."""
+    entry = (state.get("networks") or {}).get(ip) or {}
+    return _parse(entry.get("first_seen"))
 
 
 def _block_counts(state: dict, hours: float, ip) -> tuple:
@@ -766,13 +770,23 @@ def _block_counts(state: dict, hours: float, ip) -> tuple:
     carried an IP still counts — going quiet about a real block is the
     expensive mistake — but it cannot support a sentence naming the
     connection it happened on, because nothing recorded which one that was.
+
+    An unattributed block from before this connection was ever seen is a
+    different matter: it definitely did not happen here. Counting it anyway
+    told a hotspot first used at 11:47 that it had four blocks from the
+    previous afternoon, which is both impossible and precisely the
+    misattribution this whole per-connection accounting exists to stop.
     """
     cutoff = utc_now() - timedelta(hours=hours)
+    since = first_seen(state, ip)
     mine = unknown = 0
     for ts, at_ip in _block_entries(state):
-        if (_parse(ts) or cutoff) < cutoff:
+        when = _parse(ts)
+        if when is None or when < cutoff:
             continue
         if at_ip is None:
+            if since is not None and when < since:
+                continue
             unknown += 1
         elif at_ip == ip:
             mine += 1
