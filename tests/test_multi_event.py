@@ -134,6 +134,38 @@ notify.available(r, "test", [])
 check_true("email names it", B.name in body_of(sent[-1]))
 check_true("subject names it", B.name in sent[-1]["Subject"])
 
+print("\nA find must be recorded in the log, not merely counted")
+# The log said "1 verified-resale listing(s) on the page" and nothing more,
+# so the section and price lived only in the email. A real listing appeared
+# on 2026-08-17 at 07:49 and lasted about fifteen minutes; afterwards there
+# was no way to answer "what was it, and what did it cost?" from the log at
+# all. That is the record you consult when deciding whether the next one is
+# worth dropping everything for.
+
+import io                     # noqa: E402
+from contextlib import redirect_stdout  # noqa: E402
+
+state = dict(st._defaults())
+found = Listing("Verified Resale — Section STNDN1 (WEEKEND CAMPING)", "€366.39", "resale")
+
+buf = io.StringIO()
+with redirect_stdout(buf):
+    engine.handle(reading(A, AVAILABLE, [found]), state)
+logged = buf.getvalue()
+
+check_true("the log names the section", "STNDN1" in logged)
+check_true("...and the price", "366.39" in logged)
+check_true("...and which market it was on", "resale:" in logged)
+check_true("...and which page", A.slug in logged)
+check_true("the summary line is still there", "resale=AVAILABLE" in logged)
+
+# A quiet poll must not start printing empty listing lines every ten minutes.
+buf = io.StringIO()
+with redirect_stdout(buf):
+    engine.handle(reading(B), state)
+check("a poll with nothing found adds no listing lines",
+      "→" in buf.getvalue(), False)
+
 print("\nThe cycle picks the most significant reading")
 
 quiet = reading(A)

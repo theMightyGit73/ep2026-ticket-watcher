@@ -355,9 +355,16 @@ class BrowserSession:
             reading.note(f"could not press the search button: {exc}")
             return False
 
-    def _await_result(self, timeout_s: int = 45) -> str:
-        """Wait for the search to resolve into one of its three outcomes."""
-        deadline = time.time() + timeout_s
+    def _await_result(self, timeout_s: int = None) -> str:
+        """Wait for the search to resolve into one of its three outcomes.
+
+        The timeout defaults to config.search_timeout(), which is longer
+        overnight — that is when every observed non-resolving search has
+        happened, and each one costs a resale-blind poll. Waiting longer is
+        paid only by searches that were going to fail: a healthy one returns
+        as soon as its marker appears.
+        """
+        deadline = time.time() + (config.search_timeout() if timeout_s is None else timeout_s)
         while time.time() < deadline:
             if "checkout" in (self.page.url or "").lower():
                 return "basket"
@@ -515,7 +522,12 @@ class BrowserSession:
             reading.note("explicit sold-out text")
             return
         reading.primary = UNKNOWN
-        reading.note("search did not resolve within the timeout")
+        # Name the number it waited. "Within the timeout" gave no way to tell
+        # whether a later change to that timeout had helped, which is exactly
+        # the question asked after raising it overnight.
+        reading.note(
+            f"search did not resolve within {config.search_timeout()}s"
+        )
 
     # ── the public call ──────────────────────────────────────────────────────
     def check(self, event=None) -> Reading:

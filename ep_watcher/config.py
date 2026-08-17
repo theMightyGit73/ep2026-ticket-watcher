@@ -284,6 +284,38 @@ def poll_interval_now(daytime_interval=None) -> tuple:
         return max(NIGHT_POLL_SECONDS, day), True
     return day, False
 
+
+# How long to wait for a pressed search to resolve into an answer.
+#
+# Longer overnight, because that is when the page is slow. Every observed
+# "search did not resolve within the timeout" — five of them across two
+# nights, on 2026-08-15, -16 and -17 — fell between 22:08 and 01:00, against
+# hundreds of daytime polls with none at all. Each one costs a resale-blind
+# poll on both pages, which is a listing that could not have been seen.
+#
+# Raising it is close to free, and that asymmetry is the argument. A search
+# that resolves normally returns the moment its marker appears — a few
+# seconds — so this ceiling is only ever reached by a poll that was going to
+# fail anyway. The extra wait is spent on failures, never on healthy polls.
+#
+# Being honest about the evidence: five clustered observations say the page
+# is slow then, not that 90 seconds is enough. If timeouts persist at this
+# value, the cause is something other than slowness and a bigger number will
+# not find it.
+SEARCH_TIMEOUT_SECONDS = int(os.environ.get("EP_SEARCH_TIMEOUT", "45"))
+NIGHT_SEARCH_TIMEOUT_SECONDS = int(os.environ.get("EP_NIGHT_SEARCH_TIMEOUT", "90"))
+
+
+def search_timeout(now=None) -> int:
+    """Seconds to wait for a search, by time of day.
+
+    Keyed on the night *window* rather than on NIGHT_POLL_SECONDS, because
+    the two describe different things: the window is when Ticketmaster is
+    slow, the poll setting is how often we choose to ask. Turning the
+    overnight slowdown off should not also remove the extra patience.
+    """
+    return NIGHT_SEARCH_TIMEOUT_SECONDS if is_night(now) else SEARCH_TIMEOUT_SECONDS
+
 # How long to sleep after an HTTP 403, doubling on each consecutive block up
 # to the cap, and reset on the first good read.
 BLOCKED_BACKOFF_SECONDS = int(os.environ.get("EP_BACKOFF_SECONDS", "1800"))

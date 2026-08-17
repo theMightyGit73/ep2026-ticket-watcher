@@ -91,6 +91,15 @@ def handle(reading: Reading, st: dict) -> None:
     print(f"[{stamp()}] {reading.summary()}")
     for note in reading.notes:
         print(f"    {note}")
+    # What was actually found, not just how many. The log recorded
+    # "1 verified-resale listing(s) on the page" and nothing else, so the
+    # section and price existed only in the email — and once that is read or
+    # deleted there is no way to answer "what was it, and what did it cost?"
+    # about a listing that has since sold. A real one appeared on 2026-08-17
+    # at 07:49 and lasted about fifteen minutes; the log cannot say what it
+    # was. Same shape as `check` prints, so the two read alike.
+    for listing in reading.listings:
+        print(f"    → {listing.kind}: {listing.describe()}")
 
     state_mod.start_heartbeat_clock(st)
     # A partial reading counts as unhealthy, not as a clean poll. See

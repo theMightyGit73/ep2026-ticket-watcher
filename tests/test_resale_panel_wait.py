@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ep_watcher import config  # noqa: E402
 from ep_watcher.model import AVAILABLE, UNAVAILABLE, UNKNOWN, Reading  # noqa: E402
 from ep_watcher.sources import browser  # noqa: E402
 
@@ -248,6 +249,44 @@ for name, script, response_at in scenarios:
     if not readable and reading.resale != UNKNOWN:
         broken.append(f"{name} (blind but answered)")
 check("readable always means the parser can answer", broken, [])
+
+print("\nThe search wait takes its length from the time of day")
+# Not hardcoded at 45s any more: overnight is when searches fail to resolve,
+# and each failure costs a resale-blind poll on every page.
+
+
+class NeverResolves(ScriptedPage):
+    """A search that never produces any of its three outcomes.
+
+    _await_result checks self.page.url for the checkout redirect, so a bare
+    URL is all the browser this needs.
+    """
+
+    @property
+    def page(self):
+        return type("_P", (), {"url": "https://www.ticketmaster.ie/event/X"})()
+
+
+clock = FakeClock()
+browser.time = clock
+page = NeverResolves(clock, [(0, "Find Tickets")], response_at=None)
+saved = config.SEARCH_TIMEOUT_SECONDS
+config.SEARCH_TIMEOUT_SECONDS = 20
+config.NIGHT_START_HOUR, config.NIGHT_END_HOUR = 0, 0     # never night
+
+start = clock.now
+check("a search that never resolves gives up",
+      browser.BrowserSession._await_result(page), "timeout")
+check("...after the configured wait, not a hardcoded 45s",
+      round(clock.now - start), 20)
+
+# An explicit argument still wins, so callers and tests can pin it.
+clock.now = start
+check("an explicit timeout overrides the default",
+      browser.BrowserSession._await_result(page, timeout_s=5), "timeout")
+check("...and is the wait actually taken", round(clock.now - start), 5)
+
+config.SEARCH_TIMEOUT_SECONDS = saved
 
 print("\nEvery outcome carries a reason worth reading in the log")
 for name, script, response_at in scenarios:
