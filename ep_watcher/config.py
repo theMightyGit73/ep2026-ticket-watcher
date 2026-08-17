@@ -206,6 +206,16 @@ WATCHDOG_RENAG_HOURS = 6
 # shouldn't cost the ticket; a stuck "available" shouldn't send 600 emails.
 AVAILABILITY_RENAG_HOURS = 1
 
+# While a listing is actually live, remind far more often than hourly.
+#
+# The hourly figure was set before we knew how long these last. Measured on
+# 2026-08-17, a listing was present at 07:49 and still there at 08:01 — ten to
+# twenty minutes, not the five originally assumed. So an hourly reminder is
+# useless for the case it exists to cover: a missed push meant the next word
+# came long after the ticket had gone. Four minutes means a listing that lives
+# fifteen gets three or four chances to reach you.
+LIVE_RENAG_MINUTES = float(os.environ.get("EP_LIVE_RENAG_MINUTES", "4"))
+
 # Seconds between polls in `watch`. Jittered by ±25% so the traffic pattern
 # isn't a metronome, which is itself something bot detection looks for.
 # Raised to 10 minutes after a 180s cadence got this client rate-limited

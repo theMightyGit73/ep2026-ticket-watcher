@@ -214,9 +214,14 @@ def should_alert_availability(state: dict, reading, new_listings=()) -> tuple:
         return True, "; ".join(reasons)
 
     if reading.any_good:
+        # Minutes, not hours, while something is actually live. These listings
+        # last ten to twenty minutes; an hourly reminder would arrive after the
+        # ticket had gone, which makes it a reminder about nothing.
         since = _hours_since(ev["last_availability_alert"])
-        if since is None or since >= config.AVAILABILITY_RENAG_HOURS:
-            return True, "still available — periodic reminder"
+        if since is None or since * 60 >= config.LIVE_RENAG_MINUTES:
+            return True, (
+                f"still available — reminder ({config.LIVE_RENAG_MINUTES:.0f} min)"
+            )
 
     return False, ""
 

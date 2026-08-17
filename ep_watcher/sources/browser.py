@@ -91,6 +91,110 @@ def _has_listing_rows(text: str) -> bool:
     return any(_is_listing_row(line) for line in (text or "").splitlines())
 
 
+def _listing_from_pick(pick) -> Listing:
+    """Best-effort description of one listing from the resale API.
+
+    Never fails. An unrecognised entry still becomes a listing, because the
+    alert's job is to say a ticket exists — describing its section wrongly
+    costs a line of text, missing it costs the ticket.
+
+    The real shape of an entry has not been observed: that needs a listing
+    present at the moment someone is looking. So several plausible field
+    names are tried and anything unknown still counts.
+    """
+    if not isinstance(pick, dict):
+        return Listing(name=f"Verified Resale ({pick})", kind="resale")
+
+    def first(*names):
+        for name in names:
+            value = pick.get(name)
+            if isinstance(value, dict):
+                value = value.get("name") or value.get("value") or value.get("label")
+            if value not in (None, "", []):
+                return value
+        return None
+
+    section = first("section", "sectionName", "area", "areaName", "zone")
+    row = first("row", "rowName")
+    desc = first("description", "descriptionName", "ticketType", "name", "label")
+    price = first("price", "faceValue", "amount", "total", "displayPrice")
+
+    bits = ["Verified Resale"]
+    if section:
+        bits.append(f"— Section {section}")
+    if row:
+        bits.append(f"Row {row}")
+    if desc and str(desc) != str(section):
+        bits.append(f"({desc})")
+
+    if isinstance(price, (int, float)):
+        price = f"€{float(price):.2f}"
+    elif price is not None:
+        price = str(price)
+
+    return Listing(name=" ".join(str(b) for b in bits), price=price, kind="resale")
+
+
+def _parse_resale_json(record, reading: Reading) -> bool:
+    """Read listings from the resale API response. True if it answered.
+
+    The page fetches its listings as JSON and then draws them. Reading the
+    JSON is reading the fact; reading the page is reading its echo, and the
+    echo arrives late — waiting for it could not tell "not drawn yet" from
+    "drawn and empty", which recorded about a quarter of polls as
+    resale-blind.
+
+    Shape captured live on 2026-08-18 with an empty panel:
+
+        {"quantity": 0, "total": 0, "picks": [], "descriptions": []}
+
+    `total` is unambiguous in a way the rendered page never was: zero really
+    is zero, with no question of whether anything finished rendering.
+
+    A plain function taking the captured record, not a method: it needs no
+    browser, and requiring a live session to test a data transform is how
+    helpers end up untested.
+    """
+    if not record or not isinstance(record.get("data"), dict):
+        return False
+
+    if record.get("status") != 200:
+        reading.note(
+            f"resale API returned HTTP {record.get('status')} — falling back to the page"
+        )
+        return False
+
+    data = record["data"]
+    picks = data.get("picks")
+    total = data.get("total")
+    if picks is None and total is None:
+        reading.note(f"resale API shape unrecognised: keys={sorted(data)} — falling back")
+        return False
+
+    picks = picks if isinstance(picks, list) else []
+    count = total if isinstance(total, int) else len(picks)
+
+    if count <= 0:
+        reading.resale = UNAVAILABLE
+        reading.note("resale API: no listings (total=0) — definitive, nothing rendered")
+        return True
+
+    reading.resale = AVAILABLE
+    reading.note(f"resale API: {count} listing(s)")
+    if picks and isinstance(picks[0], dict):
+        # Logged so the first real listing teaches us its schema instead of
+        # us guessing at it indefinitely.
+        reading.note(f"resale pick keys: {sorted(picks[0])}")
+
+    for pick in picks[:10]:
+        reading.listings.append(_listing_from_pick(pick))
+    if not picks:
+        reading.listings.append(
+            Listing(name="Verified Resale (count only, no detail returned)", kind="resale")
+        )
+    return True
+
+
 class BrowserSession:
     """A warm Chrome, intended to be held open across many polls."""
 
@@ -154,7 +258,15 @@ class BrowserSession:
     def _note_resale_response(self, response) -> None:
         try:
             if RESALE_API_RE.search(response.url):
-                self._resale_response = {"url": response.url, "status": response.status}
+                record = {"url": response.url, "status": response.status, "data": None}
+                try:
+                    # The body is the point: it carries the listings as data,
+                    # before anything is drawn. Its own try because reading a
+                    # body can fail if the response was already discarded.
+                    record["data"] = response.json()
+                except Exception:
+                    pass
+                self._resale_response = record
         except Exception:
             # A listener that raises would break the page, and this is only
             # ever an optimisation over reading the DOM.
@@ -456,12 +568,18 @@ class BrowserSession:
 
     # ── reading the answer ───────────────────────────────────────────────────
     def _parse_resale(self, text: str, reading: Reading) -> None:
-        """Find real resale listings in the post-search panel.
+        """Find real resale listings, preferring the API response to the page.
 
         Detection is by the presence of listing entries, NOT by the absence of
         the "will appear below when they are available" caption — that caption
         is static and sits above real listings.
+
+        The rendered page stays as a fallback for polls where the response was
+        missed. A late answer beats no answer; it is only the *waiting* for
+        rendering that cost coverage.
         """
+        if _parse_resale_json(getattr(self, "_resale_response", None), reading):
+            return
         raw = self.visible_text()
         lines = [l.strip() for l in raw.splitlines() if l.strip()]
         listings: List[Listing] = []
