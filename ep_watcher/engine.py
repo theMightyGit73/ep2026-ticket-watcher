@@ -109,6 +109,7 @@ def handle(reading: Reading, st: dict) -> None:
     if reading.degraded:
         state_mod.note_degraded(st, reading.failed_sources)
     state_mod.note_resale_visibility(st, reading)
+    state_mod.note_session_poll(st, reading)
     st["checks_total"] = st.get("checks_total", 0) + 1
     st["last_check_at"] = state_mod.utc_now().isoformat()
 
@@ -177,6 +178,10 @@ def handle(reading: Reading, st: dict) -> None:
         notify.reserved_in_browser(reading)
     else:
         notify.available(reading, reason, new_listings)
+    # Keep what it was, not just that there was one. By the time the session
+    # summary goes out the listing has almost certainly sold, and the count
+    # alone cannot tell you what these actually go for.
+    state_mod.note_session_find(st, reading)
     # Per event, or alerting on one page would start the re-nag clock for the
     # other and swallow its next find.
     state_mod.event_state(st, reading.event_slug)["last_availability_alert"] = (
@@ -310,6 +315,81 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     state_mod.reset_heartbeat(st)
 
 
+def session_settings(to_mode: str) -> list:
+    """[(label, before, after)] for what crossing into `to_mode` changes."""
+    day_cycle = config.POLL_INTERVAL_SECONDS
+    night_cycle = (
+        max(config.NIGHT_POLL_SECONDS, day_cycle)
+        if config.NIGHT_POLL_SECONDS else day_cycle
+    )
+    if to_mode == "night":
+        cycle_before, cycle_after = day_cycle, night_cycle
+        wait_before, wait_after = (
+            config.SEARCH_TIMEOUT_SECONDS, config.NIGHT_SEARCH_TIMEOUT_SECONDS)
+    else:
+        cycle_before, cycle_after = night_cycle, day_cycle
+        wait_before, wait_after = (
+            config.NIGHT_SEARCH_TIMEOUT_SECONDS, config.SEARCH_TIMEOUT_SECONDS)
+
+    rows = []
+    # Only list what genuinely differs. A "changed" line showing the same
+    # value on both sides is noise, and it would appear whenever one of the
+    # two modes has been configured to match the other.
+    if cycle_before != cycle_after:
+        rows.append(("Poll cycle", f"every {cycle_before // 60} min",
+                     f"every {cycle_after // 60} min"))
+    if wait_before != wait_after:
+        rows.append(("Search timeout", f"{wait_before}s", f"{wait_after}s"))
+    return rows
+
+
+def _next_switch(to_mode: str) -> str:
+    """Plain English for when the settings change back."""
+    hour = config.NIGHT_END_HOUR if to_mode == "night" else config.NIGHT_START_HOUR
+    other = "daytime" if to_mode == "night" else "overnight"
+    # Honest about the imprecision: the cadence is only re-checked after each
+    # poll, so the switch lands on the first poll past the hour rather than on
+    # it. Saying "07:00" flat would be a small, repeated lie.
+    return f"{hour:02d}:00 local (or the first poll after), back to {other}"
+
+
+def maybe_switch_session(st: dict) -> bool:
+    """Close the finished day/night session and open the next one.
+
+    Driven by comparing the stored mode against the current one rather than
+    by watching for the moment of transition, so it still fires when the
+    watcher was restarted across the boundary — which is exactly when a
+    silent switch would be least expected and most confusing.
+
+    Browser mode only. The API-only backstop runs one-shot on a GitHub
+    runner, where "your settings have changed" is meaningless and would
+    arrive twice a day from a machine that has no cadence to speak of.
+    """
+    if not config.USE_BROWSER:
+        return False
+
+    mode = "night" if config.is_night() else "day"
+    current = state_mod.session(st)
+    if current.get("mode") == mode:
+        return False
+
+    # Nothing to report the very first time: there is no finished session,
+    # and an opening email describing zero checks over zero hours is noise.
+    if current.get("mode") and current.get("started_at"):
+        print(f"[{stamp()}] {current['mode']} session ended — sending the summary")
+        notify.session_summary(
+            current,
+            to_mode=mode,
+            hours=state_mod.session_hours(st),
+            settings=session_settings(mode),
+            next_change=_next_switch(mode),
+            health=state_mod.connection_health(st),
+            events=state_mod.event_summaries(st),
+        )
+    state_mod.start_session(st, mode)
+    return True
+
+
 def run_once(session=None) -> Reading:
     """One full cycle across every watched event.
 
@@ -323,6 +403,9 @@ def run_once(session=None) -> Reading:
     """
     st = state_mod.load()
     try:
+        # Before polling, so the finished session's totals stop at the
+        # boundary and this cycle counts towards the new one.
+        maybe_switch_session(st)
         readings = []
         for reading in poll_all(session):
             handle(reading, st)

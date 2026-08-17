@@ -361,6 +361,95 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
         )
 
 
+def session_summary(session: dict, to_mode: str, hours: float, settings,
+                    next_change: str, health=None, events=None) -> None:
+    """Sent when the watcher crosses between daytime and overnight settings.
+
+    Two jobs, and the second is the reason it exists. It reports what the
+    finished session actually achieved — which the hourly heartbeat can only
+    ever show an hour of — and it says plainly that the watcher's settings
+    have just changed underneath him. A watcher that silently starts polling
+    three times more slowly is one whose behaviour you cannot reason about
+    from the inbox, and every ambiguity of that kind in this project has
+    eventually cost something.
+
+    `settings` is [(label, before, after)]; `session` is the counters from
+    state.session().
+    """
+    from_mode = "night" if to_mode == "day" else "day"
+    ended = "Overnight" if from_mode == "night" else "Daytime"
+
+    checks = session.get("checks", 0)
+    unhealthy = session.get("unhealthy", 0)
+    blind = session.get("resale_blind", 0)
+    finds = session.get("finds", 0)
+    readable = checks - blind
+
+    def row(label, value):
+        return f"  {label:<26}: {value}"
+
+    stats = "\n".join([
+        row("Ran for", f"{hours:.1f} hours"),
+        row("Page checks", checks),
+        row("Of those, unhealthy", unhealthy),
+        row("  · partial (a source failed)", session.get("degraded", 0)),
+        row("Resale readable",
+            f"{readable}/{checks}"
+            + (f" ({100 * readable / checks:.0f}%)" if checks else "")),
+        row("Rate-limit blocks", session.get("blocks", 0)),
+        row("Tickets found", finds),
+    ])
+
+    # The listings themselves, because a count is not an answer. "1 ticket
+    # found" tells you nothing about what it was or what it cost, and by the
+    # time you read this it has almost certainly sold.
+    seen = session.get("listings") or []
+    if seen:
+        stats += "\n\n  What turned up:\n" + "\n".join(f"    • {s}" for s in seen)
+    elif checks:
+        stats += "\n\n  Nothing appeared on either page during this session."
+
+    change_block = "\n".join(
+        f"  {label:<26}: {before}  →  {after}" for label, before, after in settings
+    ) or "  (no settings differ between the two modes)"
+
+    why = (
+        "Overnight the watcher polls far less often. A headstart is worth "
+        "nothing while you are asleep — a resale listing lives minutes — so "
+        "those hours would otherwise accumulate request volume on your "
+        "connection unattended, with nobody awake to notice a block. It also "
+        "waits longer for each search, because that is when the page is slow."
+        if to_mode == "night" else
+        "Back to the faster daytime cadence, which is when you can actually "
+        "act on a listing. This is the part of the day the watcher exists for."
+    )
+
+    health_block = f"\n{_health_section(health)}\n" if health else ""
+    reading_block = f"\n{_reading_block(events, Reading(source='session'))}\n" if events else ""
+
+    subject = (
+        f"Switching to {'overnight' if to_mode == 'night' else 'daytime'} watching "
+        f"— {ended.lower()} session summary"
+    )
+    body = (
+        f"Hi David,\n\n"
+        f"The watcher has just switched to {'overnight' if to_mode == 'night' else 'daytime'} "
+        f"settings. Nothing for you to do — this is on a timer.\n\n"
+        f"SETTINGS CHANGED\n{change_block}\n"
+        f"  {'Next change':<26}: {next_change}\n\n"
+        f"  {why}\n\n"
+        f"{ended.upper()} SESSION JUST ENDED\n{stats}\n"
+        f"{health_block}{reading_block}\n"
+        f"You will still get the hourly 'no luck yet' report throughout, and a\n"
+        f"much louder email the moment anything shows up.\n\n"
+        f"Switched at: {stamp()}\n"
+    )
+    _safe("session-email", _send_email, subject, body)
+    # No push. This is a scheduled, expected change and a phone buzz for it
+    # would train him to swipe away the notification channel that carries the
+    # ticket alert.
+
+
 def mac_watcher_silent(hours: float) -> None:
     """Sent from GitHub when the Mac has stopped checking in.
 

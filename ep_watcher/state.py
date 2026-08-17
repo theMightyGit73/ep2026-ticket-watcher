@@ -449,6 +449,79 @@ def clear_backoff(state: dict) -> None:
     state["backoff_until"] = None
 
 
+# ── Day / night sessions ─────────────────────────────────────────────────────
+#
+# The watcher runs in two modes with different settings, and until now it
+# crossed between them silently — a line in a log nobody reads. A change to
+# how often it polls, and to how long it waits, is worth being told about at
+# the moment it happens, together with what the finished session achieved.
+
+#: Most listings kept per session. Enough to describe a busy day without
+#: letting state.json grow without limit over a fortnight.
+SESSION_LISTING_CAP = 20
+
+
+def _session_defaults():
+    return {
+        "mode": None,             # "day" | "night"
+        "started_at": None,       # ISO8601
+        "checks": 0,              # page readings, not cycles
+        "unhealthy": 0,
+        "degraded": 0,
+        "resale_blind": 0,
+        "finds": 0,
+        "blocks": 0,
+        "listings": [],           # what was actually seen, with timestamps
+    }
+
+
+def session(state: dict) -> dict:
+    return state.setdefault("session", _session_defaults())
+
+
+def start_session(state: dict, mode: str) -> None:
+    state["session"] = _session_defaults()
+    state["session"]["mode"] = mode
+    state["session"]["started_at"] = utc_now().isoformat()
+
+
+def note_session_poll(state: dict, reading) -> None:
+    """Fold one page reading into the running session totals."""
+    s = session(state)
+    s["checks"] = s.get("checks", 0) + 1
+    if reading.failed or reading.degraded:
+        s["unhealthy"] = s.get("unhealthy", 0) + 1
+    if reading.degraded:
+        s["degraded"] = s.get("degraded", 0) + 1
+    if reading.resale == UNKNOWN:
+        s["resale_blind"] = s.get("resale_blind", 0) + 1
+    if reading.blocked:
+        s["blocks"] = s.get("blocks", 0) + 1
+
+
+def note_session_find(state: dict, reading) -> None:
+    """Record a find, and what it was.
+
+    The listing text is kept because it is otherwise lost. A listing lives
+    minutes; afterwards the only record of its section and price was the
+    alert email. Keeping it here means the end-of-session summary can say
+    what turned up and what it cost, which is how you learn what these
+    actually go for.
+    """
+    s = session(state)
+    s["finds"] = s.get("finds", 0) + 1
+    seen = s.setdefault("listings", [])
+    for listing in reading.listings:
+        entry = f"{stamp()} — {reading.event_name}: {listing.describe()}"
+        if entry not in seen:
+            seen.append(entry)
+    del seen[:-SESSION_LISTING_CAP]
+
+
+def session_hours(state: dict) -> float:
+    return _hours_since(session(state).get("started_at")) or 0.0
+
+
 def note_next_poll(state: dict, seconds: float) -> None:
     """Record when the next poll is actually due.
 
