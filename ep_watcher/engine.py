@@ -117,9 +117,13 @@ def handle(reading: Reading, st: dict) -> None:
     # so switching the MacBook's network is all David has to do — the watcher
     # notices by itself and resets its counters.
     if config.USE_BROWSER:
-        switched = state_mod.note_network(st, network.public_ip())
-        if switched:
-            print(f"[{stamp()}] network changed — now on {state_mod.network_label(st)}")
+        # Captured before note_network overwrites it — the email has to be
+        # able to say what was left, not only what was joined.
+        was_ip = st.get("current_ip")
+        was_label = state_mod.network_label(st) if was_ip else ""
+        was_blocks = state_mod.recent_blocks(st, 24, ip=was_ip) if was_ip else 0
+        if state_mod.note_network(st, network.public_ip()):
+            _announce_network(st, was_ip, was_label, was_blocks)
 
     if reading.blocked:
         state_mod.record_block(st)
@@ -191,6 +195,48 @@ def handle(reading: Reading, st: dict) -> None:
     # A ticket turned up and David has been told properly. Restart the hourly
     # clock rather than following the good news with "no success this hour".
     state_mod.reset_heartbeat(st)
+
+
+def _announce_network(st: dict, was_ip: str, was_label: str, was_blocks: int) -> None:
+    """Log and email that the watcher is now on a different connection.
+
+    Only ever fires once per change: handle() runs per watched page, and by
+    the time the second page is handled note_network() has already recorded
+    the new address, so it reports no change.
+    """
+    now_ip = st.get("current_ip")
+    now_label = state_mod.network_label(st)
+    # Same connection, new address — the carrier's doing, not David's. Told
+    # differently, because "you switched networks" would be a lie, and
+    # rate-limited more tightly, because a flapping tether could otherwise
+    # send this every few minutes.
+    readdressed = bool(was_label) and was_label == now_label
+
+    print(
+        f"[{stamp()}] network changed — now on {now_label}"
+        + (" (new address, same connection)" if readdressed else "")
+    )
+
+    if not state_mod.should_email_network(st, readdressed):
+        print(f"[{stamp()}] ...re-addressed again within the hour; not mailing about it")
+        return
+
+    switch, _, _ = state_mod.network_status(st)
+    state_mod.mark_network_emailed(st)
+    notify.network_switched(
+        now_label=now_label,
+        now_ip=now_ip,
+        was_label=was_label or "an unknown connection",
+        was_ip=was_ip,
+        health=state_mod.connection_health(st),
+        was_blocks=was_blocks,
+        switch_after=(
+            f"You will be asked to switch again after about "
+            f"{config.NETWORK_ROTATE_HOURS:.0f}h on this connection, or "
+            f"{config.NETWORK_ROTATE_SEARCHES} searches from it."
+        ),
+        readdressed=readdressed,
+    )
 
 
 def watchdog_reason(reading: Reading) -> str:

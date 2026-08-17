@@ -63,6 +63,9 @@ def _defaults():
         "searches_on_current_ip": 0,
         "networks": {},                   # ip -> {first_seen, searches, blocks}
         "rotation_asked_at": None,        # ISO8601, so we don't nag every hour
+        # Last "you are on a different connection" email, so a carrier
+        # re-addressing a tether cannot fill the inbox.
+        "last_network_email_at": None,    # ISO8601
         "stop_notified": False,           # the final "watcher stopped" email
         # When a deliberate 403 backoff is due to end. While this is in the
         # future the watcher is *supposed* to be idle, and neither the
@@ -653,6 +656,31 @@ def should_rotate_network(state: dict) -> tuple:
 
 def mark_rotation_asked(state: dict) -> None:
     state["rotation_asked_at"] = utc_now().isoformat()
+
+
+#: Shortest gap between two "same connection, new address" emails. A genuine
+#: home-to-hotspot switch is never suppressed; this only guards against a
+#: carrier re-addressing a tether repeatedly, which would otherwise fill the
+#: inbox with mail about something David did not do — and an alert channel
+#: that cries wolf is one he stops reading.
+READDRESS_EMAIL_MIN_MINUTES = 10.0
+
+
+def should_email_network(state: dict, readdressed: bool) -> bool:
+    """Is this connection change worth an email right now?
+
+    A real switch between connections always is: it changes where blocks
+    land, and which connection is safe to buy on. A same-connection
+    re-address is worth saying once, but not every few minutes.
+    """
+    if not readdressed:
+        return True
+    since = _hours_since(state.get("last_network_email_at"))
+    return since is None or since * 60 >= READDRESS_EMAIL_MIN_MINUTES
+
+
+def mark_network_emailed(state: dict) -> None:
+    state["last_network_email_at"] = utc_now().isoformat()
 
 
 def network_status(state: dict) -> tuple:

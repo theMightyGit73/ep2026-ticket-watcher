@@ -450,6 +450,71 @@ def session_summary(session: dict, to_mode: str, hours: float, settings,
     # ticket alert.
 
 
+def network_switched(now_label: str, now_ip: str, was_label: str, was_ip: str,
+                     health=None, was_blocks: int = 0, switch_after: str = "",
+                     readdressed: bool = False) -> None:
+    """Confirm, in writing, that the watcher moved to a different connection.
+
+    The switch was already detected and logged, but only ever appeared in the
+    hourly report — up to an hour later, in a section that also says "no luck
+    yet". Since which connection is in use decides where blocks land, and the
+    burnt one is the one he must not try to buy on, the change deserves saying
+    at the moment it happens.
+
+    `readdressed` distinguishes the two cases that look identical in the
+    state file. Moving between home Wi-Fi and the hotspot is something David
+    did; a hotspot being issued a new address is something the carrier did,
+    and telling him he "switched networks" for that would be wrong.
+    """
+    if readdressed:
+        headline = (
+            f"Your {now_label} has been given a new address by the network.\n"
+            f"Nothing was done at your end, and nothing needs doing."
+        )
+        subject = f"New address on your {now_label} — EP2026 watcher"
+    else:
+        headline = (
+            f"The watcher noticed the MacBook is on a different connection and\n"
+            f"has moved to it by itself. Nothing to confirm."
+        )
+        subject = f"Now watching over your {now_label} — EP2026 watcher"
+
+    # A switch onto an already-flagged connection is the one case here that
+    # needs acting on, so it goes in the subject rather than three paragraphs
+    # down. Switching is supposed to buy a clean connection; landing on a
+    # burnt one silently would defeat the whole scheme.
+    severity = health[0] if health else "ok"
+    if severity == "blocked":
+        subject = f"CAUTION: your {now_label} is already rate-limited — EP2026 watcher"
+
+    left_block = ""
+    if was_blocks:
+        left_block = (
+            f"\nThe connection you just left, {was_label}, took {was_blocks} block(s)\n"
+            f"in the last 24 hours. Leave it to recover before browsing or buying\n"
+            f"on it — these decay on their own within a few hours.\n"
+        )
+
+    health_block = f"\n{_health_section(health)}\n" if health else ""
+
+    body = (
+        f"Hi David,\n\n"
+        f"{headline}\n\n"
+        f"  Was : {was_label} ({was_ip or 'unknown'})\n"
+        f"  Now : {now_label} ({now_ip})\n"
+        f"{health_block}{left_block}\n"
+        f"What happens from here:\n"
+        f"  · Request counters for this connection start from zero.\n"
+        f"  · Every block from now on is recorded against this connection,\n"
+        f"    so the health line above stays about the one you are actually on.\n"
+        f"  · {switch_after or 'You will be told when it is time to switch again.'}\n\n"
+        f"Noticed at: {stamp()}\n"
+    )
+    _safe("network-email", _send_email, subject, body)
+    # No push. Switching is something he just did, so a buzz confirming it is
+    # noise — and the push channel has to stay worth looking at.
+
+
 def mac_watcher_silent(hours: float) -> None:
     """Sent from GitHub when the Mac has stopped checking in.
 
