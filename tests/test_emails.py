@@ -94,6 +94,17 @@ check_true("body links to the selling page", config.EVENT_URL in last_body())
 check_true("body names the listing", "STNDN1" in last_body())
 check_true("body shows the price", "366.39" in last_body())
 check_true("body says which market", "resale" in last_body().lower())
+# The alert has to survive contact with the app. A listing can be present and
+# invisible: resale results are filtered by quantity, the page defaults to 2,
+# and the panel only exists after a search on the website at all. Naming the
+# ticket without saying how to reach it is half an alert.
+body_now = last_body()
+check_true("tells him to use a browser, not the app", "not the app" in body_now)
+check_true("tells him the quantity to set", "Set the quantity" in body_now)
+check_true("warns the page defaults to 2", "defaults to 2" in body_now)
+check_true("names the panel to scroll to", "Verified Resale Tickets" in body_now)
+check_true("says a vanished listing may be a basket hold",
+           "basket" in body_now and "expire" in body_now)
 
 print("\nBasket alert — fired when a reserve actually succeeds")
 
