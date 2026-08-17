@@ -122,9 +122,62 @@ calls.clear()
 fresh = network.public_ip(max_age=0)
 check("max_age=0 forces a real lookup", len(calls), 1)
 
+print("\nAn IPv6 answer must never be mistaken for a different connection")
+# Measured on 2026-08-17: from the home connection, api.ipify.org answered
+# 86.44.208.194 while ifconfig.me and icanhazip.com both answered
+# 2001:bb6:4cb5:f000:... A dual-stack connection has both, so which comes
+# back depends on the service, not the network. Believing the v6 answer would
+# reset the counters, send a switch email for a switch that never happened,
+# and — since it is not EP_HOME_IP — label the HOME connection "phone
+# hotspot", attributing its blocks to a connection that does not exist.
+
+check("a v6 address is rejected", network._is_ipv4("2001:bb6:4cb5:f000::1"), False)
+check("a v4 address is accepted", network._is_ipv4("86.44.208.194"), True)
+check("an out-of-range octet is not v4", network._is_ipv4("86.44.208.999"), False)
+check("a truncated address is not v4", network._is_ipv4("86.44.208"), False)
+check("html or an error page is not v4", network._is_ipv4("<!doctype html>"), False)
+check("empty is not v4", network._is_ipv4(""), False)
+
+# Every configured service is the IPv4-pinned form of its hostname.
+for url in network._IP_SERVICES:
+    check(f"{url} is v4-pinned",
+          any(tag in url for tag in ("api4.", "ipv4.", "v4.")), True)
+
+replies = ["2001:bb6:4cb5:f000:81f0:2eb3:1625:7556", "86.44.208.194"]
+calls.clear()
+
+
+def mixed_get(url, timeout=None):
+    calls.append(url)
+    return FakeResponse(replies[len(calls) - 1] + "\n")
+
+
+network.requests = type("_R", (), {"get": staticmethod(mixed_get),
+                                   "RequestException": Exception})()
+network._cache = {"ip": None, "at": 0.0}
+check("a v6 reply is skipped for the next service", network.public_ip(), "86.44.208.194")
+check("...having tried both", len(calls), 2)
+
+# If every service answers v6, the honest result is "do not know" — which
+# leaves the known connection untouched rather than inventing a switch.
+network._cache = {"ip": None, "at": 0.0}
+calls.clear()
+network.requests = type("_R", (), {
+    "get": staticmethod(lambda url, timeout=None: (calls.append(url),
+                                                   FakeResponse("2001:bb6::1"))[1]),
+    "RequestException": Exception})()
+check("all-v6 answers give no IP at all", network.public_ip(), None)
+check("...rather than a bogus 'new connection'", network._cache["ip"], None)
+
 print("\nAn unreachable IP service does not erase what we knew")
 # Returning None makes note_network() skip the poll entirely, so a momentary
 # blip must not be read as "the connection changed".
+
+# Seeded here rather than inherited from an earlier section, so this stands
+# on its own and cannot be broken by a check inserted above it.
+import time as _time  # noqa: E402
+
+network._cache = {"ip": "86.44.208.194", "at": _time.monotonic()}
 
 
 def exploding_get(url, timeout=None):
