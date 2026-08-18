@@ -120,8 +120,9 @@ print("\nLeaving a flagged connection says so")
 
 s = dict(st._defaults())
 st.note_network(s, HOME)
-for _ in range(3):
-    st.record_block(s)          # attributed to HOME, the connection in use
+for n in range(3):
+    # Spaced: record_block() counts episodes now, not page readings.
+    st.record_block(s, when=st.utc_now() - timedelta(minutes=30 - n * 5))
 mails = poll_on(s, HOTSPOT)
 check("switching away still emails", len(mails), 1)
 text = body()
@@ -135,8 +136,8 @@ print("\nSwitching ONTO a flagged connection shouts")
 
 s = dict(st._defaults())
 st.note_network(s, HOTSPOT)
-for _ in range(8):
-    st.record_block(s)          # HOTSPOT is the burnt one
+for n in range(8):
+    st.record_block(s, when=st.utc_now() - timedelta(minutes=50 - n * 5))
 st.note_network(s, HOME)
 sent.clear()
 engine._announce_network(s, was_ip=HOTSPOT, was_label="phone hotspot", was_blocks=8)
@@ -145,8 +146,8 @@ check_true("a clean destination is not alarming", "CAUTION" not in sent[-1]["Sub
 
 s = dict(st._defaults())
 st.note_network(s, HOME)
-for _ in range(8):
-    st.record_block(s)          # HOME itself is blocked, and we land back on it
+for n in range(8):
+    st.record_block(s, when=st.utc_now() - timedelta(minutes=50 - n * 5))
 sent.clear()
 engine._announce_network(s, was_ip=HOTSPOT, was_label="phone hotspot", was_blocks=0)
 check_true("landing on a rate-limited connection is in the subject",

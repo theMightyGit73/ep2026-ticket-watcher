@@ -134,10 +134,13 @@ print("\nBlocks are attributed to the connection they happened on")
 
 s = fresh()
 st.note_network(s, HOME)
-st.record_block(s)
-st.record_block(s)
+# Spaced on purpose: record_block() collapses anything inside two minutes
+# into a single episode, because one cycle polls every page within seconds
+# and a lone 403 used to be written once per page.
+st.record_block(s, when=st.utc_now() - timedelta(minutes=30))
+st.record_block(s, when=st.utc_now() - timedelta(minutes=20))
 st.note_network(s, HOTSPOT)
-st.record_block(s)
+st.record_block(s, when=st.utc_now() - timedelta(minutes=10))
 check("home blocks counted against home", s["networks"][HOME]["blocks"], 2)
 check("hotspot blocks against the hotspot", s["networks"][HOTSPOT]["blocks"], 1)
 

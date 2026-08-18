@@ -176,6 +176,16 @@ def cmd_watch(args) -> int:
         return _watch_apis_only(interval)
 
     session = _start_session()
+    # Start the identity clock if nothing has ever set it, so the pre-emptive
+    # refresh has an age to measure against. Stamping now rather than assuming
+    # the worst avoids throwing away a profile that may be minutes old every
+    # time the service restarts. Done here rather than inside _start_session:
+    # opening a browser should not write state, and when it did, a unit test
+    # exercising the retry path wrote to the live state file.
+    _st = state_mod.load()
+    if _st.get("profile_reset_at") is None:
+        state_mod.note_profile_reset(_st)
+        state_mod.save(_st)
     backoff = 0
     tried_profile_reset = False
     was_night = config.is_night()
@@ -198,6 +208,7 @@ def cmd_watch(args) -> int:
                     if not tried_profile_reset:
                         print(f"[{stamp()}] blocked — trying a clean browser profile first")
                         session.reset_profile()
+                        _mark_profile_reset()
                         tried_profile_reset = True
                         time.sleep(30)
                         continue
@@ -257,6 +268,11 @@ def cmd_watch(args) -> int:
             # against a fixed number that only matched daytime.
             sleeping = wait * random.uniform(0.75, 1.25)
             _mark_next_poll(sleeping)
+            # Step around the wall rather than into it. Every one of the 28
+            # blocks recorded in six days was cleared by a fresh profile on
+            # the first attempt, so the identity — not the address — is what
+            # ages out. Doing it here spends the sleep window, not a poll.
+            _refresh_profile_if_stale(session)
             time.sleep(sleeping)
     except KeyboardInterrupt:
         print(f"\n[{stamp()}] Stopped.")
@@ -278,6 +294,39 @@ def _mark_backoff(seconds) -> None:
     else:
         state_mod.note_backoff(st, seconds)
     state_mod.save(st)
+
+
+def _mark_profile_reset() -> None:
+    """Record that the browser identity was just rebuilt."""
+    st = state_mod.load()
+    state_mod.note_profile_reset(st)
+    state_mod.save(st)
+
+
+def _refresh_profile_if_stale(session) -> bool:
+    """Rebuild the browser identity before Ticketmaster refuses it.
+
+    Done between polls, in the time that would have been spent asleep, so it
+    costs nothing a poll would otherwise have used. Failure here is not fatal:
+    the old profile keeps working until it is refused, and the reactive reset
+    still covers that.
+    """
+    st = state_mod.load()
+    if not state_mod.profile_is_stale(st):
+        return False
+    age = state_mod.profile_age_minutes(st) or 0.0
+    print(
+        f"[{stamp()}] browser identity is {age:.0f} min old "
+        f"(limit {config.PROFILE_MAX_AGE_MINUTES:.0f}) — refreshing it before "
+        f"Ticketmaster does it for us"
+    )
+    try:
+        session.reset_profile()
+        _mark_profile_reset()
+        return True
+    except Exception as exc:
+        print(f"[{stamp()}] pre-emptive profile refresh failed: {type(exc).__name__}: {exc}")
+        return False
 
 
 def _mark_next_poll(seconds: float) -> None:
@@ -395,7 +444,12 @@ def cmd_selftest(_args) -> int:
     worst = 0
     for path in tests:
         print(f"\n{'=' * 68}\n  {path.name}\n{'=' * 68}")
-        result = subprocess.run([sys.executable, str(path)], cwd=str(config.REPO_DIR))
+        # Same warning filter the service runs with, so a real traceback is
+        # not buried under a NotOpenSSLWarning from every import.
+        env = dict(os.environ, PYTHONWARNINGS=os.environ.get("PYTHONWARNINGS", "ignore::Warning"))
+        result = subprocess.run(
+            [sys.executable, str(path)], cwd=str(config.REPO_DIR), env=env
+        )
         worst = max(worst, result.returncode)
     print(f"\n{'ALL SUITES PASSED' if worst == 0 else 'SOME SUITES FAILED'}\n")
     return worst
@@ -620,15 +674,30 @@ def cmd_doctor(_args) -> int:
     else:
         ok("Resale visibility", headline)
 
+    age = state_mod.profile_age_minutes(st)
+    if not config.PROFILE_MAX_AGE_MINUTES:
+        print("  [ -- ]  Browser identity refresh disabled (EP_PROFILE_MAX_AGE=0)")
+    elif age is None:
+        print("  [ -- ]  Browser identity  — age not recorded yet (starts on the next run)")
+    elif state_mod.profile_is_stale(st):
+        warn("Browser identity", f"{age:.0f} min old — due a refresh on the next poll")
+    else:
+        ok("Browser identity",
+           f"{age:.0f} min old (refreshed every {config.PROFILE_MAX_AGE_MINUTES:.0f})")
+
     partial = st.get("degraded_total", 0)
     if partial:
         print(f"          ({partial} poll(s) answered by only some sources)")
 
     # 3. Can it tell you anything?
-    if config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD:
-        ok("Email configured", config.ALERT_TO)
+    # Actually sign in, rather than noting that a password is set. A revoked
+    # app password looks identical from here, and the first thing to discover
+    # it would be the one alert that mattered failing to arrive.
+    mail_ok, mail_detail = notify.verify_email()
+    if mail_ok:
+        ok("Email delivery", f"{mail_detail} → {config.ALERT_TO}")
     else:
-        bad("Email configured", "no Gmail app password",
+        bad("Email delivery", mail_detail,
             f"edit {Path.home()}/.ep2026-watcher/env, then ./run_watcher.sh test")
     # Actually exercise push rather than just noting a topic is set — a
     # configured topic that nothing reaches is the failure that matters, and

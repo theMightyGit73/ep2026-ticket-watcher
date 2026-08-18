@@ -34,17 +34,43 @@ def configured() -> bool:
     return bool(config.TM_API_KEY)
 
 
-def check() -> Reading:
-    reading = Reading(source=SOURCE)
+def check(event=None) -> Reading:
+    """Ask the Inventory Status API about one specific event.
+
+    The event argument is not decoration. This source used to take none and
+    always query config.TM_EVENT_ID — the standard Weekend Camping page —
+    while the caller stamped the answer with whichever page was being polled.
+    With two pages watched that meant the instalment plan would inherit the
+    standard page's inventory, and an AVAILABLE there would have sent David to
+    a page with nothing on it while the real listing sold. Dormant only
+    because no key has been granted; it would have fired on the first day one
+    was. An event with no id of its own gets silence, because a confident
+    answer about the wrong ticket is worse than no answer.
+    """
+    event = event or config.EVENTS[0]
+    reading = Reading(
+        source=SOURCE,
+        event_slug=event.slug,
+        event_name=event.name,
+        event_url=event.url,
+    )
 
     if not configured():
         reading.failed = True
         return reading.note("TM_API_KEY not set — source skipped")
 
+    event_id = getattr(event, "tm_event_id", "") or ""
+    if not event_id:
+        reading.failed = True
+        return reading.note(
+            f"no Inventory Status id known for {event.slug} — this source cannot "
+            "answer about this page, and will not answer about a different one"
+        )
+
     try:
         resp = requests.get(
             config.INVENTORY_API_URL,
-            params={"events": config.TM_EVENT_ID, "apikey": config.TM_API_KEY},
+            params={"events": event_id, "apikey": config.TM_API_KEY},
             timeout=20,
         )
     except requests.RequestException as exc:
@@ -70,12 +96,12 @@ def check() -> Reading:
     # Documented as an array, one entry per requested event id.
     entries = payload if isinstance(payload, list) else [payload]
     entry = next(
-        (e for e in entries if str(e.get("eventId", "")) == str(config.TM_EVENT_ID)),
+        (e for e in entries if str(e.get("eventId", "")) == str(event_id)),
         entries[0] if entries else None,
     )
     if entry is None:
         reading.failed = True
-        return reading.note("empty response — is TM_EVENT_ID a valid universal id?")
+        return reading.note(f"empty response — is {event_id} a valid universal id?")
 
     raw_primary = entry.get("status", "UNKNOWN")
     raw_resale = entry.get("resaleStatus", "UNKNOWN")

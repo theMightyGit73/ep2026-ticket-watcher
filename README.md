@@ -407,6 +407,12 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 
 ## Configuration
 
+> **Nothing is assumed delivered.** Every alert reports whether it actually
+> reached you, and the clocks that stop it repeating are only started when it
+> did. If the email and the push both fail — which is exactly what happens when
+> the fault is your network — the watcher keeps trying on the next poll instead
+> of going quiet for six hours. See "When the alert itself cannot get out".
+
 Environment variables, all optional:
 
 | Variable | Default | Notes |
@@ -419,12 +425,78 @@ Environment variables, all optional:
 | `EP_SEARCH_TIMEOUT` | `45` | Seconds to wait for a search to resolve |
 | `EP_NIGHT_SEARCH_TIMEOUT` | `90` | The same, overnight, when the page is slower |
 | `EP_GRACE_MINUTES` | `15` | How late a poll may be before the watchdog restarts it |
+| `EP_PROFILE_MAX_AGE` | `90` | Minutes before the browser identity is rebuilt pre-emptively. `0` waits for the block instead |
+| `EP_SEND_TIMEOUT` | `20` | Seconds any one email or push may take before it is treated as undelivered |
 | `EP_OFFSCREEN` | `1` | Park the Chrome window off-desktop |
 | `EP_HEADLESS` | `0` | **Leave this alone.** Headless is always blocked |
 | `PRESS_THE_BUTTON` | `1` | Set `0` and it can no longer answer the question |
 | `EP_USE_BROWSER` | `1` | Set `0` for API-only mode (no Chrome needed) |
 | `TM_DISCOVERY_KEY` | — | Free Discovery API key — enables the browser-free source |
 | `TM_API_KEY` | — | Inventory Status API key (needs an access grant) |
+
+### When the alert itself cannot get out
+
+On 18 August 2026 a power cut took the house network down for 69 minutes. At
+09:39 four consecutive failures tripped the watchdog, which tried both channels
+and lost both — the outage *was* the network, so the Gmail send and the ntfy
+push each died on DNS resolution:
+
+```
+[09:39] WARNING: watchdog-email notification failed: nodename nor servname ...
+[09:39] WARNING: watchdog-push notification failed: ... ntfy.sh ...
+```
+
+The alert was then recorded as sent, which started the six-hour re-nag clock,
+so the failures at 09:48 and 09:57 raised nothing at all. Power came back and
+it recovered by itself — but had the cut lasted, the watcher would have sat
+silent for six hours believing it had already raised the alarm. That is this
+project's founding failure, one layer below the alerting logic.
+
+So:
+
+- `notify.watchdog()` and `notify.heartbeat()` return whether anything was
+  delivered, and `_safe()` reports success rather than swallowing it.
+- The re-nag clock and the hourly clock are only advanced on a real delivery.
+  An undelivered report keeps its counters and retries on the next poll, with
+  an honest, longer window.
+- Every send has a 20-second ceiling, so a dead network cannot stall the poll
+  that is trying to find a ticket.
+- `doctor` now *signs in to Gmail* rather than checking that a password is set.
+  A revoked app password looks identical from the outside, and the first thing
+  to discover it would be the one alert that mattered failing to arrive.
+
+### Two faults that get named in their own words
+
+Neither is "Ticketmaster is busy", and neither is fixed by retrying, so both
+say what they are:
+
+- **This Mac has no internet.** Every source fails to resolve or connect. The
+  alert leads with that, points at the Wi-Fi or hotspot, and promises a second
+  email when the connection returns — which arrives carrying how long the
+  watcher was dark and what it might have cost.
+- **The event page is gone.** Ticketmaster answers `404`. No amount of
+  retrying, backing off or resetting the profile fixes a URL that has changed,
+  so this escalates immediately and names the page and the file to edit. Left
+  undetected it is the quietest possible death: a watcher running faithfully
+  forever against a page that no longer exists.
+
+### The browser identity is rebuilt before it is refused
+
+Across 28 blocks in six days, **every single one was cleared by a fresh browser
+profile on the first attempt**, and the exponential backoff behind that reset
+was never once reached. The wall is carried in the bot-check cookies, not in
+the IP — which the watcher had already recorded the other way round: after a
+block, moving to a completely different network did *not* clear it, while a
+fresh profile on the same network worked first try.
+
+Waiting for the wall costs two resale-blind readings and a wasted cycle, four
+to ten times a day. So the profile is now thrown away and rebuilt every
+`EP_PROFILE_MAX_AGE` minutes, during a sleep window, and the reactive reset
+stays as the backstop for the ones that beat the timer.
+
+A 403 also ends the cycle now. A refusal is a verdict on this client, not on
+this page, so polling the next page merely earns a second refusal — and one
+wall is recorded as one block however many pages saw it.
 
 ### Why quantity matters
 

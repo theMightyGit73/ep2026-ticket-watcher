@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ep_watcher.model import AVAILABLE, UNAVAILABLE, Reading  # noqa: E402
+from ep_watcher.model import AVAILABLE, UNAVAILABLE, UNKNOWN, Reading  # noqa: E402
 from ep_watcher.sources import browser  # noqa: E402
 
 failures = []
@@ -112,12 +112,25 @@ check_true("nested objects are unwrapped", "STNDN9" in reading.listings[0].name)
 print("\nWhen it cannot answer, it says so and lets the page decide")
 
 check("no response captured at all", parse(None)[0], False)
-check("a non-200 response", parse(EMPTY, status=403)[0], False)
+check("a server error falls back to the page", parse(EMPTY, status=500)[0], False)
 check("an unrecognised body", parse({"foo": "bar"})[0], False)
 check("a list instead of an object", parse([])[0], False)
 
-answered, reading = parse(EMPTY, status=403)
+answered, reading = parse(EMPTY, status=500)
 check_true("and explains the fallback", any("falling back" in n for n in reading.notes))
+
+print("\nA 403 on the resale call is a block, not a shrug")
+# Observed live on 2026-08-17 at 22:18: the page served normally and the
+# search answered, but this call was refused. Nothing noticed — resale fell
+# through to UNKNOWN, primary answered definitively, and the poll was filed as
+# a clean success with no block recorded and no profile reset. Marking it
+# blocked routes it into the machinery that already handles a walled page.
+answered, reading = parse(EMPTY, status=403)
+check("a 403 is an answer, not a fallback", answered, True)
+check("it is reported as a block", reading.blocked, True)
+check("resale stays unknown, never 'none'", reading.resale, UNKNOWN)
+check_true("and the note says why",
+           any("403" in n and "block" in n.lower() for n in reading.notes))
 
 print("\nA total that disagrees with picks trusts the total")
 # total is the count the page itself uses; picks may be paginated.

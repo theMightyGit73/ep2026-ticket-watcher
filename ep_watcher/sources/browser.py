@@ -158,10 +158,26 @@ def _parse_resale_json(record, reading: Reading) -> bool:
     if not record or not isinstance(record.get("data"), dict):
         return False
 
-    if record.get("status") != 200:
+    status = record.get("status")
+    if status == 403:
+        # A refusal on the resale endpoint alone, while the page itself still
+        # serves. Nothing used to notice: resale fell through to UNKNOWN,
+        # primary still answered definitively, and the poll was filed as a
+        # clean success — so no block was recorded, no profile was reset and
+        # the failure counter stayed at zero. Seen on 2026-08-17 at 22:18.
+        #
+        # Marked blocked so the same machinery that handles a walled page
+        # load handles this: reset the identity, count the episode, and let a
+        # persistent version of it escalate to the watchdog. A watcher that
+        # cannot see resale is not healthy, whatever primary says.
+        reading.blocked = True
         reading.note(
-            f"resale API returned HTTP {record.get('status')} — falling back to the page"
+            "resale API returned HTTP 403 — refused on the resale endpoint while "
+            "the page still loads. Counted as a block, not as a quiet UNKNOWN."
         )
+        return True
+    if status != 200:
+        reading.note(f"resale API returned HTTP {status} — falling back to the page")
         return False
 
     data = record["data"]
@@ -368,6 +384,20 @@ class BrowserSession:
             # it just triples the request volume at the exact moment something
             # upstream has decided we are asking too often. Bail out and let
             # the caller back off.
+            # "Not found" is not a bot wall and must never be treated as one.
+            # No amount of retrying, backing off or resetting the profile fixes
+            # a URL that has changed — only a human editing config.py does. So
+            # it stops here and is escalated in its own words.
+            if last_status in (404, 410):
+                reading.failed = True
+                reading.page_gone = True
+                reading.note(
+                    f"HTTP {last_status} — Ticketmaster says this event page does "
+                    "not exist. The URL has almost certainly changed; retrying "
+                    "cannot fix that."
+                )
+                return None
+
             if last_status == 403:
                 reading.failed = True
                 reading.blocked = True
@@ -729,6 +759,9 @@ class BrowserSession:
 
             reading.primary = _better(reading.primary, attempt.primary)
             reading.resale = _better(reading.resale, attempt.resale)
+            # Carried up, or a resale-endpoint 403 detected inside the sweep
+            # would be reported in a note and nowhere else.
+            reading.blocked = reading.blocked or attempt.blocked
 
             if outcome == "basket":
                 reading.note(f"stopping the sweep at qty={qty} — there is a live basket")

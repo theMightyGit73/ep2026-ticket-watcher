@@ -17,12 +17,18 @@ class Event:
     are separate products and have to be tracked separately.
     """
 
-    def __init__(self, slug: str, name: str, url: str, match_words=()):
+    def __init__(self, slug: str, name: str, url: str, match_words=(),
+                 tm_event_id: str = ""):
         self.slug = slug
         self.name = name
         self.url = url
         #: Words that identify this event in the Discovery index, lowercase.
         self.match_words = tuple(w.lower() for w in match_words)
+        #: This page's own id for the Inventory Status API, if one is known.
+        #: Empty means that source cannot answer about this event and must say
+        #: so — see sources/inventory_api.py. Answering with another page's
+        #: inventory would be a confident statement about the wrong ticket.
+        self.tm_event_id = tm_event_id
 
     def __repr__(self):
         return f"Event({self.slug})"
@@ -38,6 +44,7 @@ EVENTS = [
             "/event/18006314BD813D3E"
         ),
         match_words=("electric picnic", "weekend"),
+        tm_event_id=os.environ.get("TM_EVENT_ID", "18006314BD813D3E"),
     ),
     # The instalment-plan listing for the same festival. A separate page with
     # its own inventory and its own resale panel, so it needs watching in its
@@ -367,6 +374,20 @@ NETWORK_ROTATE_SEARCHES = int(os.environ.get("EP_ROTATE_SEARCHES", "30"))
 # unset, the first connection the watcher ever sees is assumed to be home,
 # which is right if you start it at home.
 HOME_NETWORK_IP = os.environ.get("EP_HOME_IP")
+
+# Throw the browser profile away and rebuild it after this many minutes.
+#
+# The bot-check cookies age out. Across 28 blocks in six days every single one
+# was cleared by a fresh profile on the first attempt, and the exponential
+# backoff behind that reset was never reached once — so the wall lives in the
+# profile, not in the IP. Waiting for it costs two resale-blind readings and a
+# wasted cycle each time; stepping around it costs one cold page load during a
+# sleep window.
+#
+# 90 minutes sits under the shortest daytime gap observed between blocks (64
+# minutes is the floor; the common cluster is around two hours), so it lands
+# ahead of most of them. Set EP_PROFILE_MAX_AGE=0 to go back to waiting.
+PROFILE_MAX_AGE_MINUTES = float(os.environ.get("EP_PROFILE_MAX_AGE", "90"))
 
 # Hard floor on the interval, regardless of what EP_POLL_SECONDS says.
 #

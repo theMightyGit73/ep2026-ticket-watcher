@@ -12,6 +12,12 @@ LOG_DIR="$HOME/.ep2026-watcher/logs"
 # working perfectly. Unbuffered costs nothing here and makes `tail -f` honest.
 export PYTHONUNBUFFERED=1
 
+# The stock macOS Python links against LibreSSL, so urllib3 prints a
+# NotOpenSSLWarning on every single import. watcher.err.log was 9 KB of
+# nothing else, which means a real traceback would have been invisible in it —
+# and that log is the first place anyone looks when something has gone quiet.
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::Warning}"
+
 mkdir -p "$LOG_DIR"
 
 if [ -f "$ENV_FILE" ]; then

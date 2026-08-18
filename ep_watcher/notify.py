@@ -5,6 +5,7 @@ wrapped so a bad credential or an ntfy hiccup can never take down the run or
 lose the state write.
 """
 
+import os
 import smtplib
 import time
 from email.mime.multipart import MIMEMultipart
@@ -25,6 +26,10 @@ from .state import stamp
 #: cannot tell from a rehearsal is worse than no rehearsal.
 TEST_MODE = False
 
+#: Seconds any single send may take. Without a ceiling, smtplib will sit on a
+#: dead network for minutes and stall the poll that is trying to find a ticket.
+SEND_TIMEOUT_SECONDS = float(os.environ.get("EP_SEND_TIMEOUT", "20"))
+
 
 def _mark(text: str) -> str:
     return f"[TEST — not real] {text}" if TEST_MODE else text
@@ -41,7 +46,7 @@ def _send_email(subject: str, body: str) -> None:
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SEND_TIMEOUT_SECONDS) as srv:
         srv.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
         srv.send_message(msg)
     print(f"[{stamp()}] Email sent to {config.ALERT_TO}")
@@ -56,7 +61,7 @@ def _send_ntfy(title: str, message: str, priority: str = "default", tags=None,
     """
     if not config.NTFY_TOPIC:
         return
-    requests.post(
+    resp = requests.post(
         f"https://ntfy.sh/{config.NTFY_TOPIC}",
         data=message.encode("utf-8"),
         headers={
@@ -65,16 +70,45 @@ def _send_ntfy(title: str, message: str, priority: str = "default", tags=None,
             "Tags": ",".join(tags or []),
             "Click": click or config.EVENT_URL,
         },
-        timeout=10,
+        timeout=SEND_TIMEOUT_SECONDS,
     )
+    # A 200 is the only thing that means the message is on its way. Silently
+    # accepting a 4xx/5xx would report a delivery that never happened, which
+    # is the whole failure this module is being hardened against.
+    resp.raise_for_status()
     print(f"[{stamp()}] Push sent")
 
 
-def _safe(label: str, fn: Callable, *args, **kwargs) -> None:
+def _safe(label: str, fn: Callable, *args, **kwargs) -> bool:
+    """Run a send, swallow its failure, and report whether it worked.
+
+    The return value is the point, and it was missing. A send that failed was
+    indistinguishable from one that succeeded, so callers stamped their
+    "already told him" clocks either way. Demonstrated on 2026-08-18: a power
+    cut took the network down, the watchdog fired at 09:39, both the email and
+    the push died on DNS resolution, and the six-hour re-nag clock started
+    anyway. Had the outage lasted, the watcher would have stayed silent for
+    six hours believing it had raised the alarm — the exact ambiguity this
+    project exists to abolish, hiding one layer below the alerting logic.
+    """
     try:
         fn(*args, **kwargs)
+        return True
     except Exception as exc:
         print(f"[{stamp()}] WARNING: {label} notification failed: {exc}")
+        return False
+
+
+def _push(label: str, **kwargs) -> bool:
+    """Send a push, reporting whether it actually went.
+
+    Returns False when no topic is configured, rather than raising: an
+    email-only setup should not log a warning on every alert. It is still not
+    counted as a delivery, because nothing was delivered.
+    """
+    if not config.NTFY_TOPIC:
+        return False
+    return _safe(label, _send_ntfy, **kwargs)
 
 
 # ── The alerts ───────────────────────────────────────────────────────────────
@@ -158,8 +192,8 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
         f"Checked at: {stamp()}\n"
     )
     _safe("available-email", _send_email, subject, body)
-    _safe(
-        "available-push", _send_ntfy,
+    _push(
+        "available-push",
         title=f"EP2026: ticket on the {where}",
         message=f"{name}\n\n" + _listing_block(reading.listings)
                 + "\n\nTap to open this event.",
@@ -199,8 +233,8 @@ def reserved_in_browser(reading: Reading) -> None:
         f"Reserved at: {stamp()}\n"
     )
     _safe("reserved-email", _send_email, subject, body)
-    _safe(
-        "reserved-push", _send_ntfy,
+    _push(
+        "reserved-push",
         title="EP2026: TICKET HELD — check out NOW",
         message=f"{name}\n\nA reserve succeeded. The hold expires in minutes.",
         priority="urgent",
@@ -283,7 +317,7 @@ def _reading_block(events, reading: Reading) -> str:
 
 
 def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
-              health=None, net=None, coverage=None, events=None) -> None:
+              health=None, net=None, coverage=None, events=None) -> bool:
     """The hourly "still nothing, still trying" report.
 
     Deliberately carries the numbers rather than just the sentiment. "No
@@ -359,15 +393,20 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
         f"watcher is still alive.\n\n"
         f"Checked at: {stamp()}\n"
     )
-    _safe("heartbeat-email", _send_email, subject, body)
+    delivered = _safe("heartbeat-email", _send_email, subject, body)
     if not healthy:
-        _safe(
-            "heartbeat-push", _send_ntfy,
+        _push(
+            "heartbeat-push",
             title="EP2026 watcher: every check failing",
             message=f"{failures}/{checks} checks failed this hour.",
             priority="high",
             tags=["warning"],
         )
+    # Email only. This report's whole job is to prove the watcher is alive, and
+    # a push saying so is not a substitute — the hour is only "reported" once
+    # the mail lands, so on False the caller keeps the clock running and
+    # retries rather than silently losing the hour.
+    return delivered
 
 
 def session_summary(session: dict, to_mode: str, hours: float, settings,
@@ -552,8 +591,8 @@ def mac_watcher_silent(hours: float) -> None:
         f"Noticed at: {stamp()}\n"
     )
     _safe("mac-silent-email", _send_email, subject, body)
-    _safe(
-        "mac-silent-push", _send_ntfy,
+    _push(
+        "mac-silent-push",
         title="EP2026: Mac watcher is down",
         message=f"No check-in for {hours:.1f}h. The sharp watcher is not running.",
         priority="high",
@@ -561,7 +600,13 @@ def mac_watcher_silent(hours: float) -> None:
     )
 
 
-def watchdog(reason: str, failures: int, health=None) -> None:
+def watchdog(reason: str, failures: int, health=None) -> bool:
+    """Tell David the watcher is broken. True if the news actually reached him.
+
+    The caller must not start its re-nag clock on a False. When the fault is
+    the network itself, this is precisely the alert that cannot get out, and
+    treating the attempt as the telling is how a real outage goes quiet.
+    """
     health_block = f"\n{_health_section(health)}\n" if health else ""
 
     subject = "EP2026 watcher is not working"
@@ -580,14 +625,15 @@ def watchdog(reason: str, failures: int, health=None) -> None:
         f"Both are safe to run as often as you like.\n\n"
         f"Checked at: {stamp()}\n"
     )
-    _safe("watchdog-email", _send_email, subject, body)
-    _safe(
-        "watchdog-push", _send_ntfy,
+    delivered = _safe("watchdog-email", _send_email, subject, body)
+    pushed = _push(
+        "watchdog-push",
         title="EP2026 watcher is broken",
         message=reason,
         priority="high",
         tags=["warning"],
     )
+    return delivered or pushed
 
 
 def stopped(checks_total: int) -> None:
@@ -613,8 +659,8 @@ def stopped(checks_total: int) -> None:
         f"Stopped at: {stamp()}\n"
     )
     _safe("stopped-email", _send_email, subject, body)
-    _safe(
-        "stopped-push", _send_ntfy,
+    _push(
+        "stopped-push",
         title="EP2026 watcher stopped",
         message="Reached its stop date and shut down. No further alerts.",
         priority="low",
@@ -622,20 +668,72 @@ def stopped(checks_total: int) -> None:
     )
 
 
-def recovered(after: int) -> None:
-    _safe(
-        "recovered-push", _send_ntfy,
+def recovered(after: int, dark_minutes: float = 0.0, reason: str = "") -> bool:
+    """The watcher is reading Ticketmaster again after a run of failures.
+
+    Carries how long the blackout lasted, because that is the part David
+    cannot reconstruct afterwards. While the watcher was down it could not see
+    a resale listing, and a listing lives ten to twenty minutes — so "we were
+    dark for 69 minutes" is the honest statement of what the outage might have
+    cost, and it is the only place that number ever appears.
+    """
+    gap = ""
+    if dark_minutes >= 1:
+        missed = ""
+        if dark_minutes >= config.POLL_INTERVAL_SECONDS / 60:
+            missed = (
+                f" — roughly {dark_minutes / (config.POLL_INTERVAL_SECONDS / 60):.0f} "
+                f"missed check(s)"
+            )
+        gap = (
+            f"It was unable to read Ticketmaster for {dark_minutes:.0f} minutes"
+            f"{missed}.\nA resale listing lives ten to twenty minutes, so if one "
+            f"appeared in that\nwindow it was missed. Nothing can recover it now; "
+            f"this is just so you know\nthe gap was there.\n\n"
+        )
+    why = f"What went wrong: {reason}\n\n" if reason else ""
+
+    pushed = _push(
+        "recovered-push",
         title="EP2026 watcher recovered",
         message=f"Back to normal after {after} failed checks.",
         priority="low",
         tags=["white_check_mark"],
     )
-    _safe(
+    delivered = _safe(
         "recovered-email", _send_email,
         "EP2026 watcher is working again",
-        f"Hi David,\n\nThe watcher recovered after {after} failed checks and is "
-        f"reading Ticketmaster normally again.\n\nAt: {stamp()}\n",
+        f"Hi David,\n\nThe watcher recovered after {after} failed checks and is\n"
+        f"reading Ticketmaster normally again.\n\n"
+        f"{gap}{why}"
+        f"At: {stamp()}\n",
     )
+    return delivered or pushed
+
+
+def verify_email() -> tuple:
+    """Log in to Gmail without sending anything. Returns (ok, detail).
+
+    Checking that GMAIL_ADDRESS and GMAIL_APP_PASSWORD are *set* proves
+    nothing — an app password revoked in six months' time looks identical
+    from here, and the first thing to discover it would be a ticket alert
+    that never arrived. This actually opens the connection and authenticates,
+    which is every step of a real send except the message itself, so it can
+    run on every doctor without filling the inbox.
+    """
+    if not (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD):
+        return False, "no Gmail address or app password set — no email can be sent"
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SEND_TIMEOUT_SECONDS) as srv:
+            srv.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
+        return True, f"signed in to Gmail as {config.GMAIL_ADDRESS}"
+    except smtplib.SMTPAuthenticationError:
+        return False, (
+            "Gmail rejected the app password — generate a new one at "
+            "https://myaccount.google.com/apppasswords"
+        )
+    except Exception as exc:
+        return False, f"could not reach Gmail: {exc}"
 
 
 def verify_push() -> tuple:

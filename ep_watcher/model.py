@@ -92,6 +92,12 @@ class Reading:
     #: challenged. The watch loop backs off hard on this rather than carrying
     #: on at its normal cadence, which would deepen the block.
     blocked: bool = False
+    #: Set when Ticketmaster answered "not found" for the event page. A
+    #: different thing entirely from being blocked or challenged: no amount of
+    #: retrying, backing off or resetting the profile fixes a URL that has
+    #: changed, so this has to reach a human rather than be absorbed as one
+    #: more failed read.
+    page_gone: bool = False
 
     @property
     def any_good(self) -> bool:

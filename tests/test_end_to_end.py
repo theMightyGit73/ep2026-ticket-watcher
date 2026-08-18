@@ -117,9 +117,12 @@ check("repeated blocks raise the watchdog", len(mails), 1)
 body = body_of(mails[0])
 check_true("which explains it is rate limiting", "rate-limiting" in body.lower())
 check_true("and reports connection health", "Connection health" in body)
-check("blocks are recorded for the health check", st.recent_blocks(state, 1),
-      config.WATCHDOG_FAILURE_THRESHOLD)
-check("no false availability was recorded", state["last_resale"], "UNKNOWN")
+# One episode, however many pages saw it — record_block() de-duplicates
+# inside a two-minute window, because handle() runs per watched page.
+check("the block reaches the health check", st.recent_blocks(state, 1) >= 1, True)
+check("repeated blocks in one cycle count once", st.recent_blocks(state, 1), 1)
+check("no false availability was recorded",
+      st.event_state(state, "")["last_resale"], "UNKNOWN")
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

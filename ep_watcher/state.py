@@ -24,10 +24,19 @@ def _defaults():
     return {
         "consecutive_failures": 0,
         "last_watchdog_alert": None,     # ISO8601, for the re-nag clock
-        "last_primary": UNKNOWN,
-        "last_resale": UNKNOWN,
-        "last_availability_alert": None,  # ISO8601
-        "known_listings": [],
+        # Why the last failure happened, in one phrase, so the recovery email
+        # can say what the outage was rather than only that it ended.
+        "last_failure_reason": None,
+        # When the current run of failures began, so the recovery email can
+        # say how long the watcher was dark.
+        "outage_started_at": None,        # ISO8601
+        # The four availability fields that used to live here — last_primary,
+        # last_resale, last_availability_alert, known_listings — moved into
+        # state["events"][slug] when a second ticket page was added. They are
+        # gone rather than kept as unused defaults: `status` printed them as
+        # UNKNOWN forever, which reads as a watcher that has never seen a
+        # thing, and a field nobody writes is a field that will eventually be
+        # read by mistake.
         "last_success": None,             # ISO8601
         # Written on EVERY poll, success or failure. This is the liveness
         # signal: a hung process still counts as "running" to launchd, so a
@@ -71,6 +80,10 @@ def _defaults():
         # future the watcher is *supposed* to be idle, and neither the
         # watchdog nor doctor should treat the still timestamp as a hang.
         "backoff_until": None,            # ISO8601
+        # When the browser profile was last thrown away and rebuilt. The
+        # bot-check cookies age out, so this drives a pre-emptive refresh —
+        # see config.PROFILE_MAX_AGE_MINUTES.
+        "profile_reset_at": None,         # ISO8601
         # When the next poll is due. Lets the watchdog judge lateness against
         # the cadence actually in force — which changes overnight — instead
         # of a fixed threshold that only ever matched the daytime one.
@@ -104,6 +117,12 @@ def _parse(iso: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(iso)
     except ValueError:
         return None
+
+
+def minutes_since(iso: Optional[str]) -> float:
+    """Minutes since an ISO timestamp, or 0.0 if it is missing or unreadable."""
+    hours = _hours_since(iso)
+    return 0.0 if hours is None else hours * 60.0
 
 
 def _hours_since(iso: Optional[str]) -> Optional[float]:
@@ -497,7 +516,7 @@ def note_session_poll(state: dict, reading) -> None:
     """Fold one page reading into the running session totals."""
     s = session(state)
     s["checks"] = s.get("checks", 0) + 1
-    if reading.failed or reading.degraded:
+    if reading.failed or reading.degraded or reading.blocked:
         s["unhealthy"] = s.get("unhealthy", 0) + 1
     if reading.degraded:
         s["degraded"] = s.get("degraded", 0) + 1
@@ -545,6 +564,39 @@ def note_next_poll(state: dict, seconds: float) -> None:
     through night mode, a changed EP_POLL_SECONDS, or another watched page.
     """
     state["next_poll_due"] = (utc_now() + timedelta(seconds=seconds)).isoformat()
+
+
+def note_profile_reset(state: dict) -> None:
+    """Record that the browser identity was rebuilt just now."""
+    state["profile_reset_at"] = utc_now().isoformat()
+
+
+def profile_age_minutes(state: dict) -> Optional[float]:
+    """How old the current browser identity is, or None if never recorded."""
+    hours = _hours_since(state.get("profile_reset_at"))
+    return None if hours is None else hours * 60.0
+
+
+def profile_is_stale(state: dict) -> bool:
+    """Is the browser identity old enough to be refreshed before it is refused?
+
+    Ticketmaster's bot-check cookies age out. Across 28 blocks in six days,
+    every single one was cleared by a fresh profile on the first attempt, and
+    the exponential backoff behind that reset was never once reached. So the
+    wall is carried in the profile rather than in the IP, and waiting for it
+    costs two resale-blind readings and a wasted cycle every time.
+
+    Refreshing early is close to free — one cold page load during a sleep
+    window — so the watcher steps around the wall instead of walking into it.
+    The reactive reset stays as the backstop for the ones that beat the timer.
+    """
+    if not config.PROFILE_MAX_AGE_MINUTES:
+        return False
+    age = profile_age_minutes(state)
+    # Never recorded: treat as fresh and start the clock rather than resetting
+    # a profile that may be minutes old, which would throw away a good session
+    # on every upgrade or restart.
+    return age is not None and age >= config.PROFILE_MAX_AGE_MINUTES
 
 
 def backoff_remaining(state: dict) -> float:
@@ -745,8 +797,11 @@ def _block_entries(state: dict) -> list:
     return out
 
 
-def record_block(state: dict) -> None:
+def record_block(state: dict, when=None) -> None:
     """Note an HTTP 403 against the connection it happened on, and prune.
+
+    `when` overrides the timestamp and exists for the tests, which need to
+    record several distinct episodes without waiting two minutes between each.
 
     The timestamp alone is not enough. Blocks follow the connection, not the
     clock: after switching from a flagged home Wi-Fi to a clean hotspot, a
@@ -755,7 +810,19 @@ def record_block(state: dict) -> None:
     and directly contradicts the advice to switch.
     """
     history = _block_entries(state)
-    history.append((utc_now().isoformat(), state.get("current_ip")))
+
+    # One wall, one entry. handle() runs per watched page, so a single 403
+    # used to be written twice — and connection_health() reads those counts
+    # against thresholds set when one page was watched, so a lone episode
+    # already graded "watch" and a third page would have graded it "blocked",
+    # whose advice is to stop the watcher. Count episodes, not readings.
+    now = when or utc_now()
+    if history:
+        last = _parse(history[-1][0])
+        if last is not None and (now - last).total_seconds() < BLOCK_EPISODE_SECONDS:
+            return
+
+    history.append((now.isoformat(), state.get("current_ip")))
     cutoff = utc_now() - timedelta(days=7)
     state["block_history"] = [
         {"at": ts, "ip": ip} for ts, ip in history if (_parse(ts) or utc_now()) >= cutoff
@@ -771,6 +838,11 @@ def record_block(state: dict) -> None:
         networks[ip] = entry
         state["networks"] = networks
 
+
+#: How close together two 403s have to be to count as the same wall. A cycle
+#: polls every page in a few seconds, so anything inside two minutes is one
+#: episode seen more than once.
+BLOCK_EPISODE_SECONDS = 120.0
 
 #: Sentinel for recent_blocks(ip=...): count every connection.
 ANY_IP = object()

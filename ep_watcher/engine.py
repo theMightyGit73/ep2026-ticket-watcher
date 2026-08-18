@@ -17,6 +17,7 @@ def merge(readings: List[Reading]) -> Reading:
     merged = Reading(source=" + ".join(r.source for r in readings) or "none")
 
     merged.blocked = any(r.blocked for r in readings)
+    merged.page_gone = any(r.page_gone for r in readings)
     # Which sources came back empty-handed, kept even when others answered.
     # Without this the merged reading cannot tell "everything is fine" from
     # "the browser has been blocked for an hour and the free API is covering
@@ -55,7 +56,7 @@ def poll(session=None, event=None) -> Reading:
     if discovery.configured():
         readings.append(discovery.check(event))
     if inventory_api.configured():
-        readings.append(inventory_api.check())
+        readings.append(inventory_api.check(event))
 
     if config.USE_BROWSER:
         from .sources import browser  # lazy: see the note at the top of the file
@@ -74,16 +75,6 @@ def poll(session=None, event=None) -> Reading:
     merged.event_name = event.name
     merged.event_url = event.url
     return merged
-
-
-def poll_all(session=None) -> list:
-    """One reading per watched event.
-
-    Every event is searched on every cycle rather than round-robin, so a
-    listing on the quieter page is never up to a full cycle stale. The cost is
-    paid in the interval instead — see config.poll_interval().
-    """
-    return [poll(session, event) for event in config.EVENTS]
 
 
 def handle(reading: Reading, st: dict) -> None:
@@ -105,7 +96,13 @@ def handle(reading: Reading, st: dict) -> None:
     # A partial reading counts as unhealthy, not as a clean poll. See
     # Reading.degraded — treating it as clean is what let a blocked browser
     # report "0 failed" for hours.
-    state_mod.note_check(st, unhealthy=reading.failed or reading.degraded)
+    # Being refused is never a clean check, even when primary still answered.
+    # A resale-endpoint 403 leaves the watcher blind on the only market a
+    # ticket has appeared on, and counting that as healthy is what let the
+    # 22:18 refusal on 2026-08-17 pass as a spotless poll.
+    state_mod.note_check(
+        st, unhealthy=reading.failed or reading.degraded or reading.blocked
+    )
     if reading.degraded:
         state_mod.note_degraded(st, reading.failed_sources)
     state_mod.note_resale_visibility(st, reading)
@@ -136,6 +133,16 @@ def handle(reading: Reading, st: dict) -> None:
 
     if reading.failed:
         failures = state_mod.record_failure(st, reading)
+        # Kept so the recovery email can say what the outage actually was. By
+        # the time it is sent the reading is long gone, and "it is working
+        # again" without "it had no internet for an hour" is half the story.
+        st["last_failure_reason"] = failure_headline(reading)
+        # When the blackout began. Not derivable at recovery time: handle()
+        # runs per page, so the first page's success moves last_success before
+        # the second page gets to measure against it, and the gap reads as
+        # zero. Written once, at the start of the run of failures.
+        if not st.get("outage_started_at"):
+            st["outage_started_at"] = st.get("last_success") or state_mod.utc_now().isoformat()
         print(f"[{stamp()}] check failed ({failures} in a row)")
         _maybe_watchdog(reading, st, failures)
         # A run of failures must not suppress the hourly report — a silent
@@ -153,13 +160,15 @@ def handle(reading: Reading, st: dict) -> None:
     # edge detection quietly does nothing.
     new_listings = state_mod.pending_listings(st, reading)
     should, reason = state_mod.should_alert_availability(st, reading, new_listings)
-    state_mod.record_success(st, reading, healthy=not reading.degraded)
+    state_mod.record_success(
+        st, reading, healthy=not (reading.degraded or reading.blocked)
+    )
 
     # A partial reading is still a reading: whatever did answer is recorded
     # and alerted on above, exactly as before. What changes is that it no
     # longer clears the failure counter, so a browser that stays blocked now
     # escalates instead of hiding behind the API that is covering for it.
-    if reading.degraded:
+    if reading.degraded or reading.blocked:
         failures = st["consecutive_failures"]
         print(
             f"[{stamp()}] PARTIAL reading — {', '.join(reading.failed_sources)} "
@@ -167,9 +176,20 @@ def handle(reading: Reading, st: dict) -> None:
             f"{', '.join(reading.answering_sources) or 'nothing'}"
         )
         _maybe_watchdog(reading, st, failures)
-    elif was_broken >= config.WATCHDOG_FAILURE_THRESHOLD:
-        notify.recovered(was_broken)
+    elif was_broken >= config.WATCHDOG_FAILURE_THRESHOLD and st["consecutive_failures"] == 0:
+        # Gated on EVERY page being healthy again, not just this one. The
+        # global counter tracks the worst event, so handling page one while
+        # page two was still broken used to fire this, and handling page two
+        # fired it again — two "recovered" emails and two pushes for one
+        # recovery, observed on 2026-08-18.
+        notify.recovered(
+            was_broken,
+            state_mod.minutes_since(st.get("outage_started_at")),
+            st.get("last_failure_reason") or "",
+        )
         st["last_watchdog_alert"] = None
+        st["last_failure_reason"] = None
+        st["outage_started_at"] = None
 
     if not should:
         print(f"[{stamp()}] nothing to report")
@@ -239,6 +259,45 @@ def _announce_network(st: dict, was_ip: str, was_label: str, was_blocks: int) ->
     )
 
 
+#: Fragments that mean "this Mac could not reach the internet", as opposed to
+#: "Ticketmaster refused us". Collected from a real outage on 2026-08-18: a
+#: power cut took the house network down and every source failed with one of
+#: these. The distinction is worth drawing because the two have opposite fixes
+#: — one is a router, the other is patience — and because an alert about the
+#: network is the one alert the network cannot carry.
+_OFFLINE_MARKERS = (
+    "err_internet_disconnected",
+    "err_name_not_resolved",
+    "err_network_changed",
+    "err_connection",
+    "failed to resolve",
+    "nameresolutionerror",
+    "max retries exceeded",
+    "temporary failure in name resolution",
+)
+
+
+def looks_offline(reading: Reading) -> bool:
+    """Did this reading fail because the Mac has no internet at all?"""
+    if not reading.failed:
+        return False
+    joined = " ".join(reading.notes).lower()
+    return any(marker in joined for marker in _OFFLINE_MARKERS)
+
+
+def failure_headline(reading: Reading) -> str:
+    """One short phrase for why a reading failed, for the recovery email."""
+    if looks_offline(reading):
+        return "this Mac had no internet connection"
+    if reading.page_gone:
+        return "the Ticketmaster event page could not be found"
+    if reading.blocked:
+        return "Ticketmaster was rate-limiting this client (HTTP 403)"
+    if reading.needs_login:
+        return "the Ticketmaster session needed a human"
+    return "Ticketmaster could not be read"
+
+
 def watchdog_reason(reading: Reading) -> str:
     """Plain English for why the watcher is unhappy, in priority order.
 
@@ -248,7 +307,24 @@ def watchdog_reason(reading: Reading) -> str:
     UNAVAILABLE lines from an API that cannot see resale, while the only
     source that can has been walled for hours. That reads as good news.
     """
-    if reading.blocked:
+    if reading.page_gone:
+        cause = (
+            "THE EVENT PAGE COULD NOT BE FOUND. Ticketmaster answered 'not "
+            "found' rather than serving a page, which almost always means the "
+            "URL has changed — pages get reissued when an event is edited. "
+            "Nothing will ever be seen on this page until the link is updated. "
+            "Open the URL below in a browser: if it fails for you too, search "
+            "Ticketmaster for the event and copy the new link into config.py."
+        )
+    elif looks_offline(reading):
+        cause = (
+            "THIS MAC CANNOT REACH THE INTERNET. Every source failed to resolve "
+            "or connect, which is a local network fault rather than anything to "
+            "do with Ticketmaster. Check the Wi-Fi or the hotspot. The watcher "
+            "keeps trying and recovers by itself the moment the connection is "
+            "back — and it will email you again when it does."
+        )
+    elif reading.blocked:
         cause = (
             "Ticketmaster is rate-limiting this machine (HTTP 403). The watcher "
             "is backing off automatically and will resume on its own — this "
@@ -316,8 +392,17 @@ def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
         if healthy:
             reason += "\nStill working: " + ", ".join(healthy) + "."
 
-    notify.watchdog(reason, failures, health=state_mod.connection_health(st))
-    st["last_watchdog_alert"] = state_mod.utc_now().isoformat()
+    # Only start the re-nag clock if the alert actually reached him. When the
+    # fault IS the network, this send is exactly what cannot get out, and
+    # stamping the clock regardless bought six hours of silence during the
+    # 2026-08-18 power cut. An alert nobody received has not been sent.
+    if notify.watchdog(reason, failures, health=state_mod.connection_health(st)):
+        st["last_watchdog_alert"] = state_mod.utc_now().isoformat()
+    else:
+        print(
+            f"[{stamp()}] could not deliver the watchdog alert — leaving the "
+            f"clock unset so the next poll tries again"
+        )
 
 
 def _maybe_heartbeat(reading: Reading, st: dict) -> None:
@@ -344,7 +429,7 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     # connection is in use" is worse than saying nothing.
     net = state_mod.network_status(st) if config.USE_BROWSER else None
 
-    notify.heartbeat(
+    delivered = notify.heartbeat(
         checks, failures, hours, reading,
         health=state_mod.connection_health(st),
         net=net,
@@ -354,6 +439,13 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
         # when two are being watched.
         events=state_mod.event_summaries(st),
     )
+    if not delivered:
+        # The hour is only "reported" once the mail lands. Leaving the clock
+        # running means the next poll retries with an honest, longer window
+        # rather than throwing the hour away — which is what happened to the
+        # 09:22 report during the 2026-08-18 outage.
+        print(f"[{stamp()}] hourly report undelivered — will retry on the next poll")
+        return
     if net and net[0]:
         # Asked for a switch — don't ask again until the next window, whether
         # or not he acts on it. Repeating it hourly trains him to skim past it.
@@ -453,9 +545,26 @@ def run_once(session=None) -> Reading:
         # boundary and this cycle counts towards the new one.
         maybe_switch_session(st)
         readings = []
-        for reading in poll_all(session):
+        # Every event is searched on every cycle rather than round-robin, so a
+        # listing on the quieter page is never up to a full cycle stale. The
+        # cost is paid in the interval instead — see config.poll_interval().
+        for event in config.EVENTS:
+            reading = poll(session, event)
             handle(reading, st)
             readings.append(reading)
+            # A 403 is a verdict on this client, not on this page. Carrying on
+            # to the next one sends another request to an endpoint that has
+            # just refused us, earns a second refusal, and books a second
+            # resale-blind reading for one wall. Stop and let the caller reset
+            # the profile.
+            if reading.blocked:
+                left = [e.name for e in config.EVENTS[len(readings):]]
+                if left:
+                    print(
+                        f"[{stamp()}] blocked — not polling {', '.join(left)} "
+                        f"this cycle"
+                    )
+                break
         return _most_significant(readings)
     finally:
         state_mod.save(st)
