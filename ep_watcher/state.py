@@ -720,7 +720,15 @@ def mark_rotation_asked(state: dict) -> None:
 #: carrier re-addressing a tether repeatedly, which would otherwise fill the
 #: inbox with mail about something David did not do — and an alert channel
 #: that cries wolf is one he stops reading.
-READDRESS_EMAIL_MIN_MINUTES = 10.0
+#:
+#: Ten minutes turned out not to be a guard at all. Once the watcher moved onto
+#: a mobile connection on 2026-08-18, the carrier re-addressed it at 10:35,
+#: 10:48 and 11:26 — three emails in fifty minutes, none of them about
+#: anything David had done or could act on, on top of the hourly report. An
+#: hour is long enough that a churning tether is mentioned rather than
+#: narrated, and it costs nothing that matters: the address itself is in every
+#: hourly report, and a real switch between connections still emails instantly.
+READDRESS_EMAIL_MIN_MINUTES = 60.0
 
 
 def should_email_network(state: dict, readdressed: bool) -> bool:

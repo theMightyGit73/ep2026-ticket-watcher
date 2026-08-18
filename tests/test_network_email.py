@@ -188,6 +188,13 @@ fresh = dict(st._defaults())
 check("and the first re-address is not held back either",
       st.should_email_network(fresh, readdressed=True), True)
 
+# The quiet period has to be long enough to actually be one. Ten minutes was
+# not: once the watcher moved onto a mobile connection on 2026-08-18, the
+# carrier re-addressed it at 10:35, 10:48 and 11:26 — three emails in fifty
+# minutes, none of them about anything David had done or could act on.
+check("the quiet period outlasts a churning tether",
+      st.READDRESS_EMAIL_MIN_MINUTES >= 30.0, True)
+
 print("\nThe API-only backstop has no network to speak of")
 
 saved = config.USE_BROWSER
