@@ -890,22 +890,51 @@ def known_networks(state: dict) -> list:
     return sorted(rows, key=lambda r: (not r[4], -r[2]))
 
 
+#: What to say when there is no specific connection worth naming as the
+#: destination. Deliberately vague, because vague and true beats precise and
+#: useless.
+ANY_OTHER_NETWORK = "a different network"
+
+
 def other_network_label(state: dict) -> str:
     """What to suggest switching TO.
 
-    Names the cleanest connection the watcher already knows about, rather than
-    assuming there are exactly two of them. Falls back to the hotspot, which is
-    the one David can always produce on demand.
+    Only ever names a connection David can actually act on: one he has named,
+    or the home Wi-Fi and hotspot the watcher knows how to describe joining.
+
+    An entry labelled by its address is a connection the watcher met once and
+    cannot tell him how to rejoin. Sitting on a third network with a day-old
+    tether in its history, this returned "an earlier connection
+    (212.129.87.241)" — so the instruction would have read "move the MacBook to
+    an earlier connection (212.129.87.241)", which is not an instruction at all.
+
+    Ranked on blocks in the last 24 hours rather than the lifetime tally, which
+    never decays. The question is which connection is safe to move to now, not
+    which has the cleanest record since the watcher started.
     """
     current = state.get("current_net") or state.get("current_ip")
-    others = [
-        (blocks, -searches, label)
-        for label, key, searches, blocks, is_current in known_networks(state)
-        if not is_current
-    ]
-    if not others:
+    here = network_label(state, current)
+
+    candidates = []
+    for label, key, searches, _lifetime, is_current in known_networks(state):
+        if is_current or label == here:
+            continue
+        actionable = is_named(state, key) or label in (
+            config.HOME_NETWORK_LABEL, config.HOTSPOT_LABEL
+        )
+        if actionable:
+            candidates.append((recent_blocks(state, 24, ip=key), -searches, label))
+
+    clean = [c for c in candidates if c[0] == 0]
+    if clean:
+        return min(clean)[2]
+
+    # Everything it can name is either in use or currently in trouble. The
+    # hotspot is the one connection that can always be produced on demand, so
+    # suggest that — unless it is what he is already on.
+    if here != config.HOTSPOT_LABEL:
         return config.HOTSPOT_LABEL
-    return min(others)[2]
+    return ANY_OTHER_NETWORK
 
 
 def should_rotate_network(state: dict) -> tuple:
@@ -1005,10 +1034,16 @@ def network_status(state: dict) -> tuple:
             "  On the MacBook: click the Wi-Fi icon in the menu bar and pick your\n"
             "  home network again. You can turn the phone's hotspot back off."
         )
+    elif other == ANY_OTHER_NETWORK:
+        how = (
+            "  On the MacBook: click the Wi-Fi icon in the menu bar and pick your\n"
+            "  home Wi-Fi, or any other network you trust. The watcher recognises\n"
+            "  whatever it lands on and starts its counters again."
+        )
     else:
-        # Any other network the watcher has met. It cannot know how to join it,
-        # so it names it and gets out of the way — and says the choice is open,
-        # because any connection it has not seen before is equally good.
+        # A connection David has named. The watcher cannot know how to join it,
+        # so it names it and gets out of the way — and leaves the choice open,
+        # because any connection it has not met is equally good.
         how = (
             f"  On the MacBook: click the Wi-Fi icon in the menu bar and pick\n"
             f"  {other}, your iPhone's Personal Hotspot, or any other network you\n"

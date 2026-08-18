@@ -124,12 +124,51 @@ config.NETWORK_NAMES = {SKY["ip"]: "by public address"}
 check("naming by public address works", st.network_label(s), "by public address")
 config.NETWORK_NAMES = {}
 
-print("\nSwitch advice points at the cleanest connection, whatever it is")
+print("\nSwitch advice only ever names somewhere he can actually go")
 
 check("it suggests one of the others", st.other_network_label(s) in
       (config.HOME_NETWORK_LABEL, config.HOTSPOT_LABEL), True)
 check_true("and never suggests the one in use",
            st.other_network_label(s) != st.network_label(s))
+
+# The failure this replaced. Sitting on a third network with a day-old tether
+# in history, the advice was "move the MacBook to an earlier connection
+# (212.129.87.241)" — an address nobody can join, and the cleanest-looking
+# candidate precisely because it was dead.
+stale = dict(st._defaults())
+st.note_network(stale, SKY)
+stale["networks"]["212.129.87.241"] = {
+    "first_seen": (st.utc_now() - timedelta(hours=20)).isoformat(),
+    "searches": 52, "blocks": 0,
+}
+check_true("a bare address is never offered as a destination",
+           "212.129.87.241" not in st.other_network_label(stale))
+check("it falls back to the one thing always available",
+      st.other_network_label(stale), config.HOTSPOT_LABEL)
+
+# Ranked on recent blocks, not the lifetime tally — which never decays, so a
+# connection that misbehaved a week ago would be ruled out forever.
+burnt = dict(st._defaults())
+st.note_network(burnt, HOME)
+st.record_block(burnt, when=st.utc_now() - timedelta(days=4))
+st.note_network(burnt, SKY)
+check("an old block does not rule a connection out",
+      st.other_network_label(burnt), config.HOME_NETWORK_LABEL)
+st.note_network(burnt, HOME)   # blocks land on the connection in use
+st.record_block(burnt, when=st.utc_now() - timedelta(hours=2))
+st.note_network(burnt, SKY)
+check("a recent one does", st.other_network_label(burnt), config.HOTSPOT_LABEL)
+
+# And it must not tell him to switch from the hotspot to the hotspot.
+on_hotspot = dict(st._defaults())
+st.note_network(on_hotspot, SKY)
+st.note_network(on_hotspot, TETHER)
+check("no advice to switch to where he already is",
+      st.other_network_label(on_hotspot), config.HOME_NETWORK_LABEL)
+only_hotspot = dict(st._defaults())
+st.note_network(only_hotspot, TETHER)
+check("with nowhere named to go, it stays honest and vague",
+      st.other_network_label(only_hotspot), st.ANY_OTHER_NETWORK)
 
 print("\nThe whole picture, for choosing where to buy")
 
