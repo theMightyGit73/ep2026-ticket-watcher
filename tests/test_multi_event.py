@@ -84,13 +84,22 @@ check_true("the instalment plan is the second", "instalment" in B.url)
 
 print("\nRequest volume does not grow with the event count")
 
-# The whole point of scaling the interval: two pages must not mean twice the
-# hourly load, because that is what got the home IP flagged.
-per_event = config._POLL_PER_EVENT_SECONDS
-check("cycle covers every event", config.poll_interval(), per_event * 2)
-searches_per_hour = 3600 / config.poll_interval() * len(config.EVENTS)
-check("hourly rate unchanged by adding a page",
-      round(searches_per_hour), round(3600 / per_event))
+# Two pages must not mean twice the hourly load, because that is what got the
+# home IP flagged. Pages now have their own intervals rather than sharing a
+# cycle, so the volume is the sum of their rates — and that sum is the number
+# that has to stay controlled, whatever the split between them.
+check("the tick is the shortest page interval", config.poll_interval(),
+      min(e.poll_seconds for e in config.EVENTS))
+check("total volume is what it always was",
+      round(config.searches_per_hour()), 12)
+check_true("comfortably under the ~20/hour that drew a block",
+           config.searches_per_hour() <= 15)
+
+# Weighted by yield, not split evenly. Eight of the nine resale sightings
+# between 13 and 18 August were on the standard page and one on the instalment
+# plan, so an even split spent half the budget for an eighth of the return.
+check_true("the productive page is searched more often",
+           A.poll_seconds < B.poll_seconds)
 
 print("\nOne page going quiet cannot silence the other")
 

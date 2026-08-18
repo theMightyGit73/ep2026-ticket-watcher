@@ -154,6 +154,11 @@ def event_state(state: dict, slug: str) -> dict:
         "last_resale": UNKNOWN,
         "last_availability_alert": None,
         "known_listings": [],
+        # When this page was last actually searched. Pages no longer share a
+        # cycle — each has its own interval, weighted by how often a listing
+        # has ever appeared on it — so the watcher has to remember when it
+        # last looked at each one.
+        "last_polled_at": None,
         # Failures are counted per event too, and that is not a detail.
         # A single shared counter meant a healthy page reset the count a
         # broken one had just incremented — so one page could fail on every
@@ -161,6 +166,49 @@ def event_state(state: dict, slug: str) -> dict:
         # email reported everything fine. Reproduced before it was fixed.
         "consecutive_failures": 0,
     })
+
+
+#: How much early a page may be searched, as a fraction of its interval. The
+#: loop's sleep is jittered by ±25%, so without this a tick that landed a few
+#: seconds short would skip the page entirely and double its real interval.
+DUE_TOLERANCE = 0.75
+
+
+def note_event_polled(state: dict, slug: str) -> None:
+    event_state(state, slug)["last_polled_at"] = utc_now().isoformat()
+
+
+def minutes_since_event_poll(state: dict, slug: str):
+    """How long since this page was last searched, or None if never."""
+    hours = _hours_since(event_state(state, slug).get("last_polled_at"))
+    return None if hours is None else hours * 60.0
+
+
+def event_due(state: dict, event) -> bool:
+    """Is this page due a search?
+
+    A page that has never been searched is always due, so a fresh state file
+    or a newly added page is read on the first tick rather than waiting out
+    its interval.
+    """
+    since = minutes_since_event_poll(state, event.slug)
+    if since is None:
+        return True
+    return since * 60.0 >= event.poll_seconds * DUE_TOLERANCE
+
+
+def due_events(state: dict, events) -> list:
+    """Which pages to search on this tick.
+
+    Never returns nothing. If the jitter lands short and no page is strictly
+    due, the one that has waited longest is searched anyway — a tick that
+    polls nothing would count as a cycle in the logs while learning nothing,
+    which is the sort of quiet no-op this project keeps having to dig out.
+    """
+    due = [e for e in events if event_due(state, e)]
+    if due or not events:
+        return due
+    return [max(events, key=lambda e: minutes_since_event_poll(state, e.slug) or 0.0)]
 
 
 def event_summaries(state: dict) -> list:
@@ -180,6 +228,11 @@ def event_summaries(state: dict) -> list:
             event.url,
             ev.get("last_primary", UNKNOWN),
             ev.get("last_resale", UNKNOWN),
+            # How old this reading is. Pages are searched at different rates
+            # now, so two statuses printed side by side may be minutes and
+            # half an hour old respectively — and without saying so, the
+            # older one reads as being just as fresh as the newer.
+            minutes_since_event_poll(state, event.slug),
         ))
     return out
 

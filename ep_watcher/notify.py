@@ -35,6 +35,16 @@ def _mark(text: str) -> str:
     return f"[TEST — not real] {text}" if TEST_MODE else text
 
 
+def _from_watcher() -> str:
+    """"(via the VPS watcher)" and the like, when more than one is running.
+
+    Empty on a single-machine setup. With two, David has to be able to tell
+    which one spoke — if only to know which one to go and look at when they
+    disagree.
+    """
+    return f" [{config.WATCHER_LABEL}]" if config.WATCHER_LABEL else ""
+
+
 def _send_email(subject: str, body: str) -> None:
     if not (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD):
         raise RuntimeError("GMAIL_ADDRESS / GMAIL_APP_PASSWORD not set")
@@ -168,7 +178,7 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     # with nothing on it while the real listing sells.
     name, url = _event_of(reading)
 
-    subject = f"TICKETS AVAILABLE ({where}): {name}"
+    subject = f"TICKETS AVAILABLE ({where}): {name}{_from_watcher()}"
     body = (
         f"Hi David,\n\n"
         f"A ticket has shown up for {name} on the {where}.\n\n"
@@ -218,7 +228,7 @@ def reserved_in_browser(reading: Reading) -> None:
     """
     name, url = _event_of(reading)
 
-    subject = f"IN THE BASKET — finish checkout now: {name}"
+    subject = f"IN THE BASKET — finish checkout now: {name}{_from_watcher()}"
     body = (
         f"Hi David,\n\n"
         f"The watcher pressed 'Find Tickets' and Ticketmaster ACCEPTED it —\n"
@@ -292,9 +302,14 @@ def _reading_block(events, reading: Reading) -> str:
     and there was no way to tell from the email which one it meant. It now
     reports both pages, from each page's own history, every hour.
 
-    `events` is a list of (name, url, primary, resale) from
+    `events` is a list of (name, url, primary, resale, age_minutes) from
     state.event_summaries(). Without it this falls back to the single reading,
     which is the API-only and single-event case.
+
+    The age is printed because the pages are no longer read at the same rate:
+    the standard page every 6 minutes, the instalment plan every 30. Two
+    statuses side by side can therefore be minutes and half an hour old, and
+    without saying so the older one reads as being exactly as fresh.
     """
     if not events:
         name, url = _event_of(reading)
@@ -306,9 +321,12 @@ def _reading_block(events, reading: Reading) -> str:
         )
 
     lines = ["Last reading, page by page:"]
-    for name, url, primary, resale in events:
+    for row in events:
+        name, url, primary, resale = row[:4]
+        age = row[4] if len(row) > 4 else None
+        when = f"  (read {age:.0f} min ago)" if isinstance(age, (int, float)) else ""
         lines.append(
-            f"\n  {name}\n"
+            f"\n  {name}{when}\n"
             f"    Box office     : {_status_word(primary)}\n"
             f"    Verified resale: {_status_word(resale)}\n"
             f"    {url}"
@@ -636,7 +654,7 @@ def watchdog(reason: str, failures: int, health=None) -> bool:
     """
     health_block = f"\n{_health_section(health)}\n" if health else ""
 
-    subject = "EP2026 watcher is not working"
+    subject = f"EP2026 watcher is not working{_from_watcher()}"
     body = (
         f"Hi David,\n\n"
         f"The ticket watcher has failed {failures} checks in a row.\n\n"

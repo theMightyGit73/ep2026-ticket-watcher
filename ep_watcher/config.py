@@ -18,7 +18,7 @@ class Event:
     """
 
     def __init__(self, slug: str, name: str, url: str, match_words=(),
-                 tm_event_id: str = ""):
+                 tm_event_id: str = "", poll_seconds: int = 0):
         self.slug = slug
         self.name = name
         self.url = url
@@ -29,10 +29,42 @@ class Event:
         #: so — see sources/inventory_api.py. Answering with another page's
         #: inventory would be a confident statement about the wrong ticket.
         self.tm_event_id = tm_event_id
+        #: How often this page is worth searching, in seconds. Pages are not
+        #: equally productive and the polling budget should not pretend they
+        #: are — see EVENT_POLL_SECONDS below. 0 means "use the default".
+        self.poll_seconds = poll_seconds or DEFAULT_EVENT_POLL_SECONDS
+
+    @property
+    def searches_per_hour(self) -> float:
+        return 3600.0 / self.poll_seconds
 
     def __repr__(self):
         return f"Event({self.slug})"
 
+
+# How often each page is searched, in seconds.
+#
+# These are not equal, and the evidence says they should not be. Of the nine
+# resale sightings recorded between 13 and 18 August, EIGHT were on the
+# standard Weekend Camping page and one was on the instalment plan — yet both
+# pages were being searched on every cycle, splitting the budget in half for a
+# 8:1 difference in yield.
+#
+# Rebalancing costs nothing. At one search every 6 minutes the standard page
+# takes 10 searches an hour and the instalment plan, at one every 30 minutes,
+# takes 2 — a total of 12 an hour, exactly what the even split was already
+# spending. What changes is where the attention goes.
+#
+# The gain comes from how short these listings are. Seven of the eight
+# distinct sightings were visible on exactly one poll and gone by the next,
+# which is the signature of a lifetime at or below the poll interval: fitting
+# that ratio gives a mean life of about 4.6 minutes, and a detection chance of
+# roughly 40% at a 10-minute cycle. Moving the busy page to 6 minutes raises
+# its share to about 56%. Weighted by where listings actually appear, that is
+# close to a third more finds for the same number of requests.
+STANDARD_POLL_SECONDS = int(os.environ.get("EP_STANDARD_POLL_SECONDS", "360"))
+INSTALMENT_POLL_SECONDS = int(os.environ.get("EP_INSTALMENT_POLL_SECONDS", "1800"))
+DEFAULT_EVENT_POLL_SECONDS = STANDARD_POLL_SECONDS
 
 EVENTS = [
     Event(
@@ -45,6 +77,7 @@ EVENTS = [
         ),
         match_words=("electric picnic", "weekend"),
         tm_event_id=os.environ.get("TM_EVENT_ID", "18006314BD813D3E"),
+        poll_seconds=STANDARD_POLL_SECONDS,
     ),
     # The instalment-plan listing for the same festival. A separate page with
     # its own inventory and its own resale panel, so it needs watching in its
@@ -58,6 +91,7 @@ EVENTS = [
             "/event/18006314CFB4A99E"
         ),
         match_words=("electric picnic", "weekend", "instalment"),
+        poll_seconds=INSTALMENT_POLL_SECONDS,
     ),
 ]
 
@@ -247,22 +281,72 @@ _POLL_PER_EVENT_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "300"))
 
 
 def poll_interval() -> int:
-    """Seconds between polls, scaled so total request volume stays flat.
+    """Seconds between ticks of the watch loop.
 
-    Every event is searched on every poll, so N events means N searches per
-    cycle. Holding the interval fixed while adding a second event would
-    double the hourly rate to ~24 searches — above the ~20/hour that got the
-    home IP flagged, which is the one outcome that costs the ticket outright.
-    Scaling instead trades per-event frequency for coverage, honestly and
-    visibly, rather than quietly buying the second event with risk.
+    The loop no longer searches every page on every pass. Each page has its
+    own interval and is searched when it comes due, so the tick is simply the
+    shortest of them — anything slower would make the busiest page late, and
+    anything faster would spend cycles with nothing to do.
 
-    Set EP_POLL_SECONDS to the per-event budget; the cycle is that times the
-    number of events.
+    Request volume is therefore the sum of the per-page rates rather than a
+    function of the cycle, which is what lets the pages be weighted by yield
+    without spending more. See searches_per_hour().
     """
-    return _POLL_PER_EVENT_SECONDS * max(1, len(EVENTS))
+    return min(e.poll_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
+
+
+def searches_per_hour() -> float:
+    """Total searches an hour across every watched page.
+
+    The number that actually has to stay under control — roughly 20 an hour is
+    what got the home IP flagged in development — and the one to check after
+    changing any page's interval.
+    """
+    return sum(e.searches_per_hour for e in EVENTS)
 
 
 POLL_INTERVAL_SECONDS = poll_interval()
+
+# ── Running more than one watcher ────────────────────────────────────────────
+# A second watcher elsewhere doubles how often the page is looked at without
+# either machine raising its own request rate. That is the only way to shorten
+# the gap between looks without also shortening the gap between requests from
+# one address — and with a mean listing life near 4.6 minutes against a
+# 6-minute interval, the gap between looks is what decides whether a ticket is
+# seen at all.
+#
+# The second one must not double the routine post. Set EP_ROLE=secondary and
+# it reports on a much slower clock and stops narrating its own day/night
+# switches, while every urgent alert — a listing, a basket, a broken watcher —
+# still fires immediately from both. Silence being ambiguous is the thing this
+# project refuses; two copies of "no luck yet" every hour is a different
+# failure, where the alert that matters arrives in a stream nobody reads.
+ROLE = os.environ.get("EP_ROLE", "primary").strip().lower()
+IS_SECONDARY = ROLE == "secondary"
+
+# Which watcher an alert came from, when there is more than one. Left unset on
+# a single-machine setup, where the question does not arise.
+WATCHER_LABEL = os.environ.get("EP_WATCHER_LABEL", "")
+
+# Where this watcher sits in the polling cycle, as a fraction of one tick.
+#
+# For running a SECOND watcher somewhere else. Two independent watchers on
+# different connections sample the page twice as often between them without
+# either one raising its own request rate — which is the only way to shorten
+# the gap between looks without also shortening the gap between requests from
+# one address.
+#
+# It matters because of how short these listings are. Seven of eight distinct
+# sightings were visible on exactly one poll, implying a mean life near 4.6
+# minutes against a 6-minute interval — so roughly half of them come and go
+# unseen. Two watchers make that roughly a quarter.
+#
+# Set EP_POLL_PHASE=0.5 on the second one and it starts half a tick out of
+# step. Be honest about what this buys: the sleeps are jittered by ±25%, so
+# the two drift out of step over hours. That costs less than it sounds —
+# two independent samplers double the sampling rate whatever their phase, and
+# the offset only stops them clumping together at the start.
+POLL_PHASE = max(0.0, min(1.0, float(os.environ.get("EP_POLL_PHASE", "0"))))
 
 # Overnight, poll far less often.
 #
@@ -360,7 +444,13 @@ BLOCKED_BACKOFF_MAX_SECONDS = int(os.environ.get("EP_BACKOFF_MAX_SECONDS", "1080
 #
 # The clock resets whenever a real availability alert goes out — if a ticket
 # turned up, that email already told the story.
-HEARTBEAT_HOURS = float(os.environ.get("EP_HEARTBEAT_HOURS", "1"))
+#
+# A secondary watcher reports far less often by default. Its job is to look
+# more often, not to talk more often, and the primary is already proving
+# hourly that the watch is alive.
+HEARTBEAT_HOURS = float(
+    os.environ.get("EP_HEARTBEAT_HOURS", "12" if IS_SECONDARY else "1")
+)
 
 # How long the Mac may go without checking in before GitHub declares it down.
 # Generously above the poll interval and the overnight slowdown, so a slow

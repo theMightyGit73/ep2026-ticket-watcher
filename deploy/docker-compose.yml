@@ -25,6 +25,21 @@ services:
     # called "~" and the file is silently not found.
     env_file:
       - ${HOME}/.ep2026-watcher/env
+
+    # This container is the SECOND watcher; the Mac is the first. Both look at
+    # the same page, and the point is that they look at DIFFERENT moments — a
+    # listing lives about 4.6 minutes against a 6-minute interval, so one
+    # watcher sees roughly half of them and two see roughly three quarters,
+    # without either raising its own request rate.
+    #
+    # The role turns the routine post down to match: a report twice a day
+    # instead of hourly, and no narration of its own day/night switches. Every
+    # urgent alert still fires immediately from both machines — a listing, a
+    # basket, a watcher that has stopped working.
+    environment:
+      EP_ROLE: ${EP_ROLE:-secondary}
+      EP_POLL_PHASE: ${EP_POLL_PHASE:-0.5}
+      EP_WATCHER_LABEL: ${EP_WATCHER_LABEL:-second watcher}
     volumes:
       - watcher-data:/data
     # Chrome needs more than the default 64MB of shared memory or it will

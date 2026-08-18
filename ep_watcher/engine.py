@@ -527,7 +527,10 @@ def maybe_switch_session(st: dict) -> bool:
 
     # Nothing to report the very first time: there is no finished session,
     # and an opening email describing zero checks over zero hours is noise.
-    if current.get("mode") and current.get("started_at"):
+    # A secondary watcher never sends this at all — the cadence change is the
+    # same one the primary is already describing, and hearing it twice from
+    # two machines is how a useful email becomes one that gets filtered.
+    if current.get("mode") and current.get("started_at") and not config.IS_SECONDARY:
         print(f"[{stamp()}] {current['mode']} session ended — sending the summary")
         notify.session_summary(
             current,
@@ -559,10 +562,15 @@ def run_once(session=None) -> Reading:
         # boundary and this cycle counts towards the new one.
         maybe_switch_session(st)
         readings = []
-        # Every event is searched on every cycle rather than round-robin, so a
-        # listing on the quieter page is never up to a full cycle stale. The
-        # cost is paid in the interval instead — see config.poll_interval().
-        for event in config.EVENTS:
+        # Pages are searched on their own intervals rather than all on every
+        # tick. Of the nine resale sightings recorded between 13 and 18
+        # August, eight were on the standard page and one on the instalment
+        # plan; searching both equally spent half the budget for an eighth of
+        # the yield. Weighting them costs no extra requests — see
+        # config.searches_per_hour().
+        due = state_mod.due_events(st, config.EVENTS)
+        for index, event in enumerate(due):
+            state_mod.note_event_polled(st, event.slug)
             reading = poll(session, event)
             handle(reading, st)
             readings.append(reading)
@@ -572,7 +580,7 @@ def run_once(session=None) -> Reading:
             # resale-blind reading for one wall. Stop and let the caller reset
             # the profile.
             if reading.blocked:
-                left = [e.name for e in config.EVENTS[len(readings):]]
+                left = [e.name for e in due[index + 1:]]
                 if left:
                     print(
                         f"[{stamp()}] blocked — not polling {', '.join(left)} "

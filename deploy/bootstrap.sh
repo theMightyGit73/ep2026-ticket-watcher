@@ -118,6 +118,12 @@ if [ $RESULT -eq 0 ]; then
     say "This host works. Start the watcher with:"
     echo "    cd $APP_DIR && $DOCKER compose -f deploy/docker-compose.yml up -d"
     echo "    $DOCKER compose -f deploy/docker-compose.yml logs -f"
+    echo
+    echo "  It runs as the SECOND watcher: half a tick out of step with the Mac,"
+    echo "  so the two look at the page at different moments rather than together."
+    echo "  It reports twice a day rather than hourly, because the Mac is already"
+    echo "  proving hourly that the watch is alive — but a listing, a basket or a"
+    echo "  broken watcher still alerts immediately from both."
 else
     say "This host could not read the page"
     echo "  Do NOT start the watcher here — it would fail every poll and email"

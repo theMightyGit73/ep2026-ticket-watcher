@@ -175,6 +175,18 @@ def cmd_watch(args) -> int:
         print("  Browser DISABLED — API sources only\n")
         return _watch_apis_only(interval)
 
+    # A second watcher elsewhere starts half a tick out of step, so the two
+    # look at the page at different moments rather than together. Done before
+    # the browser opens: waiting with Chrome already running would hold the
+    # profile lock for nothing.
+    if config.POLL_PHASE:
+        offset = interval * config.POLL_PHASE
+        print(
+            f"[{stamp()}] phase offset {config.POLL_PHASE:.2f} — waiting "
+            f"{offset / 60:.1f} min so this watcher interleaves with the other"
+        )
+        time.sleep(offset)
+
     session = _start_session()
     # Start the identity clock if nothing has ever set it, so the pre-emptive
     # refresh has an age to measure against. Stamping now rather than assuming
