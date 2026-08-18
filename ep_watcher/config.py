@@ -319,7 +319,22 @@ def poll_interval_now(daytime_interval=None) -> tuple:
 # is slow then, not that 90 seconds is enough. If timeouts persist at this
 # value, the cause is something other than slowness and a bigger number will
 # not find it.
-SEARCH_TIMEOUT_SECONDS = int(os.environ.get("EP_SEARCH_TIMEOUT", "45"))
+#
+# And the night theory turned out to be half the story. On 2026-08-18, after a
+# power cut moved the watcher onto a mobile connection, two searches timed out
+# at 11:14 and 11:17 — the first daytime timeouts ever recorded, against five
+# that had all fallen between 22:08 and 00:59. The page is not only slow at
+# night; it is slow over a slow link, and a tethered connection is one. Each
+# timeout costs a resale-blind reading on both pages at once.
+#
+# So the daytime ceiling is raised to match the overnight one. The asymmetry
+# argument above is the reason this is close to free rather than a trade: a
+# healthy search returns the moment its marker appears, so the ceiling is only
+# ever reached by a poll that was going to fail anyway. The extra wait is spent
+# on failures, never on good polls. Two observations is thin evidence for the
+# cause — but the cost of being wrong about it is 45 seconds of waiting, and
+# the cost of leaving it is a listing that could not be seen.
+SEARCH_TIMEOUT_SECONDS = int(os.environ.get("EP_SEARCH_TIMEOUT", "90"))
 NIGHT_SEARCH_TIMEOUT_SECONDS = int(os.environ.get("EP_NIGHT_SEARCH_TIMEOUT", "90"))
 
 

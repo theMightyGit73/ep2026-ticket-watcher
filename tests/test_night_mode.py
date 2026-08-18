@@ -92,8 +92,14 @@ check("by day it is the ordinary timeout",
       config.search_timeout(at.replace(hour=12)), config.SEARCH_TIMEOUT_SECONDS)
 check("at 01:00, when they actually happened, it is longer",
       config.search_timeout(at.replace(hour=1)), config.NIGHT_SEARCH_TIMEOUT_SECONDS)
-check("and the night value really is longer",
-      config.NIGHT_SEARCH_TIMEOUT_SECONDS > config.SEARCH_TIMEOUT_SECONDS, True)
+# Night must never be MORE impatient than day — that is the invariant, and it
+# survives the two values being equal. They are equal now: on 2026-08-18 two
+# searches timed out at 11:14 and 11:17, in broad daylight, after a power cut
+# moved the watcher onto a mobile connection. The page is not only slow at
+# night, it is slow over a slow link, so the daytime ceiling was raised to
+# match. Waiting longer is paid only by searches that were going to fail.
+check("night is never less patient than day",
+      config.NIGHT_SEARCH_TIMEOUT_SECONDS >= config.SEARCH_TIMEOUT_SECONDS, True)
 check("06:59 is still night", config.search_timeout(at.replace(hour=6)),
       config.NIGHT_SEARCH_TIMEOUT_SECONDS)
 check("07:00 is not", config.search_timeout(at.replace(hour=7)),

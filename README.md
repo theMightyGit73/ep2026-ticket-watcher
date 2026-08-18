@@ -422,8 +422,8 @@ Environment variables, all optional:
 | `EP_WATCH_LABEL` | `Electric Picnic 2026` | What to call the watch in emails covering every page |
 | `EP_HEARTBEAT_HOURS` | `1` | How often to send the "still nothing" report |
 | `EP_NIGHT_POLL_SECONDS` | `1800` | Overnight cycle. `0` disables the slowdown |
-| `EP_SEARCH_TIMEOUT` | `45` | Seconds to wait for a search to resolve |
-| `EP_NIGHT_SEARCH_TIMEOUT` | `90` | The same, overnight, when the page is slower |
+| `EP_SEARCH_TIMEOUT` | `90` | Seconds to wait for a search to resolve. Raised from 45 after daytime timeouts on a tethered connection |
+| `EP_NIGHT_SEARCH_TIMEOUT` | `90` | The same, overnight. Equal to the daytime value now; it may never be lower |
 | `EP_GRACE_MINUTES` | `15` | How late a poll may be before the watchdog restarts it |
 | `EP_PROFILE_MAX_AGE` | `90` | Minutes before the browser identity is rebuilt pre-emptively. `0` waits for the block instead |
 | `EP_SEND_TIMEOUT` | `20` | Seconds any one email or push may take before it is treated as undelivered |

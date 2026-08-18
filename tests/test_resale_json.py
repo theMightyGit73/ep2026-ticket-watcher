@@ -109,6 +109,51 @@ nested = {"total": 1, "picks": [{"section": {"name": "STNDN9"}, "price": {"value
 answered, reading = parse(nested)
 check_true("nested objects are unwrapped", "STNDN9" in reading.listings[0].name)
 
+print("\nA real listing, captured live on 2026-08-18 at 10:35 UTC")
+# Copied verbatim out of the diagnostics the watcher wrote the moment it found
+# one — the first time this shape had ever been seen. It matters because the
+# parser had been guessing at the key names for weeks, and got the price wrong:
+# it tried price/faceValue/amount/total/displayPrice, and the real key is
+# `originalPrice`. So the alert for this listing named a section and no price,
+# which is the one detail that says whether a ticket is worth having.
+REAL_PICK = {
+    "id": "l27t4h2d",
+    "type": "general-seating",
+    "section": "STNDN1",
+    "originalPrice": 366.39,
+    "description": "WEEKEND CAMPING",
+    "areaName": "GA",
+    "placeDescriptionId": "IE5DCLBTFQ2CYNI",
+    "hasSpecialDescription": False,
+    "offerIds": ["HF6GYMRXOQ2GQMTE"],
+    "quality": 0.964912,
+    "sellerBusinessType": "private",
+    "resaleListingId": "l27t4h2d",
+    "sellerAffiliationType": "unaffiliated",
+    "attributes": [],
+}
+
+answered, reading = parse({"quantity": 1, "total": 1, "picks": [REAL_PICK]})
+check("a real listing is an answer", answered, True)
+check("and reads as available", reading.resale, AVAILABLE)
+listing = reading.listings[0]
+check("the price is read from originalPrice", listing.price, "€366.39")
+check_true("the section is named", "STNDN1" in listing.name)
+check_true("and what the ticket is", "WEEKEND CAMPING" in listing.name)
+# describe() is what goes in the alert and what the new-listing diff keys on.
+check("the whole line an alert would carry", listing.describe(),
+      "Verified Resale — Section STNDN1 (WEEKEND CAMPING) — €366.39")
+check_true("the listing id is logged, not folded into the description",
+           any("l27t4h2d" in n for n in reading.notes))
+check("...and stays out of the diff key", "l27t4h2d" in listing.describe(), False)
+
+# The guesses stay behind it: one general-admission ticket is the simplest
+# shape there is, and a seated event may carry rows and a different price key.
+answered, reading = parse({"total": 1, "picks": [
+    {"section": "A", "row": "12", "price": 99.5, "description": "SEATED"}]})
+check("an older shape still parses", reading.listings[0].price, "€99.50")
+check_true("including its row", "Row 12" in reading.listings[0].name)
+
 print("\nWhen it cannot answer, it says so and lets the page decide")
 
 check("no response captured at all", parse(None)[0], False)

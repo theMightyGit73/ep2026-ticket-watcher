@@ -98,9 +98,25 @@ def _listing_from_pick(pick) -> Listing:
     alert's job is to say a ticket exists — describing its section wrongly
     costs a line of text, missing it costs the ticket.
 
-    The real shape of an entry has not been observed: that needs a listing
-    present at the moment someone is looking. So several plausible field
-    names are tried and anything unknown still counts.
+    The real shape WAS observed, at last, on 2026-08-18 at 10:35 UTC — the
+    first find captured since the watcher started writing them down:
+
+        {"id": "l27t4h2d", "type": "general-seating", "section": "STNDN1",
+         "originalPrice": 366.39, "description": "WEEKEND CAMPING",
+         "areaName": "GA", "offerIds": ["HF6GYMRXOQ2GQMTE"],
+         "resaleListingId": "l27t4h2d", "sellerBusinessType": "private", ...}
+
+    The price key is `originalPrice`, which was not among the five names this
+    guessed at — so the alert for that listing went out with a section and no
+    price, which is the one detail that says whether a ticket is worth having.
+    Cross-checked against the find of 2026-08-17, whose price was read off the
+    rendered page as €366.39 for an equivalent listing in STNDN2: the same
+    number the API reports here. Treat it as the price the page displays;
+    Ticketmaster may still add fees at checkout.
+
+    The guesses are kept behind it. This is one observation of one listing,
+    and a general-admission festival ticket is the simplest case there is —
+    a seated event may well carry rows and a different price field.
     """
     if not isinstance(pick, dict):
         return Listing(name=f"Verified Resale ({pick})", kind="resale")
@@ -117,7 +133,10 @@ def _listing_from_pick(pick) -> Listing:
     section = first("section", "sectionName", "area", "areaName", "zone")
     row = first("row", "rowName")
     desc = first("description", "descriptionName", "ticketType", "name", "label")
-    price = first("price", "faceValue", "amount", "total", "displayPrice")
+    # `originalPrice` first, because that is the key a real listing actually
+    # used. The rest stay as fallbacks for shapes not yet seen.
+    price = first("originalPrice", "price", "faceValue", "amount", "total",
+                  "displayPrice")
 
     bits = ["Verified Resale"]
     if section:
@@ -198,9 +217,19 @@ def _parse_resale_json(record, reading: Reading) -> bool:
     reading.resale = AVAILABLE
     reading.note(f"resale API: {count} listing(s)")
     if picks and isinstance(picks[0], dict):
-        # Logged so the first real listing teaches us its schema instead of
-        # us guessing at it indefinitely.
+        # Logged so a listing in a shape we have not seen teaches us its schema
+        # rather than being described badly and forgotten. The keys of the one
+        # observed listing are recorded in _listing_from_pick.
         reading.note(f"resale pick keys: {sorted(picks[0])}")
+        # The seller's own id for the listing. Kept in the log rather than in
+        # the listing description, because the description drives the
+        # new-listing diff — and an id that turned out to be regenerated per
+        # poll would make the same ticket look new every time and re-alert on
+        # a four-minute clock. One sighting is not enough to know that.
+        ids = [p.get("resaleListingId") or p.get("id") for p in picks
+               if isinstance(p, dict) and (p.get("resaleListingId") or p.get("id"))]
+        if ids:
+            reading.note(f"resale listing id(s): {', '.join(str(i) for i in ids)}")
 
     for pick in picks[:10]:
         reading.listings.append(_listing_from_pick(pick))

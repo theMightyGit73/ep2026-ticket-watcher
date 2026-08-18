@@ -122,9 +122,24 @@ print("\nWhat the switch says has changed")
 night = engine.session_settings("night")
 labels = [r[0] for r in night]
 check_true("going to night changes the poll cycle", "Poll cycle" in labels)
-check_true("...and the search timeout", "Search timeout" in labels)
 for label, before, after in night:
     check(f"{label} actually differs", before != after, True)
+
+# The search timeout is listed only when the two modes genuinely differ. They
+# are equal now — the daytime ceiling was raised to the overnight one after
+# daytime timeouts appeared on a mobile connection — and a "changed" row
+# showing the same value on both sides is noise, so it must be absent.
+check("an unchanged setting is not reported as a change",
+      "Search timeout" in labels,
+      config.NIGHT_SEARCH_TIMEOUT_SECONDS != config.SEARCH_TIMEOUT_SECONDS)
+
+was = config.NIGHT_SEARCH_TIMEOUT_SECONDS
+config.NIGHT_SEARCH_TIMEOUT_SECONDS = config.SEARCH_TIMEOUT_SECONDS * 2
+try:
+    check_true("...but a real difference is",
+               "Search timeout" in [r[0] for r in engine.session_settings("night")])
+finally:
+    config.NIGHT_SEARCH_TIMEOUT_SECONDS = was
 
 day = engine.session_settings("day")
 check("the two directions are mirror images",
