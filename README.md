@@ -400,6 +400,7 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 | `doctor` | Is it healthy? Prints the exact fix for anything that isn't |
 | `login` | Open Chrome to sign in by hand (only needed for *buying*) |
 | `calibrate` | Dump screenshot + text + HTML after a search |
+| `networks` | List every connection the watcher has seen, with blocks against each |
 | `status` | Print config and health |
 | `resolve-id` | Look up the Discovery event id for the API source |
 
@@ -425,6 +426,9 @@ Environment variables, all optional:
 | `EP_SEARCH_TIMEOUT` | `90` | Seconds to wait for a search to resolve. Raised from 45 after daytime timeouts on a tethered connection |
 | `EP_NIGHT_SEARCH_TIMEOUT` | `90` | The same, overnight. Equal to the daytime value now; it may never be lower |
 | `EP_GRACE_MINUTES` | `15` | How late a poll may be before the watchdog restarts it |
+| `EP_NETWORK_NAMES` | — | `key=Label` pairs naming your connections, comma separated. Key may be a gateway MAC, gateway IP or public IP |
+| `EP_HOTSPOT_LABEL` | `David's hotspot` | What to call a detected phone hotspot |
+| `EP_HOME_LABEL` | `home Wi-Fi` | What to call the home connection |
 | `EP_PROFILE_MAX_AGE` | `90` | Minutes before the browser identity is rebuilt pre-emptively. `0` waits for the block instead |
 | `EP_SEND_TIMEOUT` | `20` | Seconds any one email or push may take before it is treated as undelivered |
 | `EP_OFFSCREEN` | `1` | Park the Chrome window off-desktop |
@@ -464,6 +468,54 @@ So:
 - `doctor` now *signs in to Gmail* rather than checking that a password is set.
   A revoked app password looks identical from the outside, and the first thing
   to discover it would be the one alert that mattered failing to arrive.
+
+### Any number of connections, not two
+
+The watcher was built when there were two — a home Wi-Fi and a phone hotspot —
+and its labelling said so: an address either equalled `EP_HOME_IP` or it was
+"the hotspot". On 18 August there were three in one morning. A power cut moved
+the MacBook onto a tethered eir connection and then onto a Sky line, and the
+second switch was announced as *"new address, same connection"*, because with
+only two names available both non-home connections were called the same thing
+and comparing labels could not tell them apart.
+
+**A connection is now identified by its default gateway's MAC address** — the
+router itself. Read from the ARP table, so it costs two cheap subprocess calls
+and no permission at all, and it is stable in exactly the case that broke the
+old scheme: a carrier handing a tether a new public address every twenty
+minutes does not change the router.
+
+The obvious identity would be the Wi-Fi network's name, and it cannot be used.
+Measured on this Mac:
+
+```
+networksetup -getairportnetwork en0   ->  "You are not associated with an
+                                           AirPort network."  (while associated)
+ipconfig getsummary en0 | grep SSID   ->  "SSID : <redacted>"
+```
+
+macOS withholds the SSID from any process without Location Services
+permission. That is a GUI grant which does not survive launchd reliably, and a
+watcher that silently loses the ability to tell two networks apart is worse
+than one that never had it.
+
+What follows from the change:
+
+- **A re-address is distinguished from a switch by fact, not by guess.** Same
+  router, new public address is reported as a re-address; a different router
+  is reported as a switch.
+- **Blocks follow the connection**, not whichever address it held at the time,
+  so a tether re-addressed six times in an afternoon is one connection with
+  one block history rather than six strangers.
+- **Naming is optional.** An unnamed connection is tracked, counted and blamed
+  correctly; it is described by its address range ("the 192.168.0.x network
+  via Wi-Fi") instead of named. A phone hotspot names itself, by its gateway;
+  the first connection ever seen is assumed to be home.
+- **`./run_watcher.sh networks`** lists everything it has seen, with searches
+  and blocks against each and the key to name it by. Every "you are on a
+  different connection" email carries the same key.
+- Connections that never caused trouble are forgotten three days after they
+  were last used, so the list stays readable.
 
 ### Two faults that get named in their own words
 

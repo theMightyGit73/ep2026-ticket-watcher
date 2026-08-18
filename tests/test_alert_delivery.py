@@ -131,7 +131,7 @@ check("and clears the counts", s["checks_since_heartbeat"], 0)
 print("\nRecovery is announced once, not once per watched page")
 
 offline(False)
-engine.network = type("_IP", (), {"public_ip": staticmethod(lambda *a, **kw: None)})()
+engine.network = type("_Net", (), {"public_ip": staticmethod(lambda *a, **kw: None), "fingerprint": staticmethod(lambda *a, **kw: {"key": None, "ip": None})})()
 s = fresh()
 for event in config.EVENTS:
     st.event_state(s, event.slug)["consecutive_failures"] = 6

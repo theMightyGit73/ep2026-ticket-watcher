@@ -731,6 +731,8 @@ def cmd_doctor(_args) -> int:
     # 4. Is the connection healthy? Report the real severity: printing [ OK ]
     #    next to the words "being rate-limited" is contradictory, and a health
     #    check people learn to squint at is not a health check.
+    print(f"  [ -- ]  On {state_mod.describe_network(st)}"
+          + (f" — {state_mod.naming_key(st)}" if not state_mod.is_named(st) else ""))
     severity, headline, _ = state_mod.connection_health(st)
     if severity == "blocked":
         bad("Connection", headline, "switch networks; see the email for the full steps")
@@ -804,6 +806,62 @@ def doctor_summary(problems, warnings) -> tuple:
     return "\n".join(out), (1 if problems else 0)
 
 
+def cmd_networks(_args) -> int:
+    """List every connection the watcher has seen, and how to name them.
+
+    Written for the question David actually asks when a connection is flagged:
+    not "is this one bad" but "which one should I go and buy on". That needs
+    the whole list, with the block count against each, and a name he
+    recognises — so this also prints the exact line to paste to name any of
+    them.
+    """
+    from . import network
+
+    st = state_mod.load()
+    fp = network.fingerprint(max_age=0)
+    if fp.get("key"):
+        # Recorded, so a connection joined since the last poll shows up here
+        # rather than only after the watcher next runs.
+        state_mod.note_network(st, fp)
+        state_mod.save(st)
+
+    rows = state_mod.known_networks(st)
+    if not rows:
+        print("\n  No connections recorded yet — they are learned as the Mac joins them.\n")
+        return 0
+
+    print(f"\n  Connections this watcher knows, at {stamp()}\n")
+    width = max(len(r[0]) for r in rows)
+    print(f"    {'':2} {'Name':{width}} {'Searches':>9} {'Blocks':>7}   Key to name it by")
+    print(f"    {'-' * (width + 42)}")
+    for label, key, searches, blocks, is_current in rows:
+        mark = "->" if is_current else "  "
+        naming = state_mod.naming_key(st, key)
+        print(f"    {mark} {label:{width}} {searches:>9} {blocks:>7}   {naming}")
+
+    print(f"\n  -> is the connection in use now: {state_mod.describe_network(st)}")
+    if fp.get("ip"):
+        print(f"     Public address {fp['ip']}, which is what Ticketmaster sees.")
+
+    # Only offer to name connections worth naming: the one in use, and any
+    # that has drawn a block. The rest are addresses a tether held for twenty
+    # minutes two days ago, and they are pruned on their own.
+    unnamed = [
+        (label, state_mod.naming_key(st, key))
+        for label, key, _searches, blocks, is_current in rows
+        if not state_mod.is_named(st, key) and (is_current or blocks)
+    ]
+    if unnamed:
+        print("\n  The names above are the watcher's own guesses, which is fine — every")
+        print("  connection is tracked and blamed correctly either way. To set them")
+        print(f"  yourself, put this in {Path.home()}/.ep2026-watcher/env and restart:\n")
+        pairs = ",".join(f"{key}=your name for it" for _label, key in unnamed)
+        print(f'      EP_NETWORK_NAMES="{pairs}"\n')
+    else:
+        print("\n  All named explicitly.\n")
+    return 0
+
+
 def cmd_status(_args) -> int:
     st = state_mod.load()
     print(f"\n  State file : {config.STATE_FILE}")
@@ -831,6 +889,7 @@ COMMANDS = {
     "check-mac": cmd_check_mac,
     "calibrate": cmd_calibrate,
     "resolve-id": cmd_resolve_id,
+    "networks": cmd_networks,
     "status": cmd_status,
 }
 

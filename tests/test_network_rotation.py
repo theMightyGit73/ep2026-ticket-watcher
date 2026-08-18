@@ -45,24 +45,28 @@ def fresh():
 print("\nNoticing which connection is in use")
 
 s = fresh()
-check("first sighting is not a 'change'", st.note_network(s, HOME), False)
+# note_network() reports what KIND of change it was, not merely that there was
+# one: "" for none, "readdressed" for the same connection on a new address,
+# "switched" for a different connection. The distinction used to be guessed at
+# by comparing labels, and got it wrong in both directions.
+check("first sighting is not a 'change'", st.note_network(s, HOME), "")
 check("it is recorded as current", s["current_ip"], HOME)
 check("and counted", s["searches_on_current_ip"], 1)
 
 st.note_network(s, HOME)
 check("same connection keeps counting", s["searches_on_current_ip"], 2)
 
-check("switching is detected", st.note_network(s, HOTSPOT), True)
+check("switching is detected", st.note_network(s, HOTSPOT), "switched")
 check("counters reset on the new connection", s["searches_on_current_ip"], 1)
 check("current connection updated", s["current_ip"], HOTSPOT)
 
-check("a failed IP lookup changes nothing", st.note_network(s, None), False)
+check("a failed IP lookup changes nothing", st.note_network(s, None), "")
 check("...and does not count as a search", s["searches_on_current_ip"], 1)
 
 print("\nLabelling the two connections")
 
 check("the first one seen is home", st.network_label(s, HOME), "home Wi-Fi")
-check("the other is the hotspot", st.network_label(s, HOTSPOT), "phone hotspot")
+check("the other is the hotspot", st.network_label(s, HOTSPOT), config.HOTSPOT_LABEL)
 check("the other-name flips correctly", st.other_network_label(s), "home Wi-Fi")
 
 config.HOME_NETWORK_IP = HOTSPOT
@@ -118,7 +122,7 @@ should, headline, instruction = st.network_status(s)
 check("it asks", should, True)
 check_true("names the connection it is on", "home Wi-Fi" in headline)
 check_true("shows the IP", HOME in headline)
-check_true("says where to move to", "phone hotspot" in instruction)
+check_true("says where to move to", config.HOTSPOT_LABEL in instruction)
 check_true("says how, in menu-bar terms", "Wi-Fi icon" in instruction)
 check_true("mentions Personal Hotspot", "Personal Hotspot" in instruction)
 check_true("reassures there is nothing else to do", "Nothing else to do" in instruction)

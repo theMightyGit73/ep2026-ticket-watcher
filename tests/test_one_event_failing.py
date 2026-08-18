@@ -45,7 +45,7 @@ def check_true(label, got):
 notify._send_email = lambda *a, **kw: None
 notify._send_ntfy = lambda *a, **kw: None
 notify.watchdog = lambda reason, failures_, **kw: alerts.append((reason, failures_))
-engine.network = type("_IP", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1")})()
+engine.network = type("_Net", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1"), "fingerprint": staticmethod(lambda *a, **kw: {"key": "10.0.0.1", "ip": "10.0.0.1"})})()
 engine.liveness = type("_L", (), {"publish": staticmethod(lambda *a, **kw: True)})()
 
 A, B = config.EVENTS[0], config.EVENTS[1]

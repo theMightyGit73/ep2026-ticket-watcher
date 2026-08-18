@@ -68,6 +68,10 @@ def _defaults():
         "checks_total": 0,
         # Alternating home Wi-Fi / phone hotspot.
         "current_ip": None,
+        # Which connection, as opposed to which address. Keyed on the default
+        # gateway's MAC, so a carrier re-addressing a tether is no longer
+        # mistaken for joining a different network. See network.fingerprint().
+        "current_net": None,
         "current_ip_since": None,         # ISO8601
         "searches_on_current_ip": 0,
         "networks": {},                   # ip -> {first_seen, searches, blocks}
@@ -627,57 +631,281 @@ def hours_since_check(state: dict):
 
 # ── Alternating networks ─────────────────────────────────────────────────────
 
-def note_network(state: dict, ip) -> bool:
+def as_fingerprint(seen) -> dict:
+    """Accept either a full fingerprint or a bare IP string.
+
+    The IP-only form is what the older callers and the single-network tests
+    pass, and what every state file written before connections were identified
+    by their gateway contains. Treating the address as its own key keeps all
+    of that working unchanged.
+    """
+    if isinstance(seen, dict):
+        return seen
+    return {"key": seen or "", "ip": seen or ""}
+
+
+def note_network(state: dict, seen) -> str:
     """Record which connection this poll went out through.
 
-    Returns True if the connection changed since last time — which is how the
-    watcher notices David has switched networks without him having to tell it.
-    A switch resets the counters and the nag, so the advice in the next email
-    reflects the new connection rather than the old one.
+    Returns "" if nothing changed, "readdressed" if the same connection was
+    given a new public address, or "switched" if this is a different
+    connection altogether.
+
+    Those two used to be guessed at by comparing labels, which was wrong in
+    both directions: a carrier re-addressing a tether looked like a switch,
+    and a switch between two connections that happened to share a label looked
+    like a re-address. Observed on 2026-08-18, when moving from the eir mobile
+    hotspot onto a Sky line was announced as "new address, same connection".
+    The gateway settles it — a different router is a different network.
     """
-    if not ip:
-        return False
+    fp = as_fingerprint(seen)
+    key, ip = fp.get("key") or fp.get("ip") or "", fp.get("ip") or ""
+    if not key:
+        return ""
 
     networks = dict(state.get("networks", {}))
-    entry = networks.get(ip) or {"first_seen": utc_now().isoformat(), "searches": 0, "blocks": 0}
+    was_key = state.get("current_net") or state.get("current_ip")
+    was_ip = state.get("current_ip")
 
-    changed = state.get("current_ip") not in (None, ip)
-    if state.get("current_ip") != ip:
-        state["current_ip"] = ip
+    # Upgrading a state file written when the public address WAS the identity.
+    # The same address means the same connection, so adopt the gateway as its
+    # key, carry its history across, and do not announce a switch that never
+    # happened — an upgrade should be invisible from the inbox.
+    if not state.get("current_net") and was_ip and was_ip == ip and key != was_ip:
+        legacy = networks.pop(was_ip, None)
+        if legacy is not None:
+            networks[key] = legacy
+        was_key = key
+
+    entry = dict(networks.get(key) or {})
+    if not entry:
+        entry = {"first_seen": utc_now().isoformat(), "searches": 0, "blocks": 0}
+    if not entry.get("label"):
+        # Named once, on first sight, and then left alone — so a connection
+        # keeps the name it was given even after the watcher has moved on and
+        # come back. config.NETWORK_NAMES still overrides it at read time.
+        #
+        # Set here rather than only for brand-new entries, because an entry
+        # carried across from address-keyed state has no label either, and
+        # without one it fell through to the old rule — which knew of exactly
+        # two connections and so called a Sky line "the hotspot".
+        entry["label"] = _guess_label(state, fp)
+
+    # Remember every address this connection has been given. It is the honest
+    # answer to "is this the same network?" when a tether is re-addressed six
+    # times in an afternoon.
+    addresses = list(entry.get("addresses") or ([was_ip] if entry.get("searches") and was_ip == ip else []))
+    if ip and ip not in addresses:
+        addresses.append(ip)
+    entry["addresses"] = addresses[-10:]
+    for field in ("gateway", "gateway_mac", "port", "interface", "subnet"):
+        if fp.get(field):
+            entry[field] = fp[field]
+
+    changed = ""
+    if was_key and was_key != key:
+        changed = "switched"
+    elif ip and was_ip and was_ip != ip:
+        changed = "readdressed"
+
+    if was_key != key:
+        state["current_net"] = key
         state["current_ip_since"] = utc_now().isoformat()
         state["searches_on_current_ip"] = 0
         state["rotation_asked_at"] = None
+    state["current_net"] = key
+    state["current_ip"] = ip or was_ip
 
     state["searches_on_current_ip"] = state.get("searches_on_current_ip", 0) + 1
     entry["searches"] = entry.get("searches", 0) + 1
-    networks[ip] = entry
+    entry["last_seen"] = utc_now().isoformat()
+    networks[key] = entry
     state["networks"] = networks
+    prune_networks(state)
     return changed
 
 
-def network_label(state: dict, ip=None) -> str:
-    """Human name for a connection: "home Wi-Fi" or "phone hotspot".
+def _guess_label(state: dict, fp: dict) -> str:
+    """A name for a connection nobody has named, good enough to act on.
 
-    There is no reliable way to tell a tethered phone from a home router by IP
-    alone, so this uses the simple rule that fits how it is actually used: the
-    first connection the watcher ever saw is home (set EP_HOME_IP to override),
-    and anything else is the hotspot.
+    Deliberately modest. It guesses at exactly two things — a phone hotspot,
+    which announces itself by its gateway, and the first connection the
+    watcher ever saw, which is home if you started it at home — and otherwise
+    describes the network by its private range rather than inventing a name
+    for it. "The 192.168.0.x network" means something to whoever set up that
+    router; "unknown network 3" means nothing to anybody.
     """
-    ip = ip or state.get("current_ip")
-    if not ip:
-        return "an unknown connection"
-    if config.HOME_NETWORK_IP:
-        return "home Wi-Fi" if ip == config.HOME_NETWORK_IP else "phone hotspot"
+    if fp.get("hotspot"):
+        return config.HOTSPOT_LABEL
+    if config.HOME_NETWORK_IP and fp.get("ip") == config.HOME_NETWORK_IP:
+        return config.HOME_NETWORK_LABEL
+    if not state.get("networks"):
+        return config.HOME_NETWORK_LABEL
+    subnet = fp.get("subnet")
+    port = (fp.get("port") or "").strip()
+    if subnet and port:
+        return f"the {subnet} network via {port}"
+    if subnet:
+        return f"the {subnet} network"
+    # Nothing but an address to go on — an old state file, or a machine where
+    # the gateway cannot be read. Fall back to the rule that held when there
+    # were only ever two connections: the first is home, the next is the
+    # hotspot. Wrong for a third, but no worse than it ever was.
+    return config.HOTSPOT_LABEL
 
-    networks = state.get("networks", {})
-    if not networks:
+
+def network_label(state: dict, key=None) -> str:
+    """Human name for a connection, however many of them there turn out to be.
+
+    Resolution order, most explicit first: a name David configured, the name
+    learned when the connection was first seen, then a guess. `key` may be a
+    connection key or a bare public IP, so callers holding either still work.
+    """
+    key = key or state.get("current_net") or state.get("current_ip")
+    if not key:
+        return "an unknown connection"
+
+    entry = (state.get("networks") or {}).get(key) or {}
+
+    # Configured names win, and may be keyed on whichever identifier David had
+    # to hand when he wrote them down.
+    for candidate in (key, entry.get("gateway_mac"), entry.get("gateway"), entry.get("ip")):
+        if candidate and str(candidate).lower() in config.NETWORK_NAMES:
+            return config.NETWORK_NAMES[str(candidate).lower()]
+    for address in entry.get("addresses") or []:
+        if str(address).lower() in config.NETWORK_NAMES:
+            return config.NETWORK_NAMES[str(address).lower()]
+
+    # Legacy: a state file written before connections had gateways is keyed on
+    # the public IP, and EP_HOME_IP is still how that deployment names home.
+    if config.HOME_NETWORK_IP and config.HOME_NETWORK_IP in (
+        key, entry.get("ip"), *(entry.get("addresses") or [])
+    ):
+        return config.HOME_NETWORK_LABEL
+
+    if entry.get("label"):
+        return entry["label"]
+    if not state.get("networks"):
         return "this connection"
-    first = min(networks.items(), key=lambda kv: kv[1].get("first_seen", ""))[0]
-    return "home Wi-Fi" if ip == first else "phone hotspot"
+    if config.HOME_NETWORK_IP:
+        # Home is already decided above by EP_HOME_IP. Anything else with no
+        # label is a connection met before the watcher started naming them,
+        # and saying so is better than asserting it was the hotspot — with
+        # more than two connections that assertion is simply a guess wearing
+        # a confident face.
+        return f"an earlier connection ({key})"
+    # No EP_HOME_IP either: fall back to the rule that held when there were
+    # only ever two, which is the best available from an address alone.
+    first = min(state["networks"].items(), key=lambda kv: kv[1].get("first_seen", ""))[0]
+    return config.HOME_NETWORK_LABEL if key == first else config.HOTSPOT_LABEL
+
+
+def describe_network(state: dict, key=None) -> str:
+    """The label plus enough detail to recognise it, for an email."""
+    key = key or state.get("current_net") or state.get("current_ip")
+    entry = (state.get("networks") or {}).get(key) or {}
+    label = network_label(state, key)
+    # Only add detail the label does not already carry. An auto-generated name
+    # is built from exactly these parts, so appending them produced "the
+    # 192.168.0.x network via Wi-Fi (192.168.0.x, via Wi-Fi)".
+    bits = [b for b in (entry.get("subnet"),
+                        f"via {entry['port']}" if entry.get("port") else "")
+            if b and b not in label]
+    return f"{label} ({', '.join(bits)})" if bits else label
+
+
+#: How long a connection with nothing against it is remembered after it was
+#: last used. Anything that ever drew a block is kept regardless — that is the
+#: history worth having — but a tether that was re-addressed six times in an
+#: afternoon leaves six entries that mean nothing a few days later, and a list
+#: nobody can read is a list nobody reads.
+NETWORK_FORGET_DAYS = 3.0
+
+
+def prune_networks(state: dict) -> None:
+    """Drop connections long unused that never caused any trouble."""
+    current = state.get("current_net") or state.get("current_ip")
+    kept = {}
+    for key, entry in (state.get("networks") or {}).items():
+        idle = _hours_since(entry.get("last_seen") or entry.get("first_seen"))
+        if (key == current or entry.get("blocks")
+                or idle is None or idle < NETWORK_FORGET_DAYS * 24):
+            kept[key] = entry
+    state["networks"] = kept
+
+
+def naming_key(state: dict, key=None) -> str:
+    """The identifier to put in EP_NETWORK_NAMES to name this connection.
+
+    The gateway MAC is what the watcher actually keys on, so it is offered
+    first; the gateway address is easier to recognise and works too. Printed
+    in the email about joining a connection, because that is the moment David
+    knows which network he is on and might want to name it — expecting him to
+    go and find a router MAC later is expecting too much.
+    """
+    key = key or state.get("current_net") or state.get("current_ip")
+    entry = (state.get("networks") or {}).get(key) or {}
+    return entry.get("gateway_mac") or entry.get("gateway") or entry.get("ip") or key or ""
+
+
+def is_named(state: dict, key=None) -> bool:
+    """Has David named this connection, as opposed to the watcher guessing?
+
+    Deliberately strict: only an explicit EP_NETWORK_NAMES entry or EP_HOME_IP
+    counts. A guessed name is often right and always worth showing, but it is
+    still a guess, and offering to replace it costs nothing while pretending
+    it is settled could leave two connections sharing one name.
+    """
+    key = key or state.get("current_net") or state.get("current_ip")
+    entry = (state.get("networks") or {}).get(key) or {}
+    for candidate in (key, entry.get("gateway_mac"), entry.get("gateway"), entry.get("ip")):
+        if candidate and str(candidate).lower() in config.NETWORK_NAMES:
+            return True
+    for address in entry.get("addresses") or []:
+        if str(address).lower() in config.NETWORK_NAMES:
+            return True
+    return bool(config.HOME_NETWORK_IP) and config.HOME_NETWORK_IP in (
+        key, entry.get("ip"), *(entry.get("addresses") or [])
+    )
+
+
+def known_networks(state: dict) -> list:
+    """[(label, key, searches, blocks, is_current)] for everything ever seen.
+
+    So an email can show the whole picture rather than only the connection in
+    use — which is the question that actually matters when one of them is
+    flagged and David has to choose a different one to buy on.
+    """
+    current = state.get("current_net") or state.get("current_ip")
+    rows = []
+    for key, entry in (state.get("networks") or {}).items():
+        rows.append((
+            network_label(state, key),
+            key,
+            entry.get("searches", 0),
+            entry.get("blocks", 0),
+            key == current,
+        ))
+    # Current first, then busiest — the order someone reads them in.
+    return sorted(rows, key=lambda r: (not r[4], -r[2]))
 
 
 def other_network_label(state: dict) -> str:
-    return "phone hotspot" if network_label(state) == "home Wi-Fi" else "home Wi-Fi"
+    """What to suggest switching TO.
+
+    Names the cleanest connection the watcher already knows about, rather than
+    assuming there are exactly two of them. Falls back to the hotspot, which is
+    the one David can always produce on demand.
+    """
+    current = state.get("current_net") or state.get("current_ip")
+    others = [
+        (blocks, -searches, label)
+        for label, key, searches, blocks, is_current in known_networks(state)
+        if not is_current
+    ]
+    if not others:
+        return config.HOTSPOT_LABEL
+    return min(others)[2]
 
 
 def should_rotate_network(state: dict) -> tuple:
@@ -688,7 +916,7 @@ def should_rotate_network(state: dict) -> tuple:
     correlates with getting rate-limited, but the clock catches the case
     where the cadence has been slowed right down.
     """
-    if not state.get("current_ip"):
+    if not (state.get("current_net") or state.get("current_ip")):
         return False, ""
 
     hours = _hours_since(state.get("current_ip_since"))
@@ -750,29 +978,41 @@ def mark_network_emailed(state: dict) -> None:
 
 def network_status(state: dict) -> tuple:
     """Return (should_switch, headline, instruction) for the email."""
-    ip = state.get("current_ip")
+    ip = state.get("current_net") or state.get("current_ip")
     if not ip:
         return False, "Could not determine which connection is in use.", ""
 
     label = network_label(state)
     hours = _hours_since(state.get("current_ip_since")) or 0.0
     searches = state.get("searches_on_current_ip", 0)
-    headline = f"On {label} ({ip}) — {searches} searches over {hours:.1f}h."
+    # The public address, not the connection key — the key is a router MAC,
+    # which identifies the network precisely and means nothing to a reader.
+    address = state.get("current_ip") or "address unknown"
+    headline = f"On {label} ({address}) — {searches} searches over {hours:.1f}h."
 
     switch, reason = should_rotate_network(state)
     if not switch:
         return False, headline, "No need to change anything."
 
     other = other_network_label(state)
-    if other == "phone hotspot":
+    if other == config.HOTSPOT_LABEL:
         how = (
             "  On the MacBook: click the Wi-Fi icon in the menu bar and pick your\n"
             "  iPhone's Personal Hotspot. (On the phone: Settings > Personal Hotspot.)"
         )
-    else:
+    elif other == config.HOME_NETWORK_LABEL:
         how = (
             "  On the MacBook: click the Wi-Fi icon in the menu bar and pick your\n"
             "  home network again. You can turn the phone's hotspot back off."
+        )
+    else:
+        # Any other network the watcher has met. It cannot know how to join it,
+        # so it names it and gets out of the way — and says the choice is open,
+        # because any connection it has not seen before is equally good.
+        how = (
+            f"  On the MacBook: click the Wi-Fi icon in the menu bar and pick\n"
+            f"  {other}, your iPhone's Personal Hotspot, or any other network you\n"
+            f"  trust. The watcher recognises whatever it lands on."
         )
 
     return (
@@ -789,19 +1029,22 @@ def network_status(state: dict) -> tuple:
 
 
 def _block_entries(state: dict) -> list:
-    """Block history as (timestamp, ip) pairs, whatever shape it is on disk.
+    """Block history as (timestamp, ip, net) triples, whatever shape it is on disk.
 
-    Entries used to be bare ISO strings with no connection attached. Those are
-    read as belonging to no particular connection, and counted against
-    whichever one is current — the conservative reading, since over-warning
-    about the connection in use is much cheaper than staying quiet about it.
+    Three generations of entry have to be readable at once. The oldest are
+    bare ISO strings with no connection attached; then came {"at", "ip"}; now
+    {"at", "ip", "net"}, keyed on the connection rather than the address it
+    happened to hold at the time. An entry with no connection is read as
+    belonging to none, and counted against whichever one is current — the
+    conservative reading, since over-warning about the connection in use is
+    much cheaper than staying quiet about it.
     """
     out = []
     for entry in state.get("block_history", []):
         if isinstance(entry, dict):
-            out.append((entry.get("at"), entry.get("ip")))
+            out.append((entry.get("at"), entry.get("ip"), entry.get("net")))
         else:
-            out.append((entry, None))
+            out.append((entry, None, None))
     return out
 
 
@@ -830,20 +1073,22 @@ def record_block(state: dict, when=None) -> None:
         if last is not None and (now - last).total_seconds() < BLOCK_EPISODE_SECONDS:
             return
 
-    history.append((now.isoformat(), state.get("current_ip")))
+    key = state.get("current_net") or state.get("current_ip")
+    history.append((now.isoformat(), state.get("current_ip"), key))
     cutoff = utc_now() - timedelta(days=7)
     state["block_history"] = [
-        {"at": ts, "ip": ip} for ts, ip in history if (_parse(ts) or utc_now()) >= cutoff
+        {"at": ts, "ip": ip, "net": net}
+        for ts, ip, net in history if (_parse(ts) or utc_now()) >= cutoff
     ]
 
     # Also kept as a running per-connection tally, which survives the 7-day
-    # prune and answers "which of the two is burnt" at a glance.
-    ip = state.get("current_ip")
-    if ip:
+    # prune and answers "which of them is burnt" at a glance.
+    if key:
         networks = dict(state.get("networks", {}))
-        entry = networks.get(ip) or {"first_seen": utc_now().isoformat(), "searches": 0, "blocks": 0}
+        entry = networks.get(key) or {"first_seen": utc_now().isoformat(),
+                                      "searches": 0, "blocks": 0}
         entry["blocks"] = entry.get("blocks", 0) + 1
-        networks[ip] = entry
+        networks[key] = entry
         state["networks"] = networks
 
 
@@ -864,7 +1109,7 @@ def recent_blocks(state: dict, hours: float = 24.0, ip=ANY_IP) -> int:
     """
     if ip is ANY_IP:
         cutoff = utc_now() - timedelta(hours=hours)
-        return sum(1 for ts, _ in _block_entries(state)
+        return sum(1 for ts, _, _ in _block_entries(state)
                    if (_parse(ts) or cutoff) >= cutoff)
     mine, unknown = _block_counts(state, hours, ip)
     return mine + unknown
@@ -892,16 +1137,24 @@ def _block_counts(state: dict, hours: float, ip) -> tuple:
     """
     cutoff = utc_now() - timedelta(hours=hours)
     since = first_seen(state, ip)
+    # Addresses this connection has held. A block recorded before connections
+    # were identified names only an address, and that address may well belong
+    # to the connection being asked about — dropping it would quietly lose a
+    # week of history at the moment of the upgrade.
+    held = set((state.get("networks") or {}).get(ip, {}).get("addresses") or [])
     mine = unknown = 0
-    for ts, at_ip in _block_entries(state):
+    for ts, at_ip, at_net in _block_entries(state):
         when = _parse(ts)
         if when is None or when < cutoff:
             continue
-        if at_ip is None:
+        # The connection is the truth where it was recorded; the address is
+        # the fallback for entries written before connections were identified.
+        attributed = at_net or at_ip
+        if attributed is None:
             if since is not None and when < since:
                 continue
             unknown += 1
-        elif at_ip == ip:
+        elif attributed == ip or at_ip == ip or (at_ip and at_ip in held):
             mine += 1
     return mine, unknown
 
@@ -913,16 +1166,17 @@ def blocks_elsewhere(state: dict, hours: float = 24.0) -> list:
     the hotspot and it is clean" instead of leaving David to work out which of
     the two a block belonged to.
     """
-    current = state.get("current_ip")
+    current = state.get("current_net") or state.get("current_ip")
     cutoff = utc_now() - timedelta(hours=hours)
     counts = {}
-    for ts, at_ip in _block_entries(state):
-        if at_ip is None or at_ip == current:
+    for ts, at_ip, at_net in _block_entries(state):
+        attributed = at_net or at_ip
+        if attributed is None or attributed == current or at_ip == current:
             continue
         if (_parse(ts) or cutoff) < cutoff:
             continue
-        counts[at_ip] = counts.get(at_ip, 0) + 1
-    return [(network_label(state, ip), ip, n) for ip, n in sorted(counts.items())]
+        counts[attributed] = counts.get(attributed, 0) + 1
+    return [(network_label(state, key), key, n) for key, n in sorted(counts.items())]
 
 
 def connection_health(state: dict) -> tuple:
@@ -938,7 +1192,7 @@ def connection_health(state: dict) -> tuple:
     had collected. Advice that punishes the reader for following it is worse
     than none.
     """
-    ip = state.get("current_ip")
+    ip = state.get("current_net") or state.get("current_ip")
     day_mine, day_unknown = _block_counts(state, 24, ip)
     hour_mine, hour_unknown = _block_counts(state, 1, ip)
     day, hour = day_mine + day_unknown, hour_mine + hour_unknown

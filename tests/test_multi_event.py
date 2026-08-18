@@ -49,7 +49,7 @@ class FakeSMTP:
 
 smtplib.SMTP_SSL = FakeSMTP
 notify.requests = type("_NoPush", (), {"post": staticmethod(lambda *a, **kw: None)})()
-engine.network = type("_FixedIP", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1")})()
+engine.network = type("_Net", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1"), "fingerprint": staticmethod(lambda *a, **kw: {"key": "10.0.0.1", "ip": "10.0.0.1"})})()
 config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
 config.GMAIL_APP_PASSWORD = "test-password"
 config.NTFY_TOPIC = None

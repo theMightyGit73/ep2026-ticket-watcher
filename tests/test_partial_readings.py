@@ -62,7 +62,7 @@ smtplib.SMTP_SSL = FakeSMTP
 notify.requests = type("_NoPush", (), {"post": staticmethod(lambda *a, **kw: None)})()
 # The engine asks for the public IP on every poll to spot a network switch.
 # Left real, this suite would make live HTTP calls and depend on the internet.
-engine.network = type("_FixedIP", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1")})()
+engine.network = type("_Net", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1"), "fingerprint": staticmethod(lambda *a, **kw: {"key": "10.0.0.1", "ip": "10.0.0.1"})})()
 config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
 config.GMAIL_APP_PASSWORD = "test-password"
 config.NTFY_TOPIC = None

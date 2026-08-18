@@ -50,7 +50,7 @@ notify.requests = type("_NoPush", (), {"post": staticmethod(lambda *a, **kw: Non
 # Left real, this suite quietly made live HTTP calls to an IP-echo service on
 # every run — slow, flaky offline, and contradicting the claim at the top of
 # this file that it touches nothing.
-engine.network = type("_FixedIP", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1")})()
+engine.network = type("_Net", (), {"public_ip": staticmethod(lambda *a, **kw: "10.0.0.1"), "fingerprint": staticmethod(lambda *a, **kw: {"key": "10.0.0.1", "ip": "10.0.0.1"})})()
 config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
 config.GMAIL_APP_PASSWORD = "test-password"
 config.NTFY_TOPIC = None

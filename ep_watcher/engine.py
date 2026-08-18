@@ -116,11 +116,13 @@ def handle(reading: Reading, st: dict) -> None:
     if config.USE_BROWSER:
         # Captured before note_network overwrites it — the email has to be
         # able to say what was left, not only what was joined.
+        was_key = st.get("current_net") or st.get("current_ip")
         was_ip = st.get("current_ip")
-        was_label = state_mod.network_label(st) if was_ip else ""
-        was_blocks = state_mod.recent_blocks(st, 24, ip=was_ip) if was_ip else 0
-        if state_mod.note_network(st, network.public_ip()):
-            _announce_network(st, was_ip, was_label, was_blocks)
+        was_label = state_mod.network_label(st) if was_key else ""
+        was_blocks = state_mod.recent_blocks(st, 24, ip=was_key) if was_key else 0
+        change = state_mod.note_network(st, network.fingerprint())
+        if change:
+            _announce_network(st, change, was_ip, was_label, was_blocks)
 
     if reading.blocked:
         state_mod.record_block(st)
@@ -217,12 +219,20 @@ def handle(reading: Reading, st: dict) -> None:
     state_mod.reset_heartbeat(st)
 
 
-def _announce_network(st: dict, was_ip: str, was_label: str, was_blocks: int) -> None:
+def _announce_network(st: dict, change: str, was_ip: str, was_label: str,
+                      was_blocks: int) -> None:
     """Log and email that the watcher is now on a different connection.
 
     Only ever fires once per change: handle() runs per watched page, and by
     the time the second page is handled note_network() has already recorded
-    the new address, so it reports no change.
+    the new connection, so it reports no change.
+
+    `change` is "switched" or "readdressed", decided by whether the default
+    gateway changed rather than by comparing labels. The label comparison was
+    wrong in both directions — a carrier re-addressing a tether read as a
+    switch, and moving from the eir hotspot onto a Sky line on 2026-08-18 read
+    as a re-address, because with only two names available both were called
+    the same thing.
     """
     now_ip = st.get("current_ip")
     now_label = state_mod.network_label(st)
@@ -230,10 +240,10 @@ def _announce_network(st: dict, was_ip: str, was_label: str, was_blocks: int) ->
     # differently, because "you switched networks" would be a lie, and
     # rate-limited more tightly, because a flapping tether could otherwise
     # send this every few minutes.
-    readdressed = bool(was_label) and was_label == now_label
+    readdressed = change == "readdressed"
 
     print(
-        f"[{stamp()}] network changed — now on {now_label}"
+        f"[{stamp()}] network changed — now on {state_mod.describe_network(st)}"
         + (" (new address, same connection)" if readdressed else "")
     )
 
@@ -244,6 +254,10 @@ def _announce_network(st: dict, was_ip: str, was_label: str, was_blocks: int) ->
     switch, _, _ = state_mod.network_status(st)
     state_mod.mark_network_emailed(st)
     notify.network_switched(
+        now_detail=state_mod.describe_network(st),
+        known=state_mod.known_networks(st),
+        naming_key=state_mod.naming_key(st),
+        named=state_mod.is_named(st),
         now_label=now_label,
         now_ip=now_ip,
         was_label=was_label or "an unknown connection",

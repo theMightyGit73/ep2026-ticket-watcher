@@ -500,7 +500,8 @@ def session_summary(session: dict, to_mode: str, hours: float, settings,
 
 def network_switched(now_label: str, now_ip: str, was_label: str, was_ip: str,
                      health=None, was_blocks: int = 0, switch_after: str = "",
-                     readdressed: bool = False) -> None:
+                     readdressed: bool = False, now_detail: str = "",
+                     known=(), naming_key: str = "", named: bool = True) -> None:
     """Confirm, in writing, that the watcher moved to a different connection.
 
     The switch was already detected and logged, but only ever appeared in the
@@ -545,12 +546,38 @@ def network_switched(now_label: str, now_ip: str, was_label: str, was_ip: str,
 
     health_block = f"\n{_health_section(health)}\n" if health else ""
 
+    # Every connection the watcher has ever seen, and how each has fared. When
+    # one of them is flagged, the question is not "is this one bad" but "which
+    # one should I go and buy on" — and that needs the whole list.
+    seen_block = ""
+    if known:
+        rows = []
+        for label, _key, searches, blocks, is_current in known:
+            mark = "→" if is_current else " "
+            trouble = f", {blocks} block(s)" if blocks else ", no blocks"
+            rows.append(f"  {mark} {label} — {searches} searches{trouble}")
+        seen_block = "\nConnections this watcher knows:\n" + "\n".join(rows) + "\n"
+
+    # An unnamed connection still works perfectly; it is just described rather
+    # than named. Offer the exact line to name it, at the moment he knows
+    # which network it is — asking him to find a router MAC later would mean
+    # it never gets done.
+    naming_block = ""
+    if not named and naming_key:
+        naming_block = (
+            f"\nThe name above is the watcher's own guess. To set it yourself, add\n"
+            f"this to ~/.ep2026-watcher/env:\n\n"
+            f'  EP_NETWORK_NAMES="{naming_key}=whatever you call it"\n\n'
+            f"Separate several with commas. Nothing breaks if you never do it —\n"
+            f"this connection is already tracked and blamed on its own.\n"
+        )
+
     body = (
         f"Hi David,\n\n"
         f"{headline}\n\n"
         f"  Was : {was_label} ({was_ip or 'unknown'})\n"
-        f"  Now : {now_label} ({now_ip})\n"
-        f"{health_block}{left_block}\n"
+        f"  Now : {now_detail or now_label} ({now_ip})\n"
+        f"{health_block}{left_block}{seen_block}{naming_block}\n"
         f"What happens from here:\n"
         f"  · Request counters for this connection start from zero.\n"
         f"  · Every block from now on is recorded against this connection,\n"

@@ -73,9 +73,19 @@ def on(ip, state=None):
     return s
 
 
-def poll_on(s, ip):
-    """One handle() cycle with the IP lookup pinned, capturing any email."""
-    engine.network = type("_IP", (), {"public_ip": staticmethod(lambda *a, **kw: ip)})()
+def poll_on(s, seen):
+    """One handle() cycle with the connection pinned, capturing any email.
+
+    `seen` is either a bare address — the shape an older state file and an
+    API-only host both have, where the address IS the identity — or a full
+    fingerprint, where the gateway identifies the connection and the address
+    is free to change underneath it.
+    """
+    fp = seen if isinstance(seen, dict) else {"key": seen, "ip": seen}
+    engine.network = type("_Net", (), {
+        "public_ip": staticmethod(lambda *a, **kw: fp.get("ip")),
+        "fingerprint": staticmethod(lambda *a, **kw: dict(fp)),
+    })()
     sent.clear()
     engine.handle(
         Reading(source="stub", event_slug=A.slug, event_name=A.name,
@@ -140,7 +150,8 @@ for n in range(8):
     st.record_block(s, when=st.utc_now() - timedelta(minutes=50 - n * 5))
 st.note_network(s, HOME)
 sent.clear()
-engine._announce_network(s, was_ip=HOTSPOT, was_label="phone hotspot", was_blocks=8)
+engine._announce_network(s, "switched", was_ip=HOTSPOT,
+                        was_label="phone hotspot", was_blocks=8)
 # HOME is clean, so the health block should be calm...
 check_true("a clean destination is not alarming", "CAUTION" not in sent[-1]["Subject"])
 
@@ -149,7 +160,8 @@ st.note_network(s, HOME)
 for n in range(8):
     st.record_block(s, when=st.utc_now() - timedelta(minutes=50 - n * 5))
 sent.clear()
-engine._announce_network(s, was_ip=HOTSPOT, was_label="phone hotspot", was_blocks=0)
+engine._announce_network(s, "switched", was_ip=HOTSPOT,
+                        was_label="phone hotspot", was_blocks=0)
 check_true("landing on a rate-limited connection is in the subject",
            "CAUTION" in sent[-1]["Subject"])
 check_true("...and the body carries the full instructions",
@@ -158,9 +170,17 @@ check_true("...and the body carries the full instructions",
 print("\nA new address on the SAME connection is told differently")
 # The carrier re-addressing a tether is not something David did.
 
+# Same router, new public address. That is what the carrier actually does,
+# and it is only distinguishable from a real switch because the gateway is
+# the identity — the old code compared labels, so it called this a switch
+# whenever the two addresses happened to be labelled differently, and called
+# a genuine switch a re-address whenever they were labelled the same.
+TETHER = {"key": "aa:bb:cc:dd:ee:01", "gateway": "172.20.10.1",
+          "port": "Wi-Fi", "subnet": "172.20.10.x", "hotspot": True}
+
 s = dict(st._defaults())
-st.note_network(s, HOTSPOT)
-mails = poll_on(s, HOTSPOT2)
+st.note_network(s, dict(TETHER, ip=HOTSPOT))
+mails = poll_on(s, dict(TETHER, ip=HOTSPOT2))
 check("it is still reported", len(mails), 1)
 text = body()
 check_true("but not as a switch he made", "switched" not in text.lower())

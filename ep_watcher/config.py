@@ -385,9 +385,46 @@ MAC_SILENT_HOURS = float(os.environ.get("EP_MAC_SILENT_HOURS", "1.5"))
 NETWORK_ROTATE_HOURS = float(os.environ.get("EP_ROTATE_HOURS", "3"))
 NETWORK_ROTATE_SEARCHES = int(os.environ.get("EP_ROTATE_SEARCHES", "30"))
 
-# Optional. If set, this IP is labelled "home Wi-Fi" in the emails. Left
-# unset, the first connection the watcher ever sees is assumed to be home,
-# which is right if you start it at home.
+# ── Naming the connections ───────────────────────────────────────────────────
+# The watcher recognises any number of connections, not two. It identifies one
+# by the default gateway's MAC address — see network.py for why the Wi-Fi SSID
+# cannot be used — and learns each new one as the MacBook joins it.
+#
+# Naming is optional. An unnamed connection is still tracked, counted and
+# blamed correctly; it is just described by its private range ("the
+# 192.168.0.x network") instead of by a name. Two get guessed at: a gateway on
+# 172.20.10.x or an iPhone USB port is called the hotspot, and the first
+# connection the watcher ever sees is called home.
+#
+# To name one, put "key=Label" pairs here, comma separated. The key may be the
+# gateway MAC, the gateway IP, or the public IP — whichever you have to hand;
+# every "you are on a different connection" email prints the key to use.
+#
+#   EP_NETWORK_NAMES="9c:31:c3:93:d1:b1=home Wi-Fi,172.20.10.1=David's hotspot"
+def _parse_network_names(raw: str) -> dict:
+    names = {}
+    for pair in (raw or "").split(","):
+        key, sep, label = pair.partition("=")
+        key, label = key.strip().lower(), label.strip()
+        if sep and key and label:
+            # MACs are normalised the same way network.gateway_mac() does, so
+            # a name written with unpadded octets still matches.
+            if key.count(":") == 5:
+                key = ":".join(part.zfill(2) for part in key.split(":"))
+            names[key] = label
+    return names
+
+
+NETWORK_NAMES = _parse_network_names(os.environ.get("EP_NETWORK_NAMES", ""))
+
+# What to call the two the watcher can guess at.
+HOME_NETWORK_LABEL = os.environ.get("EP_HOME_LABEL", "home Wi-Fi")
+HOTSPOT_LABEL = os.environ.get("EP_HOTSPOT_LABEL", "David's hotspot")
+
+# Optional, and now legacy: if set, a connection using this public IP is
+# labelled home. Superseded by EP_NETWORK_NAMES, which is keyed on something
+# that does not change every time a carrier re-addresses a tether — but it is
+# still honoured, because it is set in the running deployment.
 HOME_NETWORK_IP = os.environ.get("EP_HOME_IP")
 
 # Throw the browser profile away and rebuild it after this many minutes.
