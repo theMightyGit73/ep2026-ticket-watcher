@@ -228,9 +228,14 @@ class HoldResult:
     #: Why not, in words fit for an alert. Empty when secured.
     reason: str = ""
     notes: List[str] = field(default_factory=list)
-    #: Roughly how long he has, for wording only. Ticketmaster does not
-    #: publish the number and we do not scrape it.
+    #: How long he has, for wording only. Read off the checkout page's own
+    #: countdown when one is visible, otherwise config.HOLD_MINUTES_HINT.
     minutes_hint: int = 0
+    #: True when minutes_hint was read from the page rather than estimated.
+    #: The alert says which, because "you have about ten minutes" and "the
+    #: page says 11:39" deserve different amounts of trust — and the estimate
+    #: comes from one observation of an entirely different event.
+    minutes_measured: bool = False
 
     def note(self, text: str) -> None:
         self.notes.append(text)
@@ -432,7 +437,18 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
 
         if _basket_is_live(page, BASKET_MARKERS):
             result.secured = True
-            result.minutes_hint = config.HOLD_MINUTES_HINT
+            # Prefer the clock on the page over the configured guess. The
+            # guess comes from one observation of a different event, and a
+            # number telling David how long he has should be measured when it
+            # can be.
+            seen = read_countdown_minutes(page)
+            if seen is not None:
+                result.minutes_hint = int(seen)
+                result.minutes_measured = True
+                result.note(f"countdown read from the page: {seen:.1f} min")
+            else:
+                result.minutes_hint = config.HOLD_MINUTES_HINT
+                result.note("no countdown visible — using the configured estimate")
             result.note("BASKET CONFIRMED — the ticket is held; stopping here")
             # Bring it to the front so the machine he walks to is already
             # showing the thing he has to finish.
@@ -560,6 +576,64 @@ def is_forbidden(label: str) -> bool:
     """
     lowered = (label or "").strip().lower()
     return any(bad in lowered for bad in FORBIDDEN_BUTTONS)
+
+
+#: The countdown Ticketmaster puts on a live checkout, e.g. "11:39".
+#:
+#: Read rather than assumed. The hold length is the one number David has to
+#: act on and it is not published; the 11:39 observed on 2026-08-19 came from
+#: a different event, and there is no reason a festival resale listing must
+#: get the same window as a boxing match at Croke Park. So the alert says the
+#: real number when it can see one, and falls back to the configured estimate
+#: only when it cannot.
+COUNTDOWN_RE = __import__("re").compile(r"\b([0-9]{1,2}):([0-5][0-9])\b")
+
+
+
+#: Longest hold worth believing. The one observed was 11:39; a match above
+#: this is far more likely to be an event time than a countdown.
+COUNTDOWN_MAX_MINUTES = 20
+
+
+def read_countdown_minutes(page) -> Optional[float]:
+    """Minutes left on the checkout clock, read off the page. None if absent.
+
+    Position first, because a checkout page is full of times that are not the
+    hold — the event's own start time most of all. On the captured page the
+    countdown was the first thing on it, and "Sat, 5 Sept 2026, 16:00" was
+    further down. Reading the smallest mm:ss anywhere seemed reasonable until
+    it was tested: 16:00 parses as sixteen minutes, which is entirely
+    plausible for a hold, so a later event would have been reported as the
+    time remaining. It only worked on the real page by luck, because 11:39
+    happened to be smaller.
+
+    So: take the first clock near the top of the page. Failing that, fall back
+    to the smallest one that could be a hold, ignoring anything landing
+    exactly on the minute — event times are written 16:00 and 19:30, and a
+    countdown is only there for one second in sixty. Getting this wrong in
+    the cautious direction costs the estimate instead of a measurement.
+    """
+    try:
+        text = page.inner_text("body") or ""
+    except Exception:
+        return None
+
+    # A countdown stands alone on its line. Every other time on a checkout is
+    # embedded in a sentence — "Sat, 5 Sept 2026, 16:00", "Doors 19:00" — and
+    # 16:00 parses as a perfectly plausible sixteen-minute hold, so matching
+    # anywhere in the text reports the event's start time as the time
+    # remaining. On the page captured on 2026-08-19 the countdown was alone on
+    # its own line, printed twice, above the word "Checkout".
+    best = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        match = COUNTDOWN_RE.fullmatch(stripped)
+        if not match:
+            continue
+        minutes = int(match.group(1)) + int(match.group(2)) / 60.0
+        if 0 < minutes <= COUNTDOWN_MAX_MINUTES and (best is None or minutes < best):
+            best = minutes
+    return best
 
 
 def _page_says(page, markers, all_of: bool = False) -> bool:

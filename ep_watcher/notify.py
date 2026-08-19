@@ -286,6 +286,26 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     )
 
 
+def _clock_line(hold, minutes: int) -> str:
+    """How long he has, and how much to trust the number.
+
+    A measured countdown and an estimate deserve different wording. The
+    estimate comes from a single observation of an entirely different event —
+    a boxing match at Croke Park — and David said plainly he would not trust
+    another event's timer, which is right.
+    """
+    if getattr(hold, "minutes_measured", False):
+        return (
+            f"THE PAGE ITSELF SAYS {minutes} MINUTES — that is its own countdown,\n"
+            f"read at the moment the ticket was held, not an estimate.\n\n"
+        )
+    return (
+        f"You probably have around {minutes} minutes, but treat that as a guess:\n"
+        f"no countdown could be read from the page, and the figure comes from\n"
+        f"a different event's checkout. Assume less rather than more.\n\n"
+    )
+
+
 def secured_hold(reading: Reading, hold) -> None:
     """A resale listing is sitting in a basket, signed in as David, right now.
 
@@ -316,8 +336,9 @@ def secured_hold(reading: Reading, hold) -> None:
         f"Do NOT try to pick this up on your phone. The hold lives in that\n"
         f"browser's session — any other device gets an empty basket, and the\n"
         f"hold dies while you look at it.\n\n"
-        f"You have roughly {minutes} minutes. The watcher will not pay for it:\n"
-        f"it stops at the basket, every time, by design.\n\n"
+        f"{_clock_line(hold, minutes)}"
+        f"The watcher will not pay for it: it stops at the basket, every\n"
+        f"time, by design.\n\n"
         f"WHAT THE CHECKOUT PAGE WILL ASK YOU — from a real one captured on\n"
         f"2026-08-19, so you are not reading it for the first time in a hurry.\n"
         f"Three of these are compulsory and the page will refuse to submit\n"

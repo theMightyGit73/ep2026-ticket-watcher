@@ -97,12 +97,22 @@ check("the tick is the shortest gap any page can draw", config.poll_interval(),
 # the mean gap there fell from 360s to 270s. The 20/hour line is the one that
 # actually matters — it is what drew a block in development — and this stays
 # under it, but by less room than before.
-check("total volume reflects the 3-6 minute standard page",
-      round(config.searches_per_hour()), 15)
-check_true("still under the ~20/hour that drew a block",
-           config.searches_per_hour() < 20)
-check_true("and not creeping towards it unnoticed",
-           config.searches_per_hour() <= 16)
+# One number stopped describing the cadence on 2026-08-19, when the day was
+# split into peak, off-peak and night. The instantaneous rate is what has to
+# stay under the ~20/hour that drew a block; the daily total is what says
+# whether the split actually cost anything.
+check_true("the busiest hour stays under the ~20/hour that drew a block",
+           config.peak_searches_per_hour() < 20)
+check_true("and is not creeping towards it unnoticed",
+           config.peak_searches_per_hour() <= 18)
+check_true("the quiet hours really are quieter",
+           config.searches_per_hour_at(3) < config.searches_per_hour_at(14))
+# The peak window is a REDISTRIBUTION, not a raise. The day must not cost
+# more than the flat 3-6 minute cadence it replaced (~274 searches).
+check_true("a day costs no more than the flat cadence did",
+           config.searches_per_day() <= 280)
+check_true("and is not so cheap that something has broken",
+           config.searches_per_day() >= 200)
 
 # Weighted by yield, not split evenly. Eight of the nine resale sightings
 # between 13 and 18 August were on the standard page and one on the instalment

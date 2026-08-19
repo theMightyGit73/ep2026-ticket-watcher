@@ -20,7 +20,12 @@ class Event:
 
     def __init__(self, slug: str, name: str, url: str, match_words=(),
                  tm_event_id: str = "", poll_seconds: int = 0,
-                 poll_min_seconds: int = 0, poll_max_seconds: int = 0):
+                 poll_min_seconds: int = 0, poll_max_seconds: int = 0,
+                 peak_min_seconds: int = 0, peak_max_seconds: int = 0,
+                 offpeak_min_seconds: int = 0, offpeak_max_seconds: int = 0):
+        self.peak_min_seconds, self.peak_max_seconds = peak_min_seconds, peak_max_seconds
+        self.offpeak_min_seconds = offpeak_min_seconds
+        self.offpeak_max_seconds = offpeak_max_seconds
         self.slug = slug
         self.name = name
         self.url = url
@@ -55,7 +60,20 @@ class Event:
             self.poll_seconds = poll_seconds or DEFAULT_EVENT_POLL_SECONDS
             self.poll_min_seconds = self.poll_max_seconds = self.poll_seconds
 
-    def next_gap(self) -> int:
+    def gap_range(self, now=None) -> tuple:
+        """(min, max) seconds for this page at this time of day.
+
+        Peak and off-peak are the same budget spent differently, not extra
+        spending — see PEAK_START_HOUR. A page with no peak range configured
+        simply keeps its ordinary one all day.
+        """
+        if is_peak(now) and self.peak_min_seconds:
+            return self.peak_min_seconds, self.peak_max_seconds
+        if not is_peak(now) and self.offpeak_min_seconds:
+            return self.offpeak_min_seconds, self.offpeak_max_seconds
+        return self.poll_min_seconds, self.poll_max_seconds
+
+    def next_gap(self, now=None) -> int:
         """How long to wait before searching this page again.
 
         Drawn ONCE per search and then stored on the event's state — never
@@ -65,9 +83,20 @@ class Event:
         so the effective interval is the minimum of many draws rather than a
         sample from the range. See state.note_event_polled().
         """
-        if self.poll_max_seconds <= self.poll_min_seconds:
-            return self.poll_min_seconds
-        return random.randint(self.poll_min_seconds, self.poll_max_seconds)
+        lo, hi = self.gap_range(now)
+        if hi <= lo:
+            return lo
+        return random.randint(lo, hi)
+
+    @property
+    def fastest_gap_seconds(self) -> int:
+        """The shortest gap this page could ever draw, across every window.
+
+        What the watch loop's tick has to keep up with. Taking only the
+        ordinary range would leave the peak window's faster draws unreachable.
+        """
+        return min(g for g in (self.poll_min_seconds, self.peak_min_seconds,
+                               self.offpeak_min_seconds) if g)
 
     @property
     def searches_per_hour(self) -> float:
@@ -114,6 +143,56 @@ class Event:
 # still under that line, but by less than it was.
 STANDARD_POLL_MIN_SECONDS = int(os.environ.get("EP_STANDARD_POLL_MIN", "180"))
 STANDARD_POLL_MAX_SECONDS = int(os.environ.get("EP_STANDARD_POLL_MAX", "360"))
+
+# Sellers keep daylight hours, so the watcher should too.
+#
+# David suggested 15:00-22:00 on 2026-08-19. The eight resale sightings
+# recorded to that date say the productive window is wider and earlier — all
+# eight fell between 08:00 and 20:00 local, and none overnight:
+#
+#     08:49  10:09  11:35  14:14  14:32  17:02  18:33  19:57   (local)
+#
+# Measured as sightings-per-hour-of-clock, 10:00-20:00 is the best window
+# available: 7 of 8 in 42% of the day, an enrichment of 2.1x. His 15:00-22:00
+# holds only 3 of 8, an enrichment of 1.29x. Eight is a small number and this
+# should be revisited as more arrive — hence the environment variables.
+#
+# The budget is REDISTRIBUTED, not increased. Off-peak daytime slows down by
+# as much as the peak speeds up, so the day's total is about 248 searches
+# against the 274 the flat cadence was spending. Peak instantaneous load is
+# ~17/hour, still under the ~20/hour that drew a block in development.
+PEAK_START_HOUR = int(os.environ.get("EP_PEAK_START_HOUR", "10"))
+PEAK_END_HOUR = int(os.environ.get("EP_PEAK_END_HOUR", "20"))
+
+STANDARD_PEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MIN", "180"))
+STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "300"))
+STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "300"))
+STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "600"))
+
+INSTALMENT_PEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MIN", "1200"))
+INSTALMENT_PEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MAX", "2400"))
+INSTALMENT_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MIN", "2400"))
+INSTALMENT_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MAX", "3600"))
+
+
+def is_peak(now=None) -> bool:
+    """Is it currently the window in which listings actually appear?
+
+    Local time, like is_night(), because sellers keep local hours. Night wins
+    over peak if the two are ever configured to overlap — the overnight
+    slowdown exists to keep the watcher quiet while nobody is listing, and a
+    peak window should never be able to undo that.
+    """
+    from datetime import datetime
+
+    if is_night(now):
+        return False
+    hour = (now or datetime.now()).hour
+    if PEAK_START_HOUR == PEAK_END_HOUR:
+        return False
+    if PEAK_START_HOUR < PEAK_END_HOUR:
+        return PEAK_START_HOUR <= hour < PEAK_END_HOUR
+    return hour >= PEAK_START_HOUR or hour < PEAK_END_HOUR
 # The instalment plan is randomised too, around its existing 30-minute mean.
 # One of the nine sightings to date was on this page, so it keeps its small
 # share of the budget; the range only stops it being predictable.
@@ -139,6 +218,10 @@ EVENTS = [
         tm_event_id=os.environ.get("TM_EVENT_ID", "18006314BD813D3E"),
         poll_min_seconds=STANDARD_POLL_MIN_SECONDS,
         poll_max_seconds=STANDARD_POLL_MAX_SECONDS,
+        peak_min_seconds=STANDARD_PEAK_MIN_SECONDS,
+        peak_max_seconds=STANDARD_PEAK_MAX_SECONDS,
+        offpeak_min_seconds=STANDARD_OFFPEAK_MIN_SECONDS,
+        offpeak_max_seconds=STANDARD_OFFPEAK_MAX_SECONDS,
     ),
     # The instalment-plan listing for the same festival. A separate page with
     # its own inventory and its own resale panel, so it needs watching in its
@@ -154,6 +237,10 @@ EVENTS = [
         match_words=("electric picnic", "weekend", "instalment"),
         poll_min_seconds=INSTALMENT_POLL_MIN_SECONDS,
         poll_max_seconds=INSTALMENT_POLL_MAX_SECONDS,
+        peak_min_seconds=INSTALMENT_PEAK_MIN_SECONDS,
+        peak_max_seconds=INSTALMENT_PEAK_MAX_SECONDS,
+        offpeak_min_seconds=INSTALMENT_OFFPEAK_MIN_SECONDS,
+        offpeak_max_seconds=INSTALMENT_OFFPEAK_MAX_SECONDS,
     ),
 ]
 
@@ -400,7 +487,37 @@ def poll_interval() -> int:
     # the mean it could not honour a low draw: a page that drew 180s would not
     # be looked at until the next tick at 270s, and the bottom half of every
     # range would be silently unreachable.
-    return min(e.poll_min_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
+    return min(e.fastest_gap_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
+
+
+def searches_per_hour_at(hour: int) -> float:
+    """Searches an hour across every page, at a given local hour.
+
+    Now that the cadence has three windows, one number cannot describe it.
+    This is the instantaneous rate — the one that has to stay under the
+    ~20/hour that drew a block — and searches_per_day() is the one that says
+    what the day actually costs.
+    """
+    from datetime import datetime
+
+    when = datetime(2000, 1, 1, hour % 24, 30)
+    total = 0.0
+    for event in EVENTS:
+        lo, hi = event.gap_range(when)
+        if is_night(when) and NIGHT_POLL_SECONDS:
+            lo = hi = max(NIGHT_POLL_SECONDS, lo)
+        total += 3600.0 / ((lo + hi) / 2.0)
+    return total
+
+
+def peak_searches_per_hour() -> float:
+    """The busiest hour of the day — the number that must stay under ~20."""
+    return max(searches_per_hour_at(h) for h in range(24))
+
+
+def searches_per_day() -> float:
+    """What a full day actually costs, across all three windows."""
+    return sum(searches_per_hour_at(h) for h in range(24))
 
 
 def searches_per_hour() -> float:

@@ -425,5 +425,52 @@ check_true("but stays under the 11:39 actually seen",
            config.HOLD_MINUTES_HINT <= 11)
 
 
+print("\nThe countdown is read from the page, not assumed")
+# David's point on 2026-08-19: the hold length was observed on a boxing match
+# at Croke Park, and there is no reason a festival resale listing gets the
+# same window. So the real clock is read when it is there, and the alert says
+# which of the two numbers he is looking at.
+check("the real countdown is read", buyer.read_countdown_minutes(
+    FakePage([], CHECKOUT_PAGE)), 11 + 39 / 60.0)
+check("a page with no clock reads None",
+      buyer.read_countdown_minutes(FakePage([], "Checkout\nPlace Order")), None)
+check("an unreadable page reads None", buyer.read_countdown_minutes(object()), None)
+
+# The trap this got wrong first time. A checkout shows the event's own start
+# time, and "16:00" parses as a perfectly plausible sixteen-minute hold — so
+# matching anywhere in the text reported the gig time as the time remaining.
+# It only worked on the real page by luck, because 11:39 happened to be
+# smaller. A countdown stands ALONE on its line; every other time is embedded
+# in a sentence.
+check("an event start time embedded in a line is not the hold clock",
+      buyer.read_countdown_minutes(
+          FakePage([], "Sat, 5 Sept 2026, 16:00\nPlace Order")), None)
+check("nor are door times",
+      buyer.read_countdown_minutes(
+          FakePage([], "Doors 19:00\nStarts 20:00\nPlace Order")), None)
+check("but a countdown on its own line beside them is found",
+      buyer.read_countdown_minutes(
+          FakePage([], "Sat, 5 Sept 2026, 16:00\n04:12\nPlace Order")),
+      4 + 12 / 60.0)
+check("and where it appears twice, both agree",
+      buyer.read_countdown_minutes(FakePage([], "11:39\nCheckout\n11:39")),
+      11 + 39 / 60.0)
+check("a clock too long to be a hold is ignored",
+      buyer.read_countdown_minutes(FakePage([], "45:17")), None)
+check("whitespace around it does not matter",
+      buyer.read_countdown_minutes(FakePage([], "   09:05   ")), 9 + 5 / 60.0)
+
+print("\nThe alert distinguishes a measured clock from a guess")
+measured = buyer.HoldResult(secured=True, minutes_hint=11, minutes_measured=True)
+guessed = buyer.HoldResult(secured=True, minutes_hint=10, minutes_measured=False)
+check_true("a measured clock is stated as fact",
+           "own countdown" in notify._clock_line(measured, 11))
+check_true("and names the number", "11 MINUTES" in notify._clock_line(measured, 11))
+check_true("a guess is flagged as one",
+           "guess" in notify._clock_line(guessed, 10).lower())
+check_true("and tells him to assume less",
+           "assume less" in notify._clock_line(guessed, 10).lower())
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
