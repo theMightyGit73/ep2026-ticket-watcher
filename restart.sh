@@ -27,7 +27,24 @@ for label in "$WATCHER" "$WATCHDOG"; do
 done
 # A hung Chrome can outlive its parent and hold the profile lock, which makes
 # the next start fail in a confusing way. Clear it out.
-pkill -f "ep2026-watcher/chrome-profile" 2>/dev/null || true
+#
+# The WATCHER's profile only, and the anchor on the end of that pattern is
+# load-bearing. `pkill -f` matches a substring of the whole command line, so a
+# bare "ep2026-watcher/chrome-profile" also matched chrome-profile-buy — the
+# signed-in browser that is deliberately left open while a basket is held,
+# because closing it is exactly what releases the hold. This script is what
+# `doctor` prints as the fix for half its failure lines, so running it during
+# a live hold would have thrown away the ticket the watcher had just caught.
+# Verified against a real process on 2026-08-19: the bare pattern matches a
+# chrome-profile-buy command line, the anchored one does not.
+pkill -f "ep2026-watcher/chrome-profile( |$)" 2>/dev/null || true
+
+# Say so rather than leaving it a mystery. An open buying browser is almost
+# always the previous hold waiting to be paid for, and it must survive this.
+if pgrep -f "ep2026-watcher/chrome-profile-buy" >/dev/null 2>&1; then
+    echo "  note: the buying browser is open and has been left alone."
+    echo "        If a ticket is held in it, finish that checkout first."
+fi
 sleep 2
 
 say "Installing LaunchAgents"

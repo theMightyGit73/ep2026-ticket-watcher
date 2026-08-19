@@ -851,6 +851,22 @@ def mac_watcher_silent(hours: float) -> None:
     definition the Mac is the thing that stopped. It goes out from GitHub's
     infrastructure, which is why it survives a shut lid, a flat battery or a
     dropped Wi-Fi connection.
+
+    Which is also why it must not print config.REPO_DIR. Every other message
+    in this module is written on the Mac, where REPO_DIR is the right answer;
+    this one is written on a GitHub runner, where it is the runner's checkout.
+    David received exactly that on 2026-08-19 — an alert telling him to `cd`
+    into /home/runner/work/... on his laptop — and this is the one alert that
+    reaches him when he is away from the machine and can only act on what the
+    email says. See config.MAC_REPO_DIR.
+
+    A caveat worth carrying in the wording: "has not checked in" means no
+    heartbeat arrived, which is not the same as the Mac being off. The beacon
+    travels over ntfy, and on 2026-08-19 ntfy rate-limited this client for 2.8
+    hours and produced this very email about a watcher that was running
+    perfectly and had just completed its 800th check. So the message now says
+    what it actually knows and gives him a way to tell the two apart from his
+    phone.
     """
     subject = "EP2026: your Mac watcher has gone quiet"
     body = (
@@ -863,9 +879,17 @@ def mac_watcher_silent(hours: float) -> None:
         f"re-release. It cannot see a Verified Resale listing, which is how a\n"
         f"ticket has actually appeared so far. So right now you have much less\n"
         f"cover than you think.\n\n"
+        f"What this actually means: no heartbeat has arrived. That is usually\n"
+        f"a stopped Mac, but it is not the same thing — the heartbeat travels\n"
+        f"over ntfy, and if ntfy is rate-limiting or down, a perfectly healthy\n"
+        f"watcher goes silent from here. That happened on 2026-08-19.\n\n"
+        f"To tell the two apart without getting up: if the hourly \"still\n"
+        f"nothing\" emails are still arriving, the Mac is alive and it is the\n"
+        f"heartbeat channel that is broken. If they have stopped too, the Mac\n"
+        f"really is down.\n\n"
         f"To fix, on the MacBook:\n\n"
         f"  1. Wake it, and make sure it is on Wi-Fi or the hotspot.\n"
-        f"  2. cd {config.REPO_DIR} && ./run_watcher.sh doctor\n"
+        f"  2. cd {config.MAC_REPO_DIR} && ./run_watcher.sh doctor\n"
         f"  3. If anything is wrong:  ./restart.sh\n\n"
         f"You should see this stop within about 15 minutes of the watcher\n"
         f"running again.\n\n"
@@ -1038,6 +1062,16 @@ def verify_push() -> tuple:
             headers={"Title": "EP2026 self-check", "Priority": "1", "Tags": "gear"},
             timeout=15,
         )
+        if resp.status_code == 429:
+            # Named specifically, because the fix is the opposite of the one
+            # printed for every other failure. A 429 means the topic is
+            # correct and the quota is spent; telling David to go and check
+            # NTFY_TOPIC sends him to edit a setting that is not wrong.
+            return False, (
+                "ntfy is rate-limiting this client (HTTP 429) — the topic is "
+                "fine and the quota is spent. Push will recover on its own; "
+                "email is unaffected"
+            )
         if resp.status_code != 200:
             return False, f"ntfy rejected the publish (HTTP {resp.status_code})"
     except requests.RequestException as exc:

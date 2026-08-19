@@ -243,5 +243,56 @@ check("the operational log is untouched", after, before)
 os.unlink(fixture)
 os.unlink(own_log)
 
+
+print("\nThe beacon is throttled, because it shares a quota with the alert")
+# Found live on 2026-08-19: `doctor` got HTTP 429 publishing its own check,
+# and the most recent beacon was 76 minutes old against a 90-minute deadline.
+# The Mac was publishing on every handled reading — about eighteen an hour, or
+# 450 a day — to answer a question asked once every 1.5 hours.
+#
+# The waste is not the point. ntfy is the FAST channel, the one that reaches a
+# phone in seconds when a listing appears, and every beacon is a request that
+# channel might have needed. Running the quota down proving the watcher is
+# well, and finding it empty when it has something to say, is backwards.
+import time as _time  # noqa: E402
+
+from ep_watcher import liveness as _liveness  # noqa: E402
+
+_was = _liveness._next_allowed
+try:
+    _liveness._next_allowed = 0.0
+    check("a watcher that has just started announces itself at once",
+          _liveness.due(), True)
+    now = _time.time()
+    _liveness._next_allowed = now + config.LIVENESS_INTERVAL_MINUTES * 60
+    check("and then goes quiet", _liveness.due(now + 1), False)
+    check("still quiet a minute later", _liveness.due(now + 60), False)
+    check("but speaks again after the interval",
+          _liveness.due(now + config.LIVENESS_INTERVAL_MINUTES * 60 + 1), True)
+
+    # The margin that matters: enough beacons inside one silence window that
+    # several can fail without the switch crying wolf.
+    per_window = (config.MAC_SILENT_HOURS * 60) / config.LIVENESS_INTERVAL_MINUTES
+    check(
+        f"at least three beacons fit inside the {config.MAC_SILENT_HOURS}h "
+        f"silence window (got {per_window:.0f})",
+        per_window >= 3, True,
+    )
+    # And it must still be far below what was being sent before.
+    check("which is far fewer than one per poll",
+          config.LIVENESS_INTERVAL_MINUTES * 60 > config.POLL_INTERVAL_SECONDS, True)
+
+    # A topic that is not configured must not be "due" forever, and must not
+    # pretend it published.
+    _was_topic, config.NTFY_TOPIC = config.NTFY_TOPIC, None
+    try:
+        check("with no topic there is nothing to publish",
+              _liveness.publish("x"), False)
+    finally:
+        config.NTFY_TOPIC = _was_topic
+finally:
+    _liveness._next_allowed = _was
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

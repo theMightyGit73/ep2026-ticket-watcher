@@ -125,6 +125,14 @@ jobs:
           NTFY_TOPIC:         ${{ secrets.NTFY_TOPIC }}
           GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          # The alert this step sends tells David to cd somewhere and run
+          # doctor, and it is the ONLY alert written on a runner rather than
+          # on the Mac. Without this it printed the runner's own checkout
+          # path — /home/runner/work/... — into an email whose whole purpose
+          # is to be actioned on a laptop, possibly from a phone. Set
+          # explicitly here as well as defaulted in config.py, so the reason
+          # is visible at the place that gets it wrong.
+          EP_MAC_REPO_DIR:    '~/SideProjects/EPTicketRefresher'
         run: python -m ep_watcher check-mac
 
       # State is cached rather than committed. The old workflow pushed a

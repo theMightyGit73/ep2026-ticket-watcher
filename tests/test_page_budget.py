@@ -48,6 +48,26 @@ def check_true(label, got):
 A = next(e for e in config.EVENTS if e.slug == "weekend-camping")
 B = next(e for e in config.EVENTS if e.slug == "weekend-camping-instalment")
 
+# Pin the clock windows for the whole file.
+#
+# Every gap in here comes from Event.gap_range(), which answers differently
+# depending on the hour: peak, off-peak, or overnight. Without pinning, this
+# file tested whichever cadence happened to be in force when it ran — so it
+# passed all afternoon and failed at 20:50 local, when the peak window closed
+# and the standard page's range moved from 300-540s to 600-900s. Three checks
+# went red against code that had not changed.
+#
+# That is worse than a broken test, because the suite now runs in CI on a
+# runner whose clock is nobody's local time: the failure would have looked
+# like a real regression and arrived at random.
+#
+# Peak covering the whole day, night disabled (start == end switches it off),
+# so gap_range() always returns the peak range — which is also what
+# poll_min_seconds/poll_max_seconds describe. The windows themselves are
+# tested in test_peak_hours.py and test_night_mode.py, against explicit times.
+config.PEAK_START_HOUR, config.PEAK_END_HOUR = 0, 24
+config.NIGHT_START_HOUR = config.NIGHT_END_HOUR = 0
+
 
 def fresh():
     return dict(st._defaults())

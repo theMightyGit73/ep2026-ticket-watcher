@@ -230,7 +230,18 @@ def handle(reading: Reading, st: dict) -> None:
         # ways; letting it run before the alert would mean a browser problem
         # could delay or swallow the one message this project exists to send.
         notify.available(reading, reason, new_listings)
-        _maybe_secure(reading)
+        hold = _maybe_secure(reading)
+        if hold is not None and hold.secured:
+            # The single most valuable line in this function. A basket lives
+            # in the browser this process launched, so anything that restarts
+            # the watcher throws the ticket away — and the watchdog restarts a
+            # watcher whose poll clock has stopped, which is exactly what a
+            # checkout looks like from outside. Writing the hold down is what
+            # tells it the difference. See state.note_hold().
+            minutes = config.hold_window_minutes(hold.minutes_hint)
+            state_mod.note_hold(st, minutes)
+            print(f"[{stamp()}] hold recorded — nothing will restart the "
+                  f"watcher for {minutes:.0f} min")
     # Keep what it was, not just that there was one. By the time the session
     # summary goes out the listing has almost certainly sold, and the count
     # alone cannot tell you what these actually go for.
@@ -405,8 +416,14 @@ def watchdog_reason(reading: Reading) -> str:
     return f"{cause}\n\n{coda}" if cause else coda
 
 
-def _maybe_secure(reading: Reading) -> None:
+def _maybe_secure(reading: Reading):
     """Try to hold a resale listing, if that has been switched on.
+
+    Returns the HoldResult when an attempt was made, or None when securing is
+    off, the page is watch-only, or there was no resale listing to act on. The
+    caller needs the difference: a hold that succeeded has to be written into
+    state so the watchdog does not restart the watcher and kill the browser
+    the basket lives in.
 
     Resale only. Primary stock reserves itself as a side effect of the search
     the watcher already does — that is what the RESERVE ACCEPTED path above
@@ -418,31 +435,39 @@ def _maybe_secure(reading: Reading) -> None:
     below it is allowed to break the poll loop.
     """
     if not config.SECURE_ON_FIND:
-        return
+        return None
     if reading.resale not in GOOD_STATUSES:
-        return
+        return None
 
-    # Per page, not just per watcher. The Early Entry Pass is an add-on that
-    # Ticketmaster says is only valid alongside a Weekend Ticket, so holding
-    # one automatically — under his account, with a countdown running, pulling
-    # him to the laptop — would spend his attention on something he cannot use
-    # until the ticket this project exists to find has been found. It is still
-    # watched and still alerted on.
+    # Which page is this, and may it be secured?
+    #
+    # Per page rather than per watcher, because "tell me about it" and "grab
+    # it for me" are not the same instruction — see Event.secure. All three
+    # pages are securable today. The Early Entry Pass was briefly excluded on
+    # the grounds that it is an add-on Ticketmaster only honours alongside a
+    # Weekend Ticket, so holding one would pull David to a checkout for
+    # something he cannot use on its own; he overruled that on 2026-08-19 and
+    # wants it treated as importantly as the ticket. The switch stays because
+    # the argument may return, and because a page added later may genuinely
+    # not deserve grabbing.
+    #
+    # Looked up once. This was two identical lookups either side of the
+    # listing check, the second of them unreachable in any case the first did
+    # not already cover — the kind of duplication that survives because both
+    # copies are correct, and then diverges the day one is edited.
     event = next((e for e in config.EVENTS if e.slug == reading.event_slug), None)
-    if event is not None and not event.secure:
+    if event is None:
+        print(f"[{stamp()}] cannot secure: no event matches {reading.event_slug!r}")
+        return None
+    if not event.secure:
         print(f"[{stamp()}] {event.slug}: alerting only — this page is not secured")
-        return
+        return None
 
     from . import buyer
 
     listing = next((l for l in reading.listings if l.kind == "resale"), None)
     if listing is None:
-        return
-
-    event = next((e for e in config.EVENTS if e.slug == reading.event_slug), None)
-    if event is None:
-        print(f"[{stamp()}] cannot secure: no event matches {reading.event_slug!r}")
-        return
+        return None
 
     print(f"[{stamp()}] listing found — opening the signed-in browser to hold it")
     hold = buyer.secure_in_thread(event, listing)
@@ -453,6 +478,7 @@ def _maybe_secure(reading: Reading) -> None:
     else:
         print(f"[{stamp()}] could not hold it: {hold.reason}")
         notify.secure_failed(reading, hold)
+    return hold
 
 
 def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:

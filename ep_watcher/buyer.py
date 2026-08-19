@@ -37,6 +37,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -302,6 +303,55 @@ def session_evidence(profile_dir=None) -> dict:
     return out
 
 
+def profile_in_use(profile_dir=None) -> bool:
+    """Is a Chrome already running on this profile directory?
+
+    Chrome takes an exclusive lock on a user-data-dir, and the buying browser
+    is deliberately LEFT OPEN after a successful hold, because closing it is
+    what drops the basket. Those two facts collide on the second find of a
+    busy afternoon: the first hold's window is still up, the profile is
+    locked, and Playwright fails with a message about a singleton lock that
+    says nothing about a ticket.
+
+    Six real listings appeared on 2026-08-18, and eight sightings fell inside
+    one day, so two finds inside a fifteen-minute hold window is an ordinary
+    Tuesday rather than a corner case.
+
+    Asked of the process table rather than of Chrome's own SingletonLock file
+    in the profile, which survives a crash and would report the profile busy
+    forever afterwards. Any error answers False: this gate must never be the
+    reason a real listing goes unheld, so when it cannot tell, the attempt
+    goes ahead and fails honestly on its own terms.
+    """
+    from pathlib import Path
+
+    profile_dir = Path(profile_dir or config.BUY_PROFILE_DIR)
+
+    # Anchored on the end of the argument, and that anchor is the whole
+    # correctness of this function. `pgrep -f` matches a substring of the
+    # command line, so an unanchored "user-data-dir=.../chrome-profile" also
+    # matches ".../chrome-profile-buy" — asking whether the WATCHER's profile
+    # was busy would have answered yes whenever the buying browser was open,
+    # and the poll loop would have reset a perfectly good profile. It is the
+    # same mistake restart.sh made in the other direction, found the same way,
+    # and caught here only because the test for this function asked about two
+    # profiles sharing a prefix.
+    #
+    # The path is escaped because it is a regular expression to pgrep, and a
+    # real one contains a dot: ".ep2026-watcher" would otherwise match
+    # "Xep2026-watcher" too.
+    specials = ".[]()*+?{}|^$\\"
+    quoted = "".join("\\" + ch if ch in specials else ch for ch in str(profile_dir))
+    try:
+        found = subprocess.run(
+            ["pgrep", "-f", f"user-data-dir={quoted}( |$)"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return found.returncode == 0 and bool(found.stdout.strip())
+
+
 @dataclass
 class HoldResult:
     """What came of trying to secure one listing."""
@@ -382,16 +432,20 @@ class BuySession:
         """
         self._session._set_quantity(qty, _NoteSink(result))
 
-    def signed_in(self) -> bool:
-        """Is this profile actually logged in?
-
-        Checked before clicking anything, because the failure mode otherwise
-        is silent: a signed-out session can reach a listing and then bounce to
-        a login wall with the ticket still unheld, which reads from the logs
-        as 'we tried and it was gone'.
-        """
-        text = self._session.visible_text().lower()
-        return "sign out" in text or "my account" in text
+    # There is deliberately no `signed_in()` method here.
+    #
+    # There was one, and it asked `"sign out" in page_text or "my account" in
+    # page_text` — the exact test the module header above shows was checked
+    # against every page capture the watcher has ever taken and found in none
+    # of them. Ticketmaster renders the account control somewhere Playwright's
+    # flattened inner_text cannot reach, so it answered "signed out" for a
+    # perfectly good session.
+    #
+    # By the time that was established the method had no callers, which made
+    # it more dangerous rather than less: dead code that looks like the
+    # obvious answer is what the next person reaches for. Ask
+    # session_evidence() instead — it reads the cookie database, and it is
+    # what secure(), doctor and check-buy all already use.
 
 
 def secure_in_thread(event, listing, timeout_s: int = None) -> HoldResult:
@@ -424,6 +478,21 @@ def secure_in_thread(event, listing, timeout_s: int = None) -> HoldResult:
 
     def run():
         session, hold = None, HoldResult()
+        # Before opening anything. A buying browser that is already up is
+        # almost always the previous hold still waiting to be paid for, and
+        # the right answer is to say so — not to fail on a profile lock, and
+        # certainly not to close the old window, which would drop a ticket
+        # that is already caught in order to chase one that is not.
+        if profile_in_use():
+            hold.reason = (
+                "the buying browser is already open — most likely holding an "
+                "earlier listing that has not been paid for yet. Finish or "
+                "close that window and this page can be secured by hand; "
+                "nothing was touched here."
+            )
+            hold.note(hold.reason)
+            box["result"] = hold
+            return
         try:
             session = BuySession().start()
             hold = secure(session, event, listing, hold)
@@ -769,42 +838,84 @@ COUNTDOWN_MAX_MINUTES = 20
 def read_countdown_minutes(page) -> Optional[float]:
     """Minutes left on the checkout clock, read off the page. None if absent.
 
-    Position first, because a checkout page is full of times that are not the
-    hold — the event's own start time most of all. On the captured page the
-    countdown was the first thing on it, and "Sat, 5 Sept 2026, 16:00" was
-    further down. Reading the smallest mm:ss anywhere seemed reasonable until
-    it was tested: 16:00 parses as sixteen minutes, which is entirely
-    plausible for a hold, so a later event would have been reported as the
-    time remaining. It only worked on the real page by luck, because 11:39
-    happened to be smaller.
+    Three rules, each earning its place, and all three are needed because a
+    checkout page is full of times that are not the hold — the event's own
+    start time most of all.
 
-    So: take the first clock near the top of the page. Failing that, fall back
-    to the smallest one that could be a hold, ignoring anything landing
-    exactly on the minute — event times are written 16:00 and 19:30, and a
-    countdown is only there for one second in sixty. Getting this wrong in
-    the cautious direction costs the estimate instead of a measurement.
+    1. WHOLE LINE ONLY. A countdown stands alone on its line; every other time
+       on a checkout is embedded in a sentence — "Sat, 5 Sept 2026, 16:00",
+       "Doors 19:00". Matching anywhere in the text reports the event's start
+       time as the time remaining, because 16:00 parses as a perfectly
+       plausible sixteen-minute hold. On the page captured on 2026-08-19 the
+       countdown was alone on its own line, printed twice, above the word
+       "Checkout".
+
+    2. NOT ON THE MINUTE. A time written mm:00 is almost always a clock rather
+       than a countdown: an event time is written 16:00, while a countdown
+       shows :00 for one second in sixty. Skipping those costs a measurement
+       once in every sixty holds and avoids reporting an event time as the
+       time remaining.
+
+    3. FIRST DOWN THE PAGE, not smallest. The captured page put the countdown
+       at the very top, and it is the page's own most prominent clock. This
+       used to take the smallest match anywhere instead, which worked on the
+       real page purely by luck — 11:39 happened to be smaller than everything
+       else on it — and would have preferred a stray "02:15" further down over
+       the genuine countdown above it.
+
+    Every rule fails towards None, and None means the alert uses
+    config.HOLD_MINUTES_HINT and says it is an estimate. Getting this wrong in
+    the cautious direction costs the measurement; getting it wrong the other
+    way tells David he has sixteen minutes when he has two.
+
+    One hole is left open knowingly: a bare "19:30" alone on a line would
+    still read as a 19½-minute hold. Nothing observed does that, and the only
+    fix would be to require the countdown to sit near a word like "left",
+    which no captured page reliably carries.
     """
     try:
         text = page.inner_text("body") or ""
     except Exception:
         return None
 
-    # A countdown stands alone on its line. Every other time on a checkout is
-    # embedded in a sentence — "Sat, 5 Sept 2026, 16:00", "Doors 19:00" — and
-    # 16:00 parses as a perfectly plausible sixteen-minute hold, so matching
-    # anywhere in the text reports the event's start time as the time
-    # remaining. On the page captured on 2026-08-19 the countdown was alone on
-    # its own line, printed twice, above the word "Checkout".
-    best = None
     for line in text.splitlines():
-        stripped = line.strip()
-        match = COUNTDOWN_RE.fullmatch(stripped)
+        match = COUNTDOWN_RE.fullmatch(line.strip())
         if not match:
             continue
-        minutes = int(match.group(1)) + int(match.group(2)) / 60.0
-        if 0 < minutes <= COUNTDOWN_MAX_MINUTES and (best is None or minutes < best):
-            best = minutes
-    return best
+        mins, secs = int(match.group(1)), int(match.group(2))
+        if secs == 0:
+            continue                      # a clock, not a countdown — see rule 2
+        minutes = mins + secs / 60.0
+        if 0 < minutes <= COUNTDOWN_MAX_MINUTES:
+            return minutes                # first one down the page — see rule 3
+    return None
+
+
+def describe_lapse(days_left) -> str:
+    """"in about 3 hours", "in 12 days", "already" — never "in 0 day(s)".
+
+    The old wording printed `days_left` rounded to one decimal and appended
+    "day(s)", so anything under about ninety minutes rendered as "0 day(s)" —
+    which is either alarming or meaningless depending on how closely it is
+    read, and is exactly the line that decides whether David goes and signs in
+    again before a listing appears. Seen for real in `doctor` on 2026-08-19.
+
+    Deliberately vague above a day and precise below one, because that is
+    where the accuracy is worth anything: "12 days" needs no action today,
+    "about 2 hours" does.
+    """
+    if days_left is None:
+        return "at an unknown time"
+    if days_left <= 0:
+        return "already"
+    hours = days_left * 24.0
+    if hours < 1.5:
+        return f"in about {max(1, int(round(hours * 60))) } minutes"
+    if days_left < 1:
+        return f"in about {hours:.0f} hours"
+    if days_left < 2:
+        return "in about a day"
+    return f"in about {days_left:.0f} days"
 
 
 def _page_says(page, markers, all_of: bool = False) -> bool:

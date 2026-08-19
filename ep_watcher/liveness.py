@@ -24,6 +24,7 @@ from typing import Optional
 import requests
 
 from . import config
+from .state import stamp
 
 #: Low priority and no tags: nothing about a heartbeat should ever buzz.
 _PRIORITY = "1"
@@ -35,15 +36,46 @@ def topic() -> Optional[str]:
     return f"{config.NTFY_TOPIC}-alive"
 
 
-def publish(note: str = "") -> bool:
+#: The earliest this process may publish again. Module-level rather than in
+#: state.json because it is genuinely per-process: a restarted watcher SHOULD
+#: announce itself immediately, since a restart is exactly the event the
+#: switch exists to notice, and launchd already throttles restarts to one a
+#: minute.
+_next_allowed = 0.0
+
+
+def due(now: float = None) -> bool:
+    """Is another beacon worth sending yet?
+
+    See config.LIVENESS_INTERVAL_MINUTES for why this is throttled at all, and
+    LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES for why a refusal pushes it out much
+    further than the ordinary interval.
+    """
+    return (time.time() if now is None else now) >= _next_allowed
+
+
+def publish(note: str = "", force: bool = False) -> bool:
     """Say "still here". Never raises, never blocks a poll for long.
 
     A failed heartbeat must not fail the check that carries it — the watcher
     finding a ticket matters more than the watcher announcing it is well.
+
+    Throttled, because the beacon and the ticket alert come out of the same
+    ntfy quota and the beacon was eating it. `force` is for the commands that
+    exist to prove the path works end to end, where skipping the send would
+    make the check meaningless.
     """
+    global _next_allowed
+
     t = topic()
     if not t:
         return False
+    if not (force or due()):
+        return False
+    # Held off before the attempt, not after. A failing ntfy must not turn
+    # into a retry on every single poll, which is the surest way to stay rate
+    # limited — the next scheduled beacon is soon enough.
+    _next_allowed = time.time() + config.LIVENESS_INTERVAL_MINUTES * 60
     try:
         resp = requests.post(
             f"https://ntfy.sh/{t}",
@@ -51,9 +83,28 @@ def publish(note: str = "") -> bool:
             headers={"Title": "ep2026-alive", "Priority": _PRIORITY},
             timeout=8,
         )
-        return resp.status_code == 200
     except requests.RequestException:
         return False
+
+    if resp.status_code == 429:
+        # Back a long way off, and say so once. Continuous requests hold a
+        # rate limiter empty; on 2026-08-19 a beacon retrying every three
+        # minutes kept ntfy refusing for 2.8 hours, which disabled the dead
+        # man's switch and produced a "your Mac has gone quiet" email about a
+        # watcher that was working perfectly.
+        #
+        # This is also the quota the ticket alert comes out of, so standing
+        # back is not politeness — it is leaving room for the one message
+        # this project exists to send.
+        _next_allowed = (
+            time.time() + config.LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES * 60)
+        print(f"[{stamp()}] ntfy is rate limiting this client (429) — pausing "
+              f"the liveness beacon for "
+              f"{config.LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES:.0f} min so the "
+              f"quota can recover for real alerts")
+        return False
+
+    return resp.status_code == 200
 
 
 def age_seconds() -> Optional[float]:

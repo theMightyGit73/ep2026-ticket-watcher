@@ -91,12 +91,27 @@ CHALLENGE_MARKERS = (
 )
 
 #: Text that means the credentials were rejected.
+#:
+#: Every phrase here has to mean "these credentials are wrong" and nothing
+#: else, because the consequence of a false positive is being told to change a
+#: password that was never the problem — and the honest response to that
+#: advice is to rotate a working credential and re-enter it by hand.
+#:
+#: "try again" was on this list and has been removed. It is the tail of half
+#: the transient errors a site can produce — "Something went wrong, please try
+#: again" is a server hiccup, not a refusal — and it also appears on challenge
+#: pages, where the correct outcome is "a human is needed" rather than "your
+#: password is wrong". Anything genuinely about credentials says so in the
+#: same sentence, which is what the remaining phrases require.
 REJECTED_MARKERS = (
     "incorrect",
     "does not match",
     "invalid email or password",
+    "invalid password",
+    "wrong password",
     "we cannot find an account",
-    "try again",
+    "no account associated",
+    "email or password you entered",
 )
 
 
