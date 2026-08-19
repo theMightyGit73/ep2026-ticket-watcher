@@ -445,20 +445,7 @@ def _maybe_secure(reading: Reading) -> None:
         return
 
     print(f"[{stamp()}] listing found — opening the signed-in browser to hold it")
-    session, hold = None, buyer.HoldResult()
-    try:
-        session = buyer.BuySession().start()
-        hold = buyer.secure(session, event, listing, hold)
-    except Exception as exc:
-        hold.reason = f"{type(exc).__name__}: {exc}"
-        print(f"[{stamp()}] secure attempt failed to start: {hold.reason}")
-    finally:
-        # Left OPEN on success: closing the browser is what drops the basket,
-        # and the whole point is that David walks to this window and pays in
-        # it. Closed on failure, because a signed-in Chrome nobody is going to
-        # use is just an idle session for Ticketmaster to fingerprint.
-        if session is not None and not hold.secured:
-            session.close()
+    hold = buyer.secure_in_thread(event, listing)
 
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")
