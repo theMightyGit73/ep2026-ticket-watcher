@@ -34,6 +34,71 @@ def _banner(title: str) -> None:
 
 # ── commands ─────────────────────────────────────────────────────────────────
 
+def cmd_login_auto(_args) -> int:
+    """Sign the buying profile in from stored credentials, no keyboard needed.
+
+    On the `automated-login` branch only, and opt-in there. `login-buy` is
+    still the supported path and needs no password to exist anywhere.
+
+    Verification is deliberately NOT the page's own say-so. Ticketmaster
+    renders no account text Playwright can read — established on 2026-08-19
+    against nine real captures — so success is judged the same way check-buy
+    judges it: did account cookies actually appear in the profile.
+    """
+    from . import autologin, buyer
+
+    _banner("Signing the BUYING profile in automatically")
+    print(f"  Profile: {config.BUY_PROFILE_DIR}")
+
+    if not config.have_login_credentials():
+        print("\n  [FAIL]  TM_EMAIL and TM_PASSWORD are not set.\n")
+        print("  Add them to ~/.ep2026-watcher/env — the file run_watcher.sh")
+        print("  sources, chmod 600. Never on the command line: an argument is")
+        print("  visible in `ps` to every process on this machine.\n")
+        print("      printf 'TM_EMAIL=you@example.com\\n' >> ~/.ep2026-watcher/env")
+        print("      read -rs P && printf 'TM_PASSWORD=%s\\n' \"$P\" >> ~/.ep2026-watcher/env")
+        print("      chmod 600 ~/.ep2026-watcher/env\n")
+        print("  `read -rs` keeps it off the screen and out of shell history.\n")
+        return 1
+
+    before = set(buyer.profile_cookies(config.BUY_PROFILE_DIR))
+    config.OFFSCREEN = False          # visible, so a challenge can be finished by hand
+    session = _browser().BrowserSession(headless=False, profile_dir=config.BUY_PROFILE_DIR)
+    try:
+        session.start()
+        result = autologin.sign_in(session)
+        # Cookies are written as the page settles; give Chrome a moment before
+        # reading them, the same reason login-buy waits before fingerprinting.
+        time.sleep(3)
+        gained = set(buyer.profile_cookies(config.BUY_PROFILE_DIR)) - before
+    finally:
+        session.close()
+
+    print()
+    if result.outcome == "challenged":
+        print(f"  [ -- ]  {result.reason}\n")
+        return 2
+    if result.outcome in ("rejected", "no-form", "error"):
+        print(f"  [FAIL]  {result.reason}\n")
+        return 1
+
+    record = buyer.record_signed_in_fingerprint(config.BUY_PROFILE_DIR)
+    auth = record.get("auth_cookies") or []
+    if not auth:
+        print("  [FAIL]  the form went through but no account cookies appeared.")
+        print("          That usually means the sign-in did not actually take.")
+        print("          Try `login-buy` and do it by hand.\n")
+        return 1
+
+    print(f"  [ OK ]  signed in — {len(auth)} account cookie(s) recorded")
+    for name in auth[:6]:
+        print(f"            · {name}")
+    if gained:
+        print(f"          ({len(gained)} cookie(s) are new since before the attempt)")
+    print("\n  Confirm any time with:  python -m ep_watcher check-buy\n")
+    return 0
+
+
 def cmd_check_buy(_args) -> int:
     """Is the buying profile signed in and ready to hold a ticket?
 
@@ -1080,6 +1145,7 @@ COMMANDS = {
     "login": cmd_login,
     "login-buy": cmd_login_buy,
     "check-buy": cmd_check_buy,
+    "login-auto": cmd_login_auto,
     "check": cmd_check,
     "run": cmd_run,
     "watch": cmd_watch,

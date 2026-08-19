@@ -480,6 +480,26 @@ SECURE_ON_FIND = os.environ.get("EP_SECURE_ON_FIND", "0").lower() in ("1", "true
 #: icon that this project has already established is invisible to Playwright's
 #: flattened text. Landing on a page with no visible next step is how a
 #: one-command setup turns into a support conversation.
+#: Credentials for the automated sign-in on the `automated-login` branch.
+#:
+#: From the environment ONLY, and only ever from ~/.ep2026-watcher/env, which
+#: is chmod 600 and sourced by run_watcher.sh. Never a literal here, never in
+#: a commit, never a command-line argument — an argument is visible in `ps`
+#: to every process on the machine.
+#:
+#: The manual `login-buy` remains the default and needs none of this. David
+#: asked for the automated path on 2026-08-19 for a secondary Yahoo account he
+#: described as disposable, having been told that scripted sign-ins are what
+#: account security is built to catch. That trade is his to make; it is the
+#: reason this is opt-in and on its own branch rather than the default.
+TM_EMAIL = os.environ.get("TM_EMAIL", "")
+TM_PASSWORD = os.environ.get("TM_PASSWORD", "")
+
+
+def have_login_credentials() -> bool:
+    return bool(TM_EMAIL and TM_PASSWORD)
+
+
 SIGNIN_URLS = tuple(
     u.strip() for u in os.environ.get(
         "EP_SIGNIN_URLS",
