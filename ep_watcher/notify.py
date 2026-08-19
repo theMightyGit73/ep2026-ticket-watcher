@@ -296,6 +296,49 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     )
 
 
+def _where_to_finish(hold) -> str:
+    """Where to go to pay, phone first when there is a link to try.
+
+    This alert used to say flatly "do NOT try to pick this up on your phone",
+    on the reasoning that a Ticketmaster basket lives in the session that
+    created it. That is certainly true of a signed-OUT session. It may well be
+    wrong for a signed-in one, where the cart can be bound to the account
+    server-side and follow him to any device he is signed in on. Nobody has
+    tested which applies here.
+
+    Being wrong in that direction is expensive and asymmetric. If the cart
+    does travel and the email told him not to try, the ticket is lost every
+    time he is away from the laptop. If it does not travel and he tries, he
+    sees an empty basket and walks to the laptop — which is what he would have
+    done anyway, minus a few seconds.
+
+    So the link goes first when there is one, described honestly as worth
+    trying rather than as the answer, with the laptop named as the certainty.
+    """
+    laptop = (
+        "THE LAPTOP DEFINITELY HAS IT. The Chrome window holding the ticket has\n"
+        "been brought to the front, signed in and sitting on the checkout page.\n"
+        "That one is not a maybe.\n\n"
+    )
+    url = getattr(hold, "checkout_url", "") or ""
+    if not url:
+        return (
+            "GO TO THE MACHINE RUNNING THE WATCHER.\n\n" + laptop +
+            "No checkout link could be captured this time, so the laptop is the\n"
+            "only way in.\n\n"
+        )
+    return (
+        f"TRY THIS ON YOUR PHONE FIRST — it may just work:\n\n"
+        f"{url}\n\n"
+        f"You must already be signed in to Ticketmaster on the phone, as the\n"
+        f"same account. If the basket is there, pay and you are done.\n\n"
+        f"IF IT SHOWS AN EMPTY BASKET, stop and go to the laptop. That means\n"
+        f"the hold is tied to the browser that made it, and every second spent\n"
+        f"reloading on the phone is a second off the clock.\n\n"
+        f"{laptop}"
+    )
+
+
 def _clock_line(hold, minutes: int) -> str:
     """How long he has, and how much to trust the number.
 
@@ -340,12 +383,7 @@ def secured_hold(reading: Reading, hold) -> None:
         f"A ticket is IN A BASKET under your account right now.\n\n"
         f"  {_headline(pick)}\n"
         f"  {name}\n\n"
-        f"GO TO THE MACHINE RUNNING THE WATCHER. The Chrome window that holds\n"
-        f"it has been brought to the front, already signed in and sitting on\n"
-        f"the checkout page. Finish paying there.\n\n"
-        f"Do NOT try to pick this up on your phone. The hold lives in that\n"
-        f"browser's session — any other device gets an empty basket, and the\n"
-        f"hold dies while you look at it.\n\n"
+        f"{_where_to_finish(hold)}"
         f"{_clock_line(hold, minutes)}"
         f"The watcher will not pay for it: it stops at the basket, every\n"
         f"time, by design.\n\n"
@@ -369,11 +407,21 @@ def secured_hold(reading: Reading, hold) -> None:
     _safe("secured-email", _send_email, subject, body)
     _push(
         "secured-push",
-        title=f"HELD {_headline(pick)} — GO TO THE LAPTOP",
+        # The push is what reaches him when he is away from the desk, which is
+        # precisely the case the checkout link exists for. Tapping it is the
+        # fastest possible route to paying, and costs a glance at an empty
+        # basket when the cart turns out not to travel.
+        title=f"HELD {_headline(pick)} — TAP TO PAY"
+              if getattr(hold, "checkout_url", "") else
+              f"HELD {_headline(pick)} — GO TO THE LAPTOP",
         message=f"{name}\n\nIn a basket under your account. Roughly {minutes} "
-                f"minutes to pay, on the watcher's machine only.",
+                f"minutes to pay."
+                + ("\n\nTap to try it here. Empty basket = go to the laptop."
+                   if getattr(hold, "checkout_url", "") else
+                   "\n\nOn the watcher's machine only."),
         priority="urgent",
         tags=["rotating_light", "shopping_cart"],
+        click=getattr(hold, "checkout_url", "") or None,
     )
 
 

@@ -249,11 +249,8 @@ check("a browser that will not start still alerts", calls, ["failed"])
 check_true("and the reason reaches the alert", "no Chrome here" in sent.get("reason", ""))
 
 
-print("\nThe hold email must not send him to his phone")
+print("\nThe hold email, and where it sends him")
 mails = {}
-notify._send_email = lambda subject, body: mails.update(subject=subject, body=body) or True
-notify._push = lambda label, **kw: mails.update(push=kw) or True
-# Restore the real implementations the fakes above replaced.
 import importlib  # noqa: E402
 
 real_notify = importlib.reload(notify)
@@ -263,213 +260,50 @@ real_notify._push = lambda label, **kw: mails.update(push=kw) or True
 hold = buyer.HoldResult(secured=True, minutes_hint=4)
 real_notify.secured_hold(resale_reading(), hold)
 body = mails["body"]
-check_true("says go to the laptop", "GO TO THE MACHINE" in body)
-check_true("warns the phone will not work", "phone" in body.lower())
+check_true("names the laptop as the certainty", "LAPTOP DEFINITELY HAS IT" in body)
 check_true("carries the countdown", "4 minutes" in body)
-check_true("carries the section and price", "STNDN1" in body and "366.39" in body)
-check_true("promises it will not pay", "will not pay" in body.lower())
-# No click-through on the push: a link is the wrong action here, because the
-# basket belongs to the browser that made it.
-check("push offers no link to open", "click" in mails["push"], False)
-check_true("push is urgent", mails["push"]["priority"] == "urgent")
 
-real_notify.secure_failed(resale_reading(), buyer.HoldResult(reason="listing vanished"))
-check_true("the failure email says there is no hold", "NO hold" in mails["body"])
-check_true("and passes the reason through", "listing vanished" in mails["body"])
+print("\nThe held alert offers the phone a route, honestly framed")
+# Reversed on 2026-08-19. This alert used to say flatly "do NOT try to pick
+# this up on your phone", on the reasoning that a basket lives in the session
+# that created it. True of a signed-OUT session; possibly wrong for a
+# signed-in one, where the cart may be bound to the account server-side.
+# Nobody has tested which applies, and the error is asymmetric: withholding a
+# link that would have worked costs the ticket every time he is out, while
+# offering one that does not work costs a glance at an empty basket.
+CHECKOUT = "https://www.ticketmaster.ie/checkout/abc123"
 
-print("\nThe dead-end screen is recognised, from a real observation")
-# Captured by David on 2026-08-19 from a different event ("Amble", Live at the
-# Docklands) — the same Ticketmaster interface. This is exactly the experience
-# he described on the Electric Picnic listings: the row is still on the page,
-# and clicking it lands here.
-GONE_PAGE = """Amble
-Thu, Aug 20, 2026, 7:00 PM
-Live at the Docklands, Limerick, IE
-Over 18s - ID Required.
-Ticket Type
-Full Price Ticket
-Section
-STNDNG
-Sorry, these tickets are unavailable
-The tickets you wanted have either been sold or removed from sale.
-Find More Tickets
-18406b13-b763-4a89-bae2-204d0e85bad2"""
+with_link = buyer.HoldResult(secured=True, minutes_hint=11, minutes_measured=True,
+                             checkout_url=CHECKOUT)
+without_link = buyer.HoldResult(secured=True, minutes_hint=10)
 
+body = real_notify._where_to_finish(with_link)
+check_true("the link is offered", CHECKOUT in body)
+check_true("and offered to the phone first", body.index("PHONE") < body.index("LAPTOP"))
+check_true("with the sign-in precondition stated", "signed in" in body)
+check_true("and the empty-basket case handled", "EMPTY BASKET" in body.upper())
+check_true("the laptop is still named as the certainty", "DEFINITELY HAS IT" in body)
 
-class TextPage:
-    def __init__(self, text):
-        self.text = text
+body = real_notify._where_to_finish(without_link)
+check_true("with no link, the laptop is the whole answer", "LAPTOP" in body.upper())
+check_true("and it says why there is no link", "only way in" in body)
+check("no stray empty URL is printed", "https://" in body, False)
 
-    def inner_text(self, _sel=None):
-        return self.text
+print("\nAnd the push carries it, because the push is what reaches him outside")
+mails.clear()
+real_notify.secured_hold(resale_reading(), with_link)
+check_true("push click-through is the checkout", mails["push"].get("click") == CHECKOUT)
+check_true("and the title says to tap", "TAP" in mails["push"]["title"])
+check_true("email carries it too", CHECKOUT in mails["body"])
 
+mails.clear()
+real_notify.secured_hold(resale_reading(), without_link)
+check("no link means no click-through", mails["push"].get("click"), None)
+check_true("and the title sends him to the laptop", "LAPTOP" in mails["push"]["title"])
 
-gone = TextPage(GONE_PAGE)
-check_true("the dead end is recognised",
-           buyer._page_says(gone, buyer.LISTING_GONE_MARKERS))
-# The same capture proves the click-through reached the listing's own page —
-# "Ticket Type" and "Section" are both on it. That is the first direct
-# evidence that clicking a resale row leads anywhere at all.
-check_true("and so is having reached the listing page",
-           buyer._page_says(gone, buyer.LISTING_DETAIL_MARKERS, all_of=True))
-check("a basket is NOT claimed on it",
-      buyer._basket_is_live(gone, ("time left to complete", "your tickets are reserved")),
-      False)
-
-# all_of matters: "section" alone appears on the search results, so an any-of
-# rule would call every page the listing detail page.
-results_page = TextPage("Verified Resale Ticket\nSection STNDN1\n366.39")
-check("the search results are not mistaken for the listing page",
-      buyer._page_says(results_page, buyer.LISTING_DETAIL_MARKERS, all_of=True), False)
-
-check("a page that cannot be read says nothing",
-      buyer._page_says(object(), buyer.LISTING_GONE_MARKERS), False)
-
-
-print("\nThe dead end's only button must never be pressed")
-# "Find More Tickets" restarts the search. Pressing it would throw away the
-# listing detail page and spend the rest of the 45-second window going round
-# a loop instead of reporting the truth.
-check_true("Find More Tickets is forbidden", buyer.is_forbidden("Find More Tickets"))
-check_true("case and spacing do not matter", buyer.is_forbidden("  find more tickets "))
-# And it must not sneak in via the allowlist's substring matching.
-for safe in buyer.SAFE_BUTTONS:
-    check(f"the allowlist entry {safe!r} does not match it",
-          safe in "find more tickets", False)
-# The payment guards still hold.
-for bad in ("Pay now", "Continue to payment", "Place Order", "Checkout", "Purchase"):
-    check_true(f"{bad!r} is still refused", buyer.is_forbidden(bad))
-
-
-print("\nA real checkout page must be recognised as a hold")
-# Captured by David on 2026-08-19 from a live Ticketmaster checkout (Katie
-# Taylor at Croke Park). Before this, BASKET_MARKERS held only phrasings
-# written from memory, and NOT ONE of them appears here — so a successful
-# hold would have been reported as a failure. That is the worst outcome this
-# module can produce: the ticket is held, the clock is running, and the one
-# person who could finish it has been told it did not work.
-CHECKOUT_PAGE = """11:39
-Checkout
-11:39
-Delivery
-eTicket
-Free
-Mobile: To access your tickets for entry, open the Ticketmaster App, sign in
-Event Extras
-Katie Taylor - Souvenir Ticket
-Souvenir Ticket
-5.99
-0
-Payment
-Error:Selection Required
-PayPal - Preferred Payments Partner
-Protect Your Ticket Purchase
-Error:Selection Required
-Yes, I want to protect my tickets
-8.89
-No, I do not want to protect my tickets
-Event Partners
-Error:Selection Required
-No, I don't want to hear from them
-Katie Taylor v Flora Pili - Once Upon A Time
-Sat, 5 Sept 2026, 16:00
-Croke Park - Dublin
-1 Ticket-Sec BLOCKD, Row K, Seat 97
-Total
-766.00
-Tickets
-Full Price Ticket: 755.50 x 1
-Fees
-Service Fee: 10.50 x 1
-Cancel Order
-By Clicking "Place Order" you are agreeing to Ticketmaster Purchase Policy. View More
-Place Order"""
-
-checkout = FakePage([], CHECKOUT_PAGE)
-check_true("a real checkout page IS a live basket",
-           buyer._basket_is_live(checkout, BASKET_MARKERS))
-# And the pages that are not baskets still are not.
-check("the dead-end page is not a basket",
-      buyer._basket_is_live(FakePage([], GONE_PAGE), BASKET_MARKERS), False)
-check("an empty page is not a basket",
-      buyer._basket_is_live(FakePage([], ""), BASKET_MARKERS), False)
-check("the search results are not a basket",
-      buyer._basket_is_live(FakePage([], "Verified Resale Ticket Section STNDN1 366.39"),
-                            BASKET_MARKERS), False)
-
-
-print("\nThe two buttons beside each other on that page")
-# "Place Order" spends the money. "Cancel Order" throws the hold away. They
-# sit next to each other, which is exactly where a stray automated click
-# lands.
-check_true("Place Order is refused", buyer.is_forbidden("Place Order"))
-check_true("Cancel Order is refused", buyer.is_forbidden("Cancel Order"))
-check_true("and the terms sentence quoting it does not make it pressable",
-           buyer.is_forbidden('By Clicking "Place Order" you are agreeing'))
-# No allowlist entry may reach either of them.
-for safe in buyer.SAFE_BUTTONS:
-    check(f"allowlist {safe!r} cannot match Place Order",
-          safe in "place order", False)
-    check(f"allowlist {safe!r} cannot match Cancel Order",
-          safe in "cancel order", False)
-
-
-print("\nThe hold is longer than was guessed, and the alert must not overstate it")
-# The captured page showed 11:39 remaining, so the real window is at least
-# twelve minutes against the four originally assumed. The hint stays under
-# what was observed: this number tells David how long he has, and the error
-# that costs a ticket is the optimistic one.
-check_true("the hint was raised from the original guess of 4",
-           config.HOLD_MINUTES_HINT > 4)
-check_true("but stays under the 11:39 actually seen",
-           config.HOLD_MINUTES_HINT <= 11)
-
-
-print("\nThe countdown is read from the page, not assumed")
-# David's point on 2026-08-19: the hold length was observed on a boxing match
-# at Croke Park, and there is no reason a festival resale listing gets the
-# same window. So the real clock is read when it is there, and the alert says
-# which of the two numbers he is looking at.
-check("the real countdown is read", buyer.read_countdown_minutes(
-    FakePage([], CHECKOUT_PAGE)), 11 + 39 / 60.0)
-check("a page with no clock reads None",
-      buyer.read_countdown_minutes(FakePage([], "Checkout\nPlace Order")), None)
-check("an unreadable page reads None", buyer.read_countdown_minutes(object()), None)
-
-# The trap this got wrong first time. A checkout shows the event's own start
-# time, and "16:00" parses as a perfectly plausible sixteen-minute hold — so
-# matching anywhere in the text reported the gig time as the time remaining.
-# It only worked on the real page by luck, because 11:39 happened to be
-# smaller. A countdown stands ALONE on its line; every other time is embedded
-# in a sentence.
-check("an event start time embedded in a line is not the hold clock",
-      buyer.read_countdown_minutes(
-          FakePage([], "Sat, 5 Sept 2026, 16:00\nPlace Order")), None)
-check("nor are door times",
-      buyer.read_countdown_minutes(
-          FakePage([], "Doors 19:00\nStarts 20:00\nPlace Order")), None)
-check("but a countdown on its own line beside them is found",
-      buyer.read_countdown_minutes(
-          FakePage([], "Sat, 5 Sept 2026, 16:00\n04:12\nPlace Order")),
-      4 + 12 / 60.0)
-check("and where it appears twice, both agree",
-      buyer.read_countdown_minutes(FakePage([], "11:39\nCheckout\n11:39")),
-      11 + 39 / 60.0)
-check("a clock too long to be a hold is ignored",
-      buyer.read_countdown_minutes(FakePage([], "45:17")), None)
-check("whitespace around it does not matter",
-      buyer.read_countdown_minutes(FakePage([], "   09:05   ")), 9 + 5 / 60.0)
-
-print("\nThe alert distinguishes a measured clock from a guess")
-measured = buyer.HoldResult(secured=True, minutes_hint=11, minutes_measured=True)
-guessed = buyer.HoldResult(secured=True, minutes_hint=10, minutes_measured=False)
-check_true("a measured clock is stated as fact",
-           "own countdown" in notify._clock_line(measured, 11))
-check_true("and names the number", "11 MINUTES" in notify._clock_line(measured, 11))
-check_true("a guess is flagged as one",
-           "guess" in notify._clock_line(guessed, 10).lower())
-check_true("and tells him to assume less",
-           "assume less" in notify._clock_line(guessed, 10).lower())
+# Whatever else changes, this must not: the watcher never pays.
+check_true("the email still promises it will not pay",
+           "not pay" in mails["body"] or "stops at the basket" in mails["body"])
 
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")

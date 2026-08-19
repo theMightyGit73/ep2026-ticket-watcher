@@ -231,6 +231,10 @@ class HoldResult:
     #: How long he has, for wording only. Read off the checkout page's own
     #: countdown when one is visible, otherwise config.HOLD_MINUTES_HINT.
     minutes_hint: int = 0
+    #: Where the checkout is, captured the moment a basket is confirmed.
+    #: Offered to David's phone as worth trying — see the note at the capture
+    #: site. Empty when nothing was held.
+    checkout_url: str = ""
     #: True when minutes_hint was read from the page rather than estimated.
     #: The alert says which, because "you have about ten minutes" and "the
     #: page says 11:39" deserve different amounts of trust — and the estimate
@@ -450,6 +454,29 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
                 result.minutes_hint = config.HOLD_MINUTES_HINT
                 result.note("no countdown visible — using the configured estimate")
             result.note("BASKET CONFIRMED — the ticket is held; stopping here")
+
+            # Where the checkout actually is, captured at the moment it exists.
+            #
+            # This alert deliberately carried no link, on the reasoning that a
+            # basket lives in the session that created it and a link opened on
+            # a phone would be an empty checkout while the real hold expired.
+            # That reasoning is certainly right for a signed-OUT session and
+            # may be wrong for a signed-in one: a cart bound to the ACCOUNT
+            # server-side would follow David to any device he is signed in on.
+            # Nobody has tested which it is here.
+            #
+            # So the URL is captured and offered, described as worth trying
+            # rather than as the answer. Offering it costs nothing if the cart
+            # does not travel — he sees an empty basket and walks to the
+            # laptop, which is exactly what he would have done without it.
+            # Withholding it costs the ticket on every occasion he is out and
+            # it would have worked.
+            try:
+                result.checkout_url = page.url
+                result.note(f"checkout URL captured: {result.checkout_url}")
+            except Exception:
+                pass
+
             # Bring it to the front so the machine he walks to is already
             # showing the thing he has to finish.
             try:
