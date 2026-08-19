@@ -306,5 +306,46 @@ check_true("the command verifies via the cookie fingerprint",
            "record_signed_in_fingerprint" in main_source)
 
 without_credentials()
+print("\nTelling 'your password is wrong' apart from 'something went wrong'")
+# The cost of confusing these is specific: a false "rejected" tells David to
+# go and change a password that was never the problem, and the honest thing
+# to do with that advice is to rotate a working credential by hand.
+#
+# "try again" used to be on REJECTED_MARKERS and is the tail of half the
+# transient errors a website can produce.
+REJECTIONS = (
+    "The email or password you entered is incorrect.",
+    "Invalid email or password.",
+    "That password does not match our records.",
+    "We cannot find an account with that email.",
+)
+NOT_REJECTIONS = (
+    "Something went wrong. Please try again.",
+    "We are having trouble right now — try again in a few minutes.",
+    "Sorry, this page is temporarily unavailable.",
+)
+for text in REJECTIONS:
+    check_true(f"rejected: {text[:38]!r}",
+               any(m in text.lower() for m in autologin.REJECTED_MARKERS))
+for text in NOT_REJECTIONS:
+    check(f"not a rejection: {text[:38]!r}",
+          any(m in text.lower() for m in autologin.REJECTED_MARKERS), False)
+
+print("\nA challenge is never reported as a bad password")
+# They call for opposite actions: one needs a human at the keyboard, the
+# other needs a new credential. sign_in() checks challenge markers first, so
+# the two sets must not overlap on the phrases a challenge page carries.
+CHALLENGES = (
+    "Please verify you are human to continue.",
+    "We sent a code to your email. Enter the verification code below.",
+    "Unusual activity detected on this account.",
+)
+for text in CHALLENGES:
+    check_true(f"challenge: {text[:38]!r}",
+               any(m in text.lower() for m in autologin.CHALLENGE_MARKERS))
+    check(f"and not also a rejection: {text[:30]!r}",
+          any(m in text.lower() for m in autologin.REJECTED_MARKERS), False)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

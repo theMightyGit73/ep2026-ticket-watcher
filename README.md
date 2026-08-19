@@ -336,13 +336,53 @@ about it. The availability alert has already gone out either way.
 6. **If not**: an email that says plainly there is *no* hold, and names the
    step that failed.
 
-### The hold cannot travel
+### Nothing may restart the watcher while a ticket is held
+
+A basket lives in the browser the watcher launched, so anything that kills the
+watcher process throws the ticket away. That is not a hypothetical: two
+separate paths did exactly that, and both were found by reading the code
+rather than by losing a ticket.
+
+- **The watchdog.** It restarts a watcher whose poll clock has stopped
+  advancing, which is right in every case but one — a watcher paused for a
+  checkout looks identical to a wedged one. The watcher used to print
+  "Reserve accepted — pausing the loop so you can check out" and then sleep
+  without writing anything down, so fifteen minutes later `launchctl
+  kickstart -k` would have killed the checkout it was protecting.
+- **`restart.sh`.** It cleared stale Chromes with
+  `pkill -f "ep2026-watcher/chrome-profile"`, and `pkill -f` matches
+  substrings — so it also matched `chrome-profile-buy`. The repair for a
+  wedged watcher was also the way to destroy a live hold, and `doctor` prints
+  `restart.sh` as the fix for half its failure lines.
+
+Now a live hold is written into `state.json` as `hold_until`; the watchdog
+reads it and stands down, `doctor` and `status` report it, and `restart.sh`
+leaves the buying browser alone and says that it has. The protection is
+**bounded** — the hold plus `EP_HOLD_PAUSE_EXTRA` minutes — because a hold
+nobody completes must not silence the watch for the rest of the fortnight.
+Ambiguous silence is the one thing this project refuses.
+
+A second find while the first is still held is refused rather than collided
+with: Chrome locks the profile directory, so the attempt would otherwise fail
+with a message about singleton locks that says nothing about a ticket. The
+alert says the buying browser is already open and what to do about it.
+
+### The hold probably cannot travel — but the email offers the link anyway
 
 A Ticketmaster basket lives in the session cookies of the browser that created
-it. Opening a link on your phone gets you a different session and an empty
-basket while the hold expires. This is why the buyer must run on the machine
-you will finish payment on, and why the "held" email contains **no link** —
-only an instruction to go to that Mac.
+it, so opening a link on your phone may get you a different session and an
+empty basket while the hold expires on the Mac. That is why the buyer runs on
+the machine you will finish payment on.
+
+This section used to end "and the 'held' email contains **no link** — only an
+instruction to go to that Mac." That was reversed on 2026-08-19 and the email
+now carries the checkout URL, framed as worth trying rather than as the
+answer. The reasoning is certainly right for a signed-OUT session and may be
+wrong for a signed-in one, where the cart could be bound to the account
+server-side and follow you to any device you are signed in on. Nobody has
+tested which applies here, and the error is asymmetric: offering a link that
+does not work costs a glance at an empty basket, while withholding one that
+would have worked costs the ticket every time you are out of the house.
 
 ### What is proven and what is not
 
@@ -351,12 +391,22 @@ claim a hold it cannot see on the page; the availability alert fires
 regardless; the failure email always sends; it stays off until enabled; it
 refuses to act on an event it was not given.
 
-**Not proven:** the click-through itself. The button labels between a resale
-listing and a basket were inferred, not observed — nobody has walked that flow
-on this event. Expect the first live attempt to fail and to name the step that
-broke. Walking the flow by hand on any event that currently has a resale
-listing, and reading off the real button labels, is worth more than any amount
-of further guessing.
+**Partly proven since:** on 2026-08-19 a real listing page and a real
+mid-hold checkout page were captured on another event using the same
+interface. Those settled three things that had been guesses — the listing
+detail screen ("Ticket type" / "Section"), the dead end you reach when a
+listing has gone ("these tickets are unavailable"), and what a live basket
+actually says, which is "Place Order" and "Cancel Order" and **none** of the
+three phrases previously guessed at. That last one mattered most: a
+successful hold would have been reported as a failure.
+
+**Still not proven:** the click-through on *this* event, end to end. Nobody
+has driven a real Electric Picnic resale listing into a basket, because none
+has been live while this code was running. The flow is written to fail loudly
+— every step that cannot find what it expects records why and returns
+`secured=False`, and the ordinary availability alert goes out regardless. Treat
+the first real find as the test, and read the failure email: it now
+distinguishes "never reached the listing" from "reached it and it was gone".
 
 ---
 
@@ -644,7 +694,8 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 | `check-buy` | Is the buying profile still signed in? Read-only, types nothing |
 | `calibrate` | Dump screenshot + text + HTML after a search |
 | `networks` | List every connection the watcher has seen, with blocks against each |
-| `status` | Print config and health |
+| `status` | Print config and health, including the peak request rate |
+| `budget` | What this cadence actually spends, hour by hour, against the rate that drew a block. Non-zero exit if over |
 | `resolve-id` | Look up the Discovery event id for the API source |
 
 ---
@@ -662,12 +713,22 @@ Environment variables, all optional:
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `WANTED_QUANTITIES` | `1` | Quantities to search per poll |
-| `EP_STANDARD_POLL_MIN` | `180` | Shortest gap between searches of the standard page |
-| `EP_STANDARD_POLL_MAX` | `360` | Longest. The gap is drawn fresh from this range after each search |
-| `EP_INSTALMENT_POLL_MIN` | `1200` | The same, for the instalment plan |
-| `EP_INSTALMENT_POLL_MAX` | `2400` | |
+| `EP_PEAK_START_HOUR` | `10` | Start of the window listings actually appear in, local time |
+| `EP_PEAK_END_HOUR` | `20` | End of it. Outside this the same budget is spent more slowly |
+| `EP_STANDARD_PEAK_MIN` | `300` | Shortest gap between peak searches of the standard page. The gap is drawn fresh from the range after each search, so the traffic is not a metronome |
+| `EP_STANDARD_PEAK_MAX` | `540` | Longest |
+| `EP_STANDARD_OFFPEAK_MIN` | `600` | The same, outside the peak window |
+| `EP_STANDARD_OFFPEAK_MAX` | `900` | |
+| `EP_EARLY_PEAK_MIN` / `_MAX` | `300` / `540` | The Early Entry Pass, watched as hard as the ticket by David's instruction |
+| `EP_EARLY_OFFPEAK_MIN` / `_MAX` | `600` / `900` | |
+| `EP_INSTALMENT_PEAK_MIN` / `_MAX` | `1800` / `3600` | The instalment plan. One of nine sightings was here, so it keeps a small share |
+| `EP_INSTALMENT_OFFPEAK_MIN` / `_MAX` | `3600` / `5400` | |
+| `EP_BLOCK_RATE_PER_HOUR` | `20` | The rate that drew a 403 in development. `budget` and the test suite both check against it |
+| `EP_LOOP_TICK_SECONDS` | `60` | Ceiling on how often the loop wakes to ask if a page is due. Costs no requests |
 | `EP_SECURE_ON_FIND` | `0` | Set `1` to let the buying browser hold a resale listing. Needs `login-buy` first |
 | `EP_SECURE_TIMEOUT_SECONDS` | `45` | Seconds to spend trying to secure before giving up |
+| `EP_HOLD_PAUSE_EXTRA` | `10` | Minutes added to the hold window during which nothing will restart the watcher |
+| `EP_LIVENESS_MINUTES` | `10` | How often the Mac publishes its "still alive" beacon. Throttled because it shares an ntfy quota with the alert that matters |
 | `EP_BUY_PROFILE_DIR` | `~/.ep2026-watcher/chrome-profile-buy` | Where the signed-in buying profile lives |
 | `EP_POLL_SECONDS` | `300` | Fallback per-page gap for a page configured without a range |
 | `EP_WATCH_LABEL` | `Electric Picnic 2026` | What to call the watch in emails covering every page |
@@ -1052,6 +1113,18 @@ never followed by "no success this hour".
 .venv/bin/python -m ep_watcher test       # sends one real example of each
 ```
 
+There is also a plain runner, which is what CI uses:
+
+```bash
+./run_tests.sh              # every test file, one PASS/FAIL line each
+./run_tests.sh resale       # only the ones whose name matches
+```
+
+It sandboxes `EP_STATE_FILE`, `EP_DIAG_DIR` and `EP_LOG_DIR` into a temporary
+directory, so running the tests can never disturb a watcher that is working.
+`.github/workflows/tests.yml` runs it on every push — until 2026-08-19 nothing
+ran these at all unless somebody remembered to.
+
 `selftest` runs every suite in `tests/` — offline, no credentials, safe to run
 while the watcher is running. It checks that each email goes to the right
 address, names and links the right page, carries the listing details, and that
@@ -1237,12 +1310,27 @@ What the watcher does about it:
 - **It backs off exponentially** — 30 minutes, doubling to a 3-hour cap —
   and resets the moment a real reading comes back. Being blocked and carrying
   on at the normal cadence is how a short rate-limit becomes a long one.
-- **The default cycle is 10 minutes** — `EP_POLL_SECONDS=300` per page, two
-  pages. That is 12 searches an hour, against the ~20/hour that got the home
-  IP flagged — roughly 3,250 over a fortnight once the overnight slowdown is
-  counted, rather than the ~13,000 a 3-minute cycle would send. Adding the
-  second page did not raise the hourly rate: the cycle scales with the page
-  count instead.
+- **The cadence is per page, randomised, and split into three windows.** Do
+  not read the number off this page — it has been wrong twice. Run:
+
+  ```bash
+  ./run_watcher.sh budget
+  ```
+
+  which prints the real hourly rate for whatever the settings currently are,
+  hour by hour, and exits non-zero if the busiest hour is over the line. As of
+  2026-08-19 that is **18.5 searches an hour at peak, 293 a day**, against the
+  20/hour that drew the block. The three earlier attempts to state this figure
+  in prose — 12/hour here, "~15.3" and "~17" in `config.py` — were each
+  accurate when written and none survived the next cadence change, which is
+  why the number now comes from a command and is asserted by
+  `tests/test_request_budget.py`.
+
+  The shape is deliberate. Each page draws its next gap fresh from a range
+  rather than ticking on a fixed interval, because a metronome is itself a bot
+  signature. The peak window (10:00–20:00 local, where all eight recorded
+  sightings fell) is faster and the rest of the day is correspondingly slower,
+  so the day's total is redistributed rather than increased.
 - **Overnight it drops to 30 minutes** (`EP_NIGHT_POLL_SECONDS`, midnight to
   07:00 local). A headstart is worth nothing while you are asleep, and those
   hours otherwise accumulate volume on the connection unattended, with nobody
@@ -1285,9 +1373,16 @@ you wondering whether it finished or died.
 
 ## Honest limits
 
-- **It will not buy the ticket.** It finds and alerts; you buy. Automating the
-  purchase is a different thing with a different risk profile, and a wrong
-  automated checkout is expensive in a way a missed email is not.
+- **It will not pay for the ticket.** With securing off — the default — it
+  finds and alerts and nothing else. With `EP_SECURE_ON_FIND=1` it will click
+  into a resale listing and hold it in a basket, and then stop dead: there is
+  no code path that enters payment details or confirms an order, and the
+  buttons it may press are an allowlist with a payment denylist in front of
+  it. The last step is always yours. This bullet used to read "it will not buy
+  the ticket", which stopped being the whole truth on 2026-08-19 — see
+  [Securing a ticket automatically](#securing-a-ticket-automatically-opt-in-off-by-default)
+  for what the account is now exposed to and why that trade was made
+  deliberately.
 - **Each poll is a real search** against Ticketmaster, not a page read. The
   default cadence is deliberately human-paced, and `watch` jitters it so the
   traffic is not a metronome. Ticketmaster's terms prohibit automated access;

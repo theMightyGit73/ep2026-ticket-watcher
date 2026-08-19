@@ -317,5 +317,25 @@ with tempfile.TemporaryDirectory() as tmp:
                ev["days_left"] <= 3)
 
 
+
+print("\nHow long is left, said in units a person can act on")
+# `doctor` printed "first account cookie lapses in 0 day(s)" on 2026-08-19,
+# which is either alarming or meaningless depending on how closely it is read
+# — and it is the line that decides whether David signs in again BEFORE a
+# listing appears rather than after one is lost.
+check("under an hour and a half is said in minutes",
+      "minutes" in buyer.describe_lapse(0.02), True)
+check("under a day is said in hours", "hours" in buyer.describe_lapse(0.3), True)
+check("a day or so is said plainly", buyer.describe_lapse(1.4), "in about a day")
+check("longer is said in days", buyer.describe_lapse(4.2), "in about 4 days")
+check("already lapsed says so", buyer.describe_lapse(-0.5), "already")
+check("and an unknown is not dressed up as a number",
+      buyer.describe_lapse(None), "at an unknown time")
+# The regression itself: no rendering may ever come out as "0" of anything.
+for value in (0.001, 0.01, 0.04, 0.049):
+    check(f"{value} never renders as zero",
+          buyer.describe_lapse(value).startswith("in about 0"), False)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
