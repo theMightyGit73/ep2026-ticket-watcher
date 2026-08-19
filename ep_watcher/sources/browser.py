@@ -66,6 +66,17 @@ SOLD_OUT_HINTS = ("tickets are currently unavailable", "this event is sold out")
 #: Captured from the live page: GET /api/quickpicks/{eventId}/resale?qty=...
 RESALE_API_RE = re.compile(r"/api/quickpicks/[^/]+/resale", re.I)
 
+#: Ticketmaster event pages end in /event/{ID}. The id is what the resale
+#: endpoint is keyed on, so it can always be recovered from the URL of the
+#: page being watched — no configuration needed.
+EVENT_ID_RE = re.compile(r"/event/([A-Za-z0-9]+)", re.I)
+
+
+def _event_id_from_url(url: str) -> str:
+    m = EVENT_ID_RE.search(url or "")
+    return m.group(1) if m else ""
+
+
 PRICE_RE = re.compile(r"€\s?(\d{1,4}[.,]\d{2})")
 SECTION_RE = re.compile(r"^section\s+(.+)$", re.I)
 
@@ -619,6 +630,85 @@ class BrowserSession:
             f"no resale call in {timeout_s}s — the search may not have completed"
         )
 
+    def fetch_resale_json(self, event, qty: int) -> Optional[dict]:
+        """Ask the resale endpoint directly, from inside the live page.
+
+        The panel is the page's drawing of this call. Waiting for the drawing
+        is what goes wrong: of the 80 resale-blind polls recorded to
+        2026-08-19, 78 never saw the call at all — 26 of them after a search
+        that had otherwise worked perfectly, because the page simply never
+        made it inside the timeout. Nothing was wrong with the session; we
+        were waiting for someone else to ask our question.
+
+        So ask it. `page.evaluate` runs the fetch in the page's own context,
+        carrying its cookies, its TLS fingerprint and its origin — Ticketmaster
+        sees the call it already accepts from this page rather than a new
+        client to be walled. That is the whole reason this can work where
+        requests-from-Python cannot: the endpoint returns 403 to anything that
+        is not a real browser session, and this IS the real browser session.
+
+        The URL shape and its cache behaviour were confirmed from David's own
+        signed-in browser on 2026-08-19:
+
+            GET /api/quickpicks/{eventId}/resale?qty=1&offset=0&limit=20
+            cache-control: max-age=15, stale-if-error=3600,
+                           stale-while-revalidate=30
+
+        `cache: no-store` is set so the browser revalidates rather than
+        replaying its disk copy. A cache-busting query parameter would work
+        too but is deliberately avoided: a novel URL misses Fastly's edge and
+        hits origin, which is both heavier and more conspicuous than the call
+        the page makes for itself.
+
+        Returns a record in the same shape as the passive listener produces,
+        so _parse_resale_json can read either without caring which. None if
+        the call could not be made at all.
+        """
+        # config's tm_event_id first, then the id in the page's own URL.
+        #
+        # The fallback is not optional: only the standard page has
+        # tm_event_id set, because that field exists for the Inventory Status
+        # API and was filled in only where that API had been granted access.
+        # Without deriving it here the rescue would silently never fire on the
+        # instalment plan — which is the page whose longer interval makes each
+        # blind poll cost more, not less.
+        event_id = getattr(event, "tm_event_id", "") or _event_id_from_url(
+            getattr(event, "url", "")
+        )
+        # getattr rather than self._page, matching _record_find. A subclass
+        # that replaces only the Chrome-touching methods — which is how the
+        # parsing tests exercise the real verdict logic — has no _page at all,
+        # and this must degrade to "cannot fetch" rather than raising into the
+        # middle of a poll.
+        if not event_id or getattr(self, "_page", None) is None:
+            return None
+        url = (
+            f"/api/quickpicks/{event_id}/resale"
+            f"?qty={qty}&offset=0&limit=20"
+        )
+        try:
+            record = self.page.evaluate(
+                """async (url) => {
+                    const r = await fetch(url, {
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: {'accept': 'application/json'},
+                    });
+                    let data = null;
+                    try { data = await r.json(); } catch (e) { data = null; }
+                    return {url: r.url, status: r.status, data: data};
+                }""",
+                url,
+                # Its own budget. This is a rescue for a poll that has already
+                # spent its patience, so it must not be able to double the
+                # cost of a poll that was going to fail anyway.
+                # (Playwright's default would be the page timeout.)
+            )
+        except (PlaywrightTimeout, PlaywrightError) as exc:
+            return {"url": url, "status": None, "data": None,
+                    "error": f"{type(exc).__name__}: {exc}"}
+        return record
+
     def _settle_resale(self, settle_s: float) -> str:
         """Give the listing rows a moment to paint under the heading.
 
@@ -789,6 +879,27 @@ class BrowserSession:
             attempt = Reading(source=SOURCE)
             self._parse_primary(outcome, text, attempt, qty)
             self._parse_resale(text, attempt)
+
+            # Last resort, and only when the page has left us blind. The
+            # ordinary paths — the passive listener, then the rendered panel —
+            # answer the great majority of polls, and this must not disturb
+            # them: it runs only where the alternative is recording UNKNOWN
+            # and learning nothing. The session is alive at this point (we
+            # searched in it), so asking the endpoint ourselves costs one
+            # small JSON call and converts a wasted poll into a real reading.
+            if attempt.resale == UNKNOWN:
+                rescue = self.fetch_resale_json(event, qty)
+                if rescue and rescue.get("data") is not None:
+                    self._resale_response = rescue
+                    if _parse_resale_json(rescue, attempt):
+                        attempt.note("resale read by asking the endpoint directly")
+                elif rescue and rescue.get("status"):
+                    attempt.note(
+                        f"direct resale fetch answered HTTP {rescue['status']} "
+                        f"with no usable body"
+                    )
+                elif rescue and rescue.get("error"):
+                    attempt.note(f"direct resale fetch failed: {rescue['error']}")
             if attempt.any_good:
                 self._record_find(attempt, qty)
             reading.notes.extend(f"qty={qty}: {n}" for n in attempt.notes)

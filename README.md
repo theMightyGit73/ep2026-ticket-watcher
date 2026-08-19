@@ -375,6 +375,50 @@ Two related rules follow from the same principle:
 so an old state file cannot read as a flawless 0% before anything is measured.
 Over the first day of running, resale was unreadable on about one poll in six.
 
+### When the page will not ask, ask the endpoint yourself
+
+Measured to 2026-08-19: of 699 readings, 80 came away knowing nothing about
+resale, and **78 of those never saw the resale API call at all**. Two distinct
+causes hide in that number:
+
+| Cause | Polls | Can a direct fetch help? |
+| --- | --- | --- |
+| Bot check / HTTP 403 / no internet | ~52 | No — there is no live page |
+| Searched fine, but no resale call inside 25s | 26 | **Yes** |
+
+For that second group nothing was wrong with the session. The watcher was
+waiting for the page to ask a question it could have asked itself. So when a
+poll would otherwise be recorded as resale-blind, it now calls the endpoint
+directly from inside the live page:
+
+```js
+await fetch('/api/quickpicks/{eventId}/resale?qty=1&offset=0&limit=20',
+            {credentials: 'include', cache: 'no-store'})
+```
+
+`page.evaluate` runs this in the page's own context, so it carries that
+session's cookies, TLS fingerprint and origin. That is the whole reason it
+works where `requests` cannot: the endpoint returns 403 to anything that is
+not a real browser session, and this *is* the real browser session.
+
+**Verified live on 2026-08-19**, not assumed:
+
+```text
+status : 200
+body   : {"quantity": 0, "total": 0, "picks": [], "descriptions": []}
+took   : 143 ms
+```
+
+143 milliseconds, against up to 25 seconds spent waiting for a panel to paint.
+
+Two deliberate restraints. It runs **only** when the reading would otherwise
+be UNKNOWN, so it cannot disturb the 88% of polls that already work. And it
+uses `cache: no-store` rather than a cache-busting query parameter — a novel
+URL misses Fastly's edge cache and hits origin, which is heavier and more
+conspicuous than the call the page makes for itself. The response is
+edge-cached for 15 seconds with 30 seconds of stale-while-revalidate, so
+asking more often than that returns byte-identical data.
+
 ### Watching the response is not watching the panel
 
 The correction to that one-in-six, and a caution about how it was fixed the
