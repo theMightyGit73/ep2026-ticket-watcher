@@ -496,8 +496,13 @@ SAFE_BUTTONS = (
 #: Pressing it throws away the listing detail page and starts the search
 #: again, which would spend the rest of the 45-second window going round a
 #: loop instead of reporting the truth.
+#: "cancel order" is on this list for the opposite reason to the rest. It is
+#: not dangerous because it spends money — it is dangerous because it throws
+#: the hold away. It sits directly beside "Place Order" on the real checkout
+#: page captured on 2026-08-19, which is exactly the position an automated
+#: click is most likely to land on by accident.
 FORBIDDEN_BUTTONS = ("pay", "place order", "confirm order", "checkout", "purchase",
-                     "find more tickets")
+                     "find more tickets", "cancel order")
 
 #: The listing detail screen — reached by clicking a resale row.
 #:

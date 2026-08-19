@@ -59,7 +59,31 @@ RESALE_HEADING = "verified resale"
 #: static "will appear below when they are available" caption, which sits
 #: there permanently, including directly above a real listing.
 RESALE_MARKER = "verified resale ticket"
-BASKET_MARKERS = ("time left to complete", "your tickets are reserved", "proceed to checkout")
+#: A live basket, recognised by what the real checkout page actually says.
+#:
+#: The first three were written from memory of how such pages usually look and
+#: are kept only in case an older flow still uses them. On 2026-08-19 David
+#: sent back the genuine Ticketmaster checkout page for a held ticket, and NOT
+#: ONE of them appeared on it. A successful hold would therefore have been
+#: reported as a failure — the single worst outcome this module can produce,
+#: because the ticket really is held, the clock really is running, and the one
+#: person who could finish it has just been told it did not work.
+#:
+#: What the real page carries is "Place Order" and "Cancel Order", both as
+#: controls and in the terms sentence beneath them. Those are specific to a
+#: checkout with something in it.
+#:
+#: The asymmetry decides the design. Claiming a hold that is not there costs a
+#: walk to the laptop and an obvious empty screen. Missing one that IS there
+#: costs the ticket, silently, while it expires. So this errs towards
+#: recognising.
+BASKET_MARKERS = (
+    "place order",
+    "cancel order",
+    "time left to complete",
+    "your tickets are reserved",
+    "proceed to checkout",
+)
 SOLD_OUT_HINTS = ("tickets are currently unavailable", "this event is sold out")
 
 #: The call that populates "Other Options → Verified Resale Tickets".

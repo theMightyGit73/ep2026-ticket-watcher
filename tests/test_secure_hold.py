@@ -341,5 +341,89 @@ for bad in ("Pay now", "Continue to payment", "Place Order", "Checkout", "Purcha
     check_true(f"{bad!r} is still refused", buyer.is_forbidden(bad))
 
 
+print("\nA real checkout page must be recognised as a hold")
+# Captured by David on 2026-08-19 from a live Ticketmaster checkout (Katie
+# Taylor at Croke Park). Before this, BASKET_MARKERS held only phrasings
+# written from memory, and NOT ONE of them appears here — so a successful
+# hold would have been reported as a failure. That is the worst outcome this
+# module can produce: the ticket is held, the clock is running, and the one
+# person who could finish it has been told it did not work.
+CHECKOUT_PAGE = """11:39
+Checkout
+11:39
+Delivery
+eTicket
+Free
+Mobile: To access your tickets for entry, open the Ticketmaster App, sign in
+Event Extras
+Katie Taylor - Souvenir Ticket
+Souvenir Ticket
+5.99
+0
+Payment
+Error:Selection Required
+PayPal - Preferred Payments Partner
+Protect Your Ticket Purchase
+Error:Selection Required
+Yes, I want to protect my tickets
+8.89
+No, I do not want to protect my tickets
+Event Partners
+Error:Selection Required
+No, I don't want to hear from them
+Katie Taylor v Flora Pili - Once Upon A Time
+Sat, 5 Sept 2026, 16:00
+Croke Park - Dublin
+1 Ticket-Sec BLOCKD, Row K, Seat 97
+Total
+766.00
+Tickets
+Full Price Ticket: 755.50 x 1
+Fees
+Service Fee: 10.50 x 1
+Cancel Order
+By Clicking "Place Order" you are agreeing to Ticketmaster Purchase Policy. View More
+Place Order"""
+
+checkout = FakePage([], CHECKOUT_PAGE)
+check_true("a real checkout page IS a live basket",
+           buyer._basket_is_live(checkout, BASKET_MARKERS))
+# And the pages that are not baskets still are not.
+check("the dead-end page is not a basket",
+      buyer._basket_is_live(FakePage([], GONE_PAGE), BASKET_MARKERS), False)
+check("an empty page is not a basket",
+      buyer._basket_is_live(FakePage([], ""), BASKET_MARKERS), False)
+check("the search results are not a basket",
+      buyer._basket_is_live(FakePage([], "Verified Resale Ticket Section STNDN1 366.39"),
+                            BASKET_MARKERS), False)
+
+
+print("\nThe two buttons beside each other on that page")
+# "Place Order" spends the money. "Cancel Order" throws the hold away. They
+# sit next to each other, which is exactly where a stray automated click
+# lands.
+check_true("Place Order is refused", buyer.is_forbidden("Place Order"))
+check_true("Cancel Order is refused", buyer.is_forbidden("Cancel Order"))
+check_true("and the terms sentence quoting it does not make it pressable",
+           buyer.is_forbidden('By Clicking "Place Order" you are agreeing'))
+# No allowlist entry may reach either of them.
+for safe in buyer.SAFE_BUTTONS:
+    check(f"allowlist {safe!r} cannot match Place Order",
+          safe in "place order", False)
+    check(f"allowlist {safe!r} cannot match Cancel Order",
+          safe in "cancel order", False)
+
+
+print("\nThe hold is longer than was guessed, and the alert must not overstate it")
+# The captured page showed 11:39 remaining, so the real window is at least
+# twelve minutes against the four originally assumed. The hint stays under
+# what was observed: this number tells David how long he has, and the error
+# that costs a ticket is the optimistic one.
+check_true("the hint was raised from the original guess of 4",
+           config.HOLD_MINUTES_HINT > 4)
+check_true("but stays under the 11:39 actually seen",
+           config.HOLD_MINUTES_HINT <= 11)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

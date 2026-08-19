@@ -309,9 +309,15 @@ BUY_PROFILE_DIR = Path(
 # basket, and the honest thing is to tell him rather than keep clicking.
 SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "45"))
 
-# Ticketmaster's own hold is a few minutes and it does not publish the number.
-# Used only to word the alert, never to decide anything.
-HOLD_MINUTES_HINT = int(os.environ.get("EP_HOLD_MINUTES_HINT", "4"))
+# How long David has once a ticket is held. Used only to word the alert,
+# never to decide anything.
+#
+# Was 4, which was a guess. On 2026-08-19 a real Ticketmaster checkout page
+# was captured mid-hold with "11:39" on its countdown, so the true window is
+# at least twelve minutes and probably a round fifteen. Kept deliberately
+# short of what was observed: the number goes into an email telling him how
+# long he has, and the error that costs a ticket is the optimistic one.
+HOLD_MINUTES_HINT = int(os.environ.get("EP_HOLD_MINUTES_HINT", "10"))
 
 # Set EP_USE_BROWSER=0 to run API-sources-only. That is the mode for anywhere
 # without a real Chrome — GitHub Actions, a small VPS without a display — and
