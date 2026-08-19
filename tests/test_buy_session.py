@@ -337,5 +337,30 @@ for value in (0.001, 0.01, 0.04, 0.049):
           buyer.describe_lapse(value).startswith("in about 0"), False)
 
 
+
+print("\nA lapse under an hour must not be rounded away into 'already'")
+# Seen for real on 2026-08-19: an account cookie 54 minutes from lapsing was
+# reported as having lapsed already, by both doctor and check-buy, on the line
+# directly beneath one saying the session was fine. session_evidence rounded
+# days_left to one decimal, so everything under ~72 minutes became 0.0.
+#
+# The information destroyed is the useful kind: a cookie due to lapse within
+# the hour is the moment to re-run login-buy, before a listing appears rather
+# than after one is lost.
+with tempfile.TemporaryDirectory() as tmp:
+    root = make_profile(Path(tmp) / "prof",
+                        dict(ANON, **{"id-token": datetime.now(timezone.utc)
+                                      + timedelta(minutes=54)}))
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    buyer.record_signed_in_fingerprint(root)
+    ev = buyer.session_evidence(root)
+    check_true("the session still reads as signed in", ev["signed_in"])
+    check_true("days_left keeps enough precision to be rendered",
+               ev["days_left"] > 0)
+    rendered = buyer.describe_lapse(ev["days_left"])
+    check("and it is not described as already gone", rendered, "in about 54 minutes")
+    check("nor as zero of anything", rendered.startswith("in about 0"), False)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

@@ -296,7 +296,15 @@ def session_evidence(profile_dir=None) -> dict:
                reason="the account cookies recorded at sign-in are all present")
     if soonest:
         left = (soonest - datetime.now(timezone.utc)).total_seconds() / 86400.0
-        out.update(expires_at=soonest.isoformat(), days_left=round(left, 1))
+        # Four decimals, not one. Rounding days to 1dp collapses everything
+        # under about 72 minutes to 0.0, and describe_lapse then reads 0.0 as
+        # "already" — so on 2026-08-19 both `doctor` and `check-buy` reported
+        # a cookie lapsing in 54 minutes as one that had already gone, while
+        # the line above them said the session was fine. Getting that wrong
+        # destroys exactly the warning worth having: an account cookie due to
+        # lapse within the hour is the moment to re-run login-buy, BEFORE a
+        # listing appears rather than after one is lost.
+        out.update(expires_at=soonest.isoformat(), days_left=round(left, 4))
         if left <= 0:
             out.update(signed_in=False,
                        reason="an account cookie has lapsed — sign in again")
@@ -909,6 +917,10 @@ def describe_lapse(days_left) -> str:
     if days_left <= 0:
         return "already"
     hours = days_left * 24.0
+    if hours * 60 < 1:
+        # Positive but under a minute. "in about 0 minutes" is the shape of
+        # bug this function exists to prevent, so say the true thing instead.
+        return "within the minute"
     if hours < 1.5:
         return f"in about {max(1, int(round(hours * 60))) } minutes"
     if days_left < 1:

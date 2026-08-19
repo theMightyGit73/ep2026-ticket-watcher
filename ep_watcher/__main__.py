@@ -1100,6 +1100,19 @@ def cmd_doctor(_args) -> int:
             print("  [ -- ]  Remote heartbeat  — none published yet (starts on the next poll)")
         elif age / 3600.0 < config.MAC_SILENT_HOURS:
             ok("Remote heartbeat", f"last {age / 60:.0f} min ago — GitHub can see this Mac")
+        elif "429" in push_detail:
+            # The heartbeat travels over the same ntfy quota the check above
+            # just found exhausted, so a stale beacon here is a symptom of
+            # that and not a separate fault. Reporting it as a failure whose
+            # fix is restart.sh would send David to bounce a perfectly healthy
+            # watcher — which is precisely what tonight's false alarm invited,
+            # and restarting would not have published a single beacon.
+            warn("Remote heartbeat", f"stale ({age / 3600.0:.1f}h) — because ntfy "
+                                     f"is rate-limiting, not because the Mac is down")
+            print("          It recovers when the quota does. Until then the "
+                  "GitHub backstop may")
+            print("          email 'your Mac watcher has gone quiet' while the "
+                  "watcher is fine.")
         else:
             bad("Remote heartbeat", f"stale ({age / 3600.0:.1f}h)",
                 f"{config.REPO_DIR}/restart.sh")
