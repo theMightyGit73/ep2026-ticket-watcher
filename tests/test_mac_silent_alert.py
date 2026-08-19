@@ -29,7 +29,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ep_watcher import config, liveness, notify  # noqa: E402
+from ep_watcher import config, liveness, notify, pushquota  # noqa: E402
+
+
+def fresh_quota():
+    """Start these checks with the day's push allowance untouched.
+
+    Necessary because this file deliberately provokes a 429, and a 429 now
+    marks the whole day as spent — after which the beacon correctly refuses to
+    publish anything. That is the behaviour tested in test_push_quota.py; here
+    it would just mask the throttle and cooldown logic this file is about.
+    """
+    pushquota.note_sent(0)                       # ensure the file exists
+    path = config.STATE_FILE.parent / "push-quota.json"
+    path.write_text('{"day": "%s", "count": 0}' % pushquota._today())
 
 failures = []
 sent = []
@@ -125,6 +138,7 @@ try:
         "post": staticmethod(publishes(429)),
         "RequestException": Exception,
     })()
+    fresh_quota()
     liveness._next_allowed = 0.0
     check("a refused publish reports failure", liveness.publish("x"), False)
     check("it did try once", len(calls), 1)
@@ -143,6 +157,7 @@ try:
         "post": staticmethod(publishes(200)),
         "RequestException": Exception,
     })()
+    fresh_quota()
     liveness._next_allowed = 0.0
     calls.clear()
     check("a good publish reports success", liveness.publish("x"), True)
@@ -150,6 +165,7 @@ try:
           liveness.due(time.time() + config.LIVENESS_INTERVAL_MINUTES * 60 + 1), True)
 
     # And the throttle must genuinely suppress the extra sends.
+    fresh_quota()
     liveness._next_allowed = 0.0
     calls.clear()
     for _ in range(20):
@@ -222,6 +238,7 @@ was_next, was_requests, was_topic = (
     liveness._next_allowed, liveness.requests, config.NTFY_TOPIC)
 try:
     config.NTFY_TOPIC = "test-topic"
+    fresh_quota()
     carrier = dict(_st._defaults())
 
     liveness.requests = type("_R", (), {
@@ -243,6 +260,7 @@ try:
           liveness.publish("x", state=carrier), False)
     check_true("so the marker is still set", carrier["ntfy_cooldown_until"])
 
+    fresh_quota()
     check("a forced send goes through", liveness.publish("x", state=carrier, force=True), True)
     check("and clears the marker", carrier["ntfy_cooldown_until"], None)
 finally:
