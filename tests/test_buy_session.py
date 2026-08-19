@@ -103,7 +103,10 @@ with tempfile.TemporaryDirectory() as tmp:
     buyer.SESSION_FILE = Path(tmp) / "missing.json"
     ev = buyer.session_evidence(root)
     check("recognised as signed out", ev["signed_in"], False)
-    check_true("and says why", "anonymous" in ev["reason"])
+    # Wording changed on 2026-08-19 when the baseline stopped being a
+    # hardcoded list and became the watcher's own signed-out profile.
+    check_true("and says why",
+               "signed-out profile" in ev["reason"] or "anonymous" in ev["reason"])
 
 print("\nA missing profile is a definite no, not a shrug")
 with tempfile.TemporaryDirectory() as tmp:
@@ -167,7 +170,8 @@ with tempfile.TemporaryDirectory() as tmp:
     make_profile(Path(tmp) / "prof", dict(ANON, **{"SESSION": PAST}))
     ev = buyer.session_evidence(Path(tmp) / "prof")
     check("signed_in is False", ev["signed_in"], False)
-    check_true("and says it expired", "expired" in ev["reason"])
+    check_true("and says a cookie lapsed",
+               "lapsed" in ev["reason"] or "expired" in ev["reason"])
 
 print("\nReading cookies must work while Chrome has the file open")
 # The database is copied before being read. A check that only works when the
@@ -192,14 +196,146 @@ with tempfile.TemporaryDirectory() as tmp:
     ev = buyer.session_evidence(root)
     check("and the verdict is a definite signed-out", ev["signed_in"], False)
 
-print("\nA session-only cookie has no expiry, and that is fine")
+print("\nA profile whose only account cookie is session-scoped cannot be judged")
+# Reversed on 2026-08-19. A session-scoped cookie is dropped by Chrome on
+# exit, so it cannot answer "is this profile still signed in" between runs —
+# there is nothing durable left to compare against. Saying so is honest;
+# claiming it is signed in would be a guess that survives exactly until the
+# browser closes.
 with tempfile.TemporaryDirectory() as tmp:
     root = make_profile(Path(tmp) / "prof", dict(ANON, **{"SESSION": None}))
     buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
-    buyer.record_signed_in_fingerprint(root)
+    rec = buyer.record_signed_in_fingerprint(root)
+    check("the session cookie is recorded", rec["auth_cookies"], ["SESSION"])
+    check("but nothing durable is watched", rec["persistent_cookies"], [])
     ev = buyer.session_evidence(root)
-    check("still counted as signed in", ev["signed_in"], True)
-    check("with no expiry to report", ev["days_left"], None)
+    check("so the verdict is 'cannot tell', not a guess", ev["signed_in"], None)
+    check_true("and it says to sign in again", "sign-in" in ev["reason"])
+
+print("\nAn incomplete anonymous list must not invent an account")
+# Caught on 2026-08-19 against the real profiles. KNOWN_ANONYMOUS_COOKIES was
+# written by hand from one partial sample, so fifteen ordinary anonymous
+# names — SID, TMUO, eps_sid, tmp_id and the rest — were missing from it. A
+# buying profile that had never signed in was therefore reported as SIGNED
+# IN. That is the dangerous direction: doctor goes green, the startup warning
+# disappears, and the first anyone knows is a listing not being held.
+#
+# The fix is to diff against the watcher's own profile, which is on the same
+# machine, always current, and guaranteed signed out.
+UNLISTED = {"SID": FAR, "TMUO": FAR, "eps_sid": FAR, "tmp_id": FAR, "sticky": FAR}
+
+with tempfile.TemporaryDirectory() as tmp:
+    signed_out = make_profile(Path(tmp) / "watcher", dict(ANON, **UNLISTED))
+    buying = make_profile(Path(tmp) / "buy", dict(ANON, **UNLISTED))
+    buyer.SESSION_FILE = Path(tmp) / "no-fingerprint.json"
+
+    real_profile_dir = buyer.config.PROFILE_DIR
+    try:
+        buyer.config.PROFILE_DIR = signed_out
+        ev = buyer.session_evidence(buying)
+        check("a profile matching the signed-out one is NOT signed in",
+              ev["signed_in"], False)
+        check_true("and says the cookies are all ones a signed-out profile has",
+                   "signed-out profile also has" in ev["reason"])
+
+        # A genuine account cookie, absent from the signed-out profile, still
+        # reads as signed in.
+        genuine = make_profile(Path(tmp) / "real", dict(ANON, **UNLISTED,
+                                                       **{"tm-identity": FAR}))
+        ev = buyer.session_evidence(genuine)
+        check("a cookie the signed-out profile lacks IS evidence",
+              ev["signed_in"], True)
+
+        # And the fingerprint must not record the anonymous ones as the
+        # account's, or every later check compares against noise.
+        rec = buyer.record_signed_in_fingerprint(genuine)
+        check("only the genuine cookie is recorded", rec["auth_cookies"], ["tm-identity"])
+
+        # The baseline itself.
+        check("the baseline is read from the watcher's profile",
+              buyer.anonymous_baseline(), set(dict(ANON, **UNLISTED)))
+    finally:
+        buyer.config.PROFILE_DIR = real_profile_dir
+
+# With no watcher profile to read, it degrades to the hardcoded list rather
+# than raising.
+real_profile_dir = buyer.config.PROFILE_DIR
+try:
+    buyer.config.PROFILE_DIR = Path("/nonexistent-profile-dir")
+    check("a missing baseline is empty, not an exception",
+          buyer.anonymous_baseline(), set())
+finally:
+    buyer.config.PROFILE_DIR = real_profile_dir
+
+
+print("\nSession cookies vanish when Chrome closes, and that is not a sign-out")
+# Measured on the real profile, 2026-08-19. Of fourteen cookies recorded at
+# sign-in, TMAUO and ma.SID carried no expiry — Chrome drops those on exit,
+# which it does after every securing attempt. Requiring all fourteen reported
+# a perfectly good profile as SIGNED OUT the first time the browser was used.
+with tempfile.TemporaryDirectory() as tmp:
+    at_signin = dict(ANON, **{"id-token": FAR, "ma.SID": None, "TMAUO": None})
+    root = make_profile(Path(tmp) / "prof", at_signin)
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    rec = buyer.record_signed_in_fingerprint(root)
+    check("the session-only cookies are recorded but not watched",
+          set(rec["auth_cookies"]) - set(rec["persistent_cookies"]),
+          {"ma.SID", "TMAUO"})
+    check_true("and the durable one is watched", "id-token" in rec["persistent_cookies"])
+
+    # Chrome exits: the session cookies go, the persistent one stays.
+    after_restart = make_profile(Path(tmp) / "prof", dict(ANON, **{"id-token": FAR}))
+    ev = buyer.session_evidence(after_restart)
+    check("still signed in after the browser has been closed", ev["signed_in"], True)
+
+    # Losing the durable one IS a sign-out.
+    make_profile(Path(tmp) / "prof", ANON)
+    ev = buyer.session_evidence(Path(tmp) / "prof")
+    check("but losing the durable cookie is", ev["signed_in"], False)
+    check_true("and it names what went", "id-token" in ev["reason"])
+
+print("\nAnalytics must not be mistaken for the account")
+# Google Analytics mints a per-property cookie once you are past a sign-in, so
+# it looked like an account cookie. It carried a 2027 expiry, and reporting
+# the longest-lived one announced the session was good for 400 days — as wrong
+# as the two hours it replaced.
+check_true("a per-property GA cookie is analytics", buyer._is_analytics("_ga_MNQMF2C2CB"))
+check_true("so is _gcl_au", buyer._is_analytics("_gcl_au"))
+check_true("and permutive-id", buyer._is_analytics("permutive-id"))
+check("but id-token is not", buyer._is_analytics("id-token"), False)
+check("nor is ma.SID", buyer._is_analytics("ma.SID"), False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = make_profile(Path(tmp) / "prof",
+                        dict(ANON, **{"id-token": SOON, "_ga_MNQMF2C2CB": FAR}))
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    rec = buyer.record_signed_in_fingerprint(root)
+    check("analytics is excluded from the account cookies",
+          [n for n in rec["auth_cookies"] if n.startswith("_ga")], [])
+    ev = buyer.session_evidence(root)
+    check_true("so the reported lapse is the account's, not the tracker's",
+               ev["days_left"] <= 3)
+
+
+
+print("\nHow long is left, said in units a person can act on")
+# `doctor` printed "first account cookie lapses in 0 day(s)" on 2026-08-19,
+# which is either alarming or meaningless depending on how closely it is read
+# — and it is the line that decides whether David signs in again BEFORE a
+# listing appears rather than after one is lost.
+check("under an hour and a half is said in minutes",
+      "minutes" in buyer.describe_lapse(0.02), True)
+check("under a day is said in hours", "hours" in buyer.describe_lapse(0.3), True)
+check("a day or so is said plainly", buyer.describe_lapse(1.4), "in about a day")
+check("longer is said in days", buyer.describe_lapse(4.2), "in about 4 days")
+check("already lapsed says so", buyer.describe_lapse(-0.5), "already")
+check("and an unknown is not dressed up as a number",
+      buyer.describe_lapse(None), "at an unknown time")
+# The regression itself: no rendering may ever come out as "0" of anything.
+for value in (0.001, 0.01, 0.04, 0.049):
+    check(f"{value} never renders as zero",
+          buyer.describe_lapse(value).startswith("in about 0"), False)
+
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

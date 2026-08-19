@@ -1,6 +1,7 @@
 """Command line entry point:  python -m ep_watcher <command>"""
 
 import argparse
+import datetime
 import json
 import os
 import random
@@ -33,6 +34,71 @@ def _banner(title: str) -> None:
 
 
 # ── commands ─────────────────────────────────────────────────────────────────
+
+def cmd_login_auto(_args) -> int:
+    """Sign the buying profile in from stored credentials, no keyboard needed.
+
+    On the `automated-login` branch only, and opt-in there. `login-buy` is
+    still the supported path and needs no password to exist anywhere.
+
+    Verification is deliberately NOT the page's own say-so. Ticketmaster
+    renders no account text Playwright can read — established on 2026-08-19
+    against nine real captures — so success is judged the same way check-buy
+    judges it: did account cookies actually appear in the profile.
+    """
+    from . import autologin, buyer
+
+    _banner("Signing the BUYING profile in automatically")
+    print(f"  Profile: {config.BUY_PROFILE_DIR}")
+
+    if not config.have_login_credentials():
+        print("\n  [FAIL]  TM_EMAIL and TM_PASSWORD are not set.\n")
+        print("  Add them to ~/.ep2026-watcher/env — the file run_watcher.sh")
+        print("  sources, chmod 600. Never on the command line: an argument is")
+        print("  visible in `ps` to every process on this machine.\n")
+        print("      printf 'TM_EMAIL=you@example.com\\n' >> ~/.ep2026-watcher/env")
+        print("      read -rs P && printf 'TM_PASSWORD=%s\\n' \"$P\" >> ~/.ep2026-watcher/env")
+        print("      chmod 600 ~/.ep2026-watcher/env\n")
+        print("  `read -rs` keeps it off the screen and out of shell history.\n")
+        return 1
+
+    before = set(buyer.profile_cookies(config.BUY_PROFILE_DIR))
+    config.OFFSCREEN = False          # visible, so a challenge can be finished by hand
+    session = _browser().BrowserSession(headless=False, profile_dir=config.BUY_PROFILE_DIR)
+    try:
+        session.start()
+        result = autologin.sign_in(session)
+        # Cookies are written as the page settles; give Chrome a moment before
+        # reading them, the same reason login-buy waits before fingerprinting.
+        time.sleep(3)
+        gained = set(buyer.profile_cookies(config.BUY_PROFILE_DIR)) - before
+    finally:
+        session.close()
+
+    print()
+    if result.outcome == "challenged":
+        print(f"  [ -- ]  {result.reason}\n")
+        return 2
+    if result.outcome in ("rejected", "no-form", "error"):
+        print(f"  [FAIL]  {result.reason}\n")
+        return 1
+
+    record = buyer.record_signed_in_fingerprint(config.BUY_PROFILE_DIR)
+    auth = record.get("auth_cookies") or []
+    if not auth:
+        print("  [FAIL]  the form went through but no account cookies appeared.")
+        print("          That usually means the sign-in did not actually take.")
+        print("          Try `login-buy` and do it by hand.\n")
+        return 1
+
+    print(f"  [ OK ]  signed in — {len(auth)} account cookie(s) recorded")
+    for name in auth[:6]:
+        print(f"            · {name}")
+    if gained:
+        print(f"          ({len(gained)} cookie(s) are new since before the attempt)")
+    print("\n  Confirm any time with:  python -m ep_watcher check-buy\n")
+    return 0
+
 
 def cmd_check_buy(_args) -> int:
     """Is the buying profile signed in and ready to hold a ticket?
@@ -68,12 +134,16 @@ def cmd_check_buy(_args) -> int:
     if ev["signed_in"] is True:
         print(f"  [ OK ]  signed in — {ev['reason']}")
         if ev["days_left"] is not None:
-            days = ev["days_left"]
-            word = "[ OK ]" if days > 3 else "[WARN]"
-            print(f"  {word}  session valid for another {days:g} day(s) "
-                  f"(until {ev['expires_at'][:16]})")
-            if days <= 3:
-                print("          Re-run login-buy before it lapses.")
+            # Information, not a verdict. Nothing here can know when
+            # Ticketmaster will end the session — it can do so server-side
+            # whenever it likes — and two attempts at a confident number both
+            # misled on 2026-08-19. What IS reliable is whether the recorded
+            # cookies are still in the profile, which is the line above.
+            print(f"  [ -- ]  first account cookie lapses "
+                  f"{buyer.describe_lapse(ev['days_left'])} "
+                  f"({ev['expires_at'][:16]})")
+            print("          That may or may not end the session. Re-run this")
+            print("          check afterwards rather than assuming either way.")
         print(f"\n  Profile: {config.BUY_PROFILE_DIR}\n")
         return 0
 
@@ -265,6 +335,50 @@ def cmd_run(_args) -> int:
     return 1 if reading.failed else 0
 
 
+def securing_banner() -> list:
+    """The "Securing: ..." lines printed on every start of `watch`.
+
+    Securing is the one setting that changes what the watcher DOES rather than
+    how often it looks, so it is stated on every start. And it is stated
+    loudly when it is armed but cannot work: an unsigned buying profile fails
+    only at the moment a real listing appears, which is the worst possible
+    time to discover it — the flag was enabled on 2026-08-19 with the profile
+    not yet created, and nothing anywhere said so.
+
+    Asked of the cookies, not of the filesystem. This used to test whether the
+    buying profile's Cookies database existed, which is a question with a
+    reassuring answer and almost no meaning: a signed-OUT ticketmaster.ie
+    profile carries 33 cookies, so that file appears the moment the buying
+    browser has loaded a single page. The case this banner exists to catch — a
+    profile that WAS signed in and has since been signed out, or whose account
+    cookies have lapsed — passed it in silence, and would have announced
+    itself for the first time at the one moment there is no time left to
+    investigate. session_evidence() is what `doctor` and `check-buy` already
+    ask, so all three now give the same answer.
+
+    Returned as lines rather than printed, so the decision can be tested
+    against a profile fixture without starting a watcher.
+    """
+    if not config.SECURE_ON_FIND:
+        return ["  Securing: off — notify only (EP_SECURE_ON_FIND=1 to enable)"]
+
+    from . import buyer
+
+    lines = ["  Securing: ON — will hold a resale listing, never pay for it"]
+    evidence = buyer.session_evidence(config.BUY_PROFILE_DIR)
+    if evidence["signed_in"] is True:
+        lines.append(f"    signed in — {evidence['reason']}")
+    elif evidence["signed_in"] is False:
+        lines.append(f"    ⚠ the buying profile is NOT signed in ({evidence['reason']}),")
+        lines.append("      so securing cannot work yet. Run:")
+        lines.append("          python -m ep_watcher login-buy")
+    else:
+        lines.append("    ⚠ cannot tell whether the buying profile is signed in")
+        lines.append(f"      ({evidence['reason']}). Confirm with:")
+        lines.append("          python -m ep_watcher check-buy")
+    return lines
+
+
 def cmd_watch(args) -> int:
     """Long-running loop holding one warm browser open between polls.
 
@@ -319,14 +433,8 @@ def cmd_watch(args) -> int:
     # fails only at the moment a real listing appears, which is the worst
     # possible time to discover it — the flag was enabled on 2026-08-19 with
     # the profile not yet created, and nothing anywhere said so.
-    if config.SECURE_ON_FIND:
-        signed_in = (config.BUY_PROFILE_DIR / "Default" / "Cookies").exists()
-        print(f"  Securing: ON — will hold a resale listing, never pay for it")
-        if not signed_in:
-            print(f"    ⚠ the buying profile is NOT signed in, so securing")
-            print(f"      cannot work yet. Run:  python -m ep_watcher login-buy")
-    else:
-        print("  Securing: off — notify only (EP_SECURE_ON_FIND=1 to enable)")
+    for line in securing_banner():
+        print(line)
 
     if not config.USE_BROWSER:
         # API-only: no browser to keep warm, so this is just a polling loop.
@@ -406,10 +514,8 @@ def cmd_watch(args) -> int:
                 # A live basket has a countdown on it; stop polling and leave
                 # the window alone so David can actually finish the checkout.
                 if config.PRESS_THE_BUTTON and any("RESERVE ACCEPTED" in n for n in reading.notes):
-                    print(f"[{stamp()}] Reserve accepted — pausing the loop so you can check out.")
-                    print("  The browser is holding the basket. Ctrl-C when you're done.")
-                    while True:
-                        time.sleep(30)
+                    _pause_for_checkout()
+                    continue
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
@@ -449,6 +555,57 @@ def cmd_watch(args) -> int:
         return 0
     finally:
         session.close()
+
+
+def _pause_for_checkout() -> None:
+    """Stop polling while a basket is live, without getting ourselves killed.
+
+    This used to be `while True: time.sleep(30)` and nothing else, which was
+    two separate mistakes stacked on each other.
+
+    The first is that it wrote nothing down. The watchdog restarts a watcher
+    whose poll clock has stopped advancing, which is correct in every case but
+    this one — and a paused checkout looks exactly like a hung Chrome from
+    outside. Fifteen minutes after the pause began, `launchctl kickstart -k`
+    would have killed the process, and the basket lives in the browser that
+    process launched, so the ticket would have gone with it. The one thing
+    worse than missing a ticket is destroying one already caught, and the
+    machinery doing the destroying would have been the machinery meant to keep
+    the watch alive.
+
+    The second is that it never ended. "Ctrl-C when you're done" is fine at a
+    terminal and meaningless under launchd, where nobody is at a keyboard: a
+    hold David never noticed would have stopped the watch until somebody
+    thought to look, which is the ambiguous silence this whole project exists
+    to refuse.
+
+    So it is bounded, and it says so in state on every pass — the marker is
+    refreshed rather than set once, so it stays honest if the pause is cut
+    short, and it lapses on its own if it is not.
+    """
+    minutes = config.hold_window_minutes()
+    print(f"[{stamp()}] Reserve accepted — pausing the loop so you can check out.")
+    print(f"  The browser is holding the basket. Nothing will restart the")
+    print(f"  watcher for {minutes:.0f} min; after that it goes back to watching.")
+
+    deadline = time.monotonic() + minutes * 60
+    while time.monotonic() < deadline:
+        left = (deadline - time.monotonic()) / 60.0
+        # Rewritten every pass so the marker never expires mid-checkout, and
+        # so it shrinks honestly rather than claiming the full window forever.
+        st = state_mod.load()
+        state_mod.note_hold(st, left)
+        # The poll clock too: the watchdog checks whichever of the two it
+        # finds, and a stale next_poll_due is the other way it decides a
+        # watcher is late.
+        state_mod.note_next_poll(st, left * 60)
+        state_mod.save(st)
+        time.sleep(min(30.0, max(1.0, (deadline - time.monotonic()))))
+
+    st = state_mod.load()
+    state_mod.clear_hold(st)
+    state_mod.save(st)
+    print(f"[{stamp()}] checkout window over — watching again")
 
 
 def _mark_backoff(seconds) -> None:
@@ -812,9 +969,21 @@ def cmd_doctor(_args) -> int:
 
     age = state_mod.hours_since_check(st)
     resting = state_mod.backoff_remaining(st)
+    holding = state_mod.hold_remaining(st)
+    # Before every other verdict about the poll clock. A watcher holding a
+    # basket has stopped on purpose, and the fix printed for "looks wedged" is
+    # a kickstart — which would kill the browser the ticket is sitting in.
+    if holding:
+        print(f"  [ !! ]  A TICKET IS HELD — {holding / 60:.0f} min left on the hold")
+        print("          Finish the checkout in the Chrome window that is open.")
+        print("          Nothing will restart the watcher until that runs out.")
     if age is None:
         bad("Polling", "no check has ever been recorded",
             f"tail -20 {config.LOG_DIR}/watcher.log")
+    elif holding:
+        # Not polling because a ticket is held is the one case where stopping
+        # is the correct behaviour, so it must not read as a fault.
+        ok("Polling", f"paused while a ticket is held — resumes in {holding / 60:.0f} min")
     elif resting:
         # Deliberately waiting out a rate limit is not being wedged, and the
         # two must not look alike: restarting during a backoff is how a short
@@ -864,11 +1033,14 @@ def cmd_doctor(_args) -> int:
             # The session expiring is the failure this is really watching
             # for: it is silent, and its first symptom would be a listing
             # appearing and not being held.
+            # Deliberately not a warning. See cmd_check_buy: the expiry of
+            # any one cookie is not the expiry of the session, and warning on
+            # it produced "0.1 days" on a perfectly healthy profile — the kind
+            # of alarm that teaches you to ignore alarms.
             days = ev["days_left"]
-            if days is not None and days <= 3:
-                warn("Buying session", f"expires in {days:g} day(s) — re-run login-buy")
-            elif days is not None:
-                ok("Buying session", f"valid for another {days:g} day(s)")
+            if days is not None:
+                print(f"  [ -- ]  Buying session  — first account cookie lapses "
+                      f"{buyer.describe_lapse(days)}; presence is the real check")
     else:
         print("  [ -- ]  Securing  — off; the watcher only notifies")
 
@@ -904,6 +1076,14 @@ def cmd_doctor(_args) -> int:
     if push_ok:
         ok("Push delivery", push_detail)
         print("          (proves ntfy works; only your phone can prove it is subscribed)")
+    elif "429" in push_detail:
+        # Not a fault to go and fix — a quota to stop spending. It clears by
+        # itself, and the thing that exhausted it (the liveness beacon) is now
+        # throttled. Reporting it as a broken topic sent David to edit a
+        # setting that was correct.
+        warn("Push delivery", push_detail)
+        print("          Email still works. The beacon is throttled so this "
+              "should not recur.")
     elif config.NTFY_TOPIC:
         bad("Push delivery", push_detail, "check NTFY_TOPIC in ~/.ep2026-watcher/env")
     else:
@@ -1060,6 +1240,83 @@ def cmd_networks(_args) -> int:
     return 0
 
 
+def budget_report() -> tuple:
+    """(lines, over_budget) describing what this cadence actually spends.
+
+    Split from the command so the test suite can assert on it directly. The
+    number that matters is the PEAK hour, not the daily total: a rate limit
+    measures requests inside a window, so a day that averages comfortably can
+    still be refused at 15:00.
+
+    This exists because the arithmetic kept being done in comments. Three
+    separate blocks in config.py claimed 12, 15.3 and 17 searches an hour for
+    a configuration that really spent 18.5, each one accurate when written and
+    none of them updated when a page's range moved. A number nothing computes
+    is a number that drifts.
+    """
+    peak = config.peak_searches_per_hour()
+    limit = config.BLOCK_RATE_PER_HOUR
+    hourly = [config.searches_per_hour_at(h) for h in range(24)]
+    quietest = min(hourly)
+    peak_hours = [h for h, rate in enumerate(hourly) if abs(rate - peak) < 0.05]
+
+    lines = []
+    lines.append("")
+    lines.append("  What this cadence actually spends")
+    lines.append("")
+    verdict = "OVER" if peak > limit else "under"
+    lines.append(f"    Busiest hour   : {peak:5.1f} searches/hour  "
+                 f"({verdict} the {limit:.0f}/hour that drew a block)")
+    lines.append(f"    Quietest hour  : {quietest:5.1f} searches/hour")
+    lines.append(f"    Whole day      : {sum(hourly):5.0f} searches")
+    lines.append(f"    Loop tick      : every {config.POLL_INTERVAL_SECONDS}s "
+                 f"— wakes to ask if a page is due; costs no requests")
+    if peak_hours:
+        span = f"{peak_hours[0]:02d}:00-{peak_hours[-1]:02d}:59 local"
+        lines.append(f"    Busiest window : {span}")
+    lines.append("")
+    lines.append("  Per page, in minutes between searches:")
+    for event in config.EVENTS:
+        peak_lo, peak_hi = event.gap_range(datetime.datetime(2000, 1, 1, 12, 30))
+        off_lo, off_hi = event.gap_range(datetime.datetime(2000, 1, 1, 22, 30))
+        rate = 3600.0 / ((peak_lo + peak_hi) / 2.0)
+        secured = "holds" if event.secure else "alerts only"
+        lines.append(
+            f"    {event.slug:28} peak {peak_lo // 60:2.0f}-{peak_hi // 60:<2.0f} "
+            f"off-peak {off_lo // 60:2.0f}-{off_hi // 60:<3.0f} "
+            f"= {rate:4.1f}/hr at peak   ({secured})"
+        )
+    lines.append("")
+    lines.append("  By hour of the local clock:")
+    scale = max(hourly) or 1.0
+    for hour in range(24):
+        bar = "#" * int(round(hourly[hour] / scale * 28))
+        marker = "  <- peak" if hour in peak_hours else ""
+        lines.append(f"    {hour:02d}  {hourly[hour]:5.1f}  {bar}{marker}")
+    lines.append("")
+
+    if peak > limit:
+        lines.append(f"  OVER BUDGET. The busiest hour sends {peak:.1f} searches, above the")
+        lines.append(f"  {limit:.0f}/hour that got this client answered with HTTP 403 on")
+        lines.append("  2026-08-13. Raise a page's EP_*_PEAK_MIN / _MAX to slow it down.")
+    else:
+        headroom = limit - peak
+        lines.append(f"  Under budget, with {headroom:.1f} searches/hour of headroom.")
+        lines.append("  That is not a safe margin, it is an unbroken one: the real")
+        lines.append("  threshold is unpublished, and the watcher was blocked again on")
+        lines.append("  2026-08-19 at 05:43 while running below this rate.")
+    lines.append("")
+    return lines, peak > limit
+
+
+def cmd_budget(_args) -> int:
+    """Print the request budget. Non-zero exit if it is over the block line."""
+    _banner("Request budget")
+    lines, over = budget_report()
+    print("\n".join(lines))
+    return 1 if over else 0
+
+
 def cmd_status(_args) -> int:
     st = state_mod.load()
     print(f"\n  State file : {config.STATE_FILE}")
@@ -1069,7 +1326,17 @@ def cmd_status(_args) -> int:
     print(f"  Discovery API configured: {discovery.configured()}")
     print(f"  Inventory API configured: {inventory_api.configured()}")
     print(f"  Email configured        : {bool(config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD)}")
-    print(f"  Push configured         : {bool(config.NTFY_TOPIC)}\n")
+    print(f"  Push configured         : {bool(config.NTFY_TOPIC)}")
+    # The one number that decides whether this watcher keeps working at all.
+    # Summarised here and explained in full by `budget`.
+    holding = state_mod.hold_remaining(st)
+    if holding:
+        print(f"  A TICKET IS HELD        : {holding / 60:.0f} min left — "
+              f"finish it in the open Chrome window")
+    peak = config.peak_searches_per_hour()
+    print(f"  Peak request rate       : {peak:.1f}/hour of "
+          f"{config.BLOCK_RATE_PER_HOUR:.0f} "
+          f"({'OVER — see `budget`' if peak > config.BLOCK_RATE_PER_HOUR else 'ok'})\n")
     print(json.dumps(st, indent=2))
     healthy = st["consecutive_failures"] < config.WATCHDOG_FAILURE_THRESHOLD
     print(f"\n  Health: {'OK' if healthy else 'BROKEN — check the logs'}\n")
@@ -1080,6 +1347,7 @@ COMMANDS = {
     "login": cmd_login,
     "login-buy": cmd_login_buy,
     "check-buy": cmd_check_buy,
+    "login-auto": cmd_login_auto,
     "check": cmd_check,
     "run": cmd_run,
     "watch": cmd_watch,
@@ -1091,6 +1359,7 @@ COMMANDS = {
     "resolve-id": cmd_resolve_id,
     "networks": cmd_networks,
     "status": cmd_status,
+    "budget": cmd_budget,
 }
 
 

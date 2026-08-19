@@ -364,23 +364,25 @@ STOP_AFTER_DATE = os.environ.get("EP_STOP_AFTER", "2026-08-28")
 TM_HOST_EVENT_ID = "18006314BD813D3E"
 TM_EVENT_ID = os.environ.get("TM_EVENT_ID", TM_HOST_EVENT_ID)
 
-# Quantities to search for, in order. "There aren't enough tickets" is an
-# answer about the number you asked for, so this genuinely changes the result:
-# the page defaults to 2, and asking for 2 when you'd take 1 manufactures its
-# own refusal.
+# Quantities to search for, in order.
 #
-# It sweeps more than one on purpose. A search at quantity 2 showed a resale
-# listing that a search at quantity 1 minutes later did not, and there are
-# three possible reasons — the listing sold, the resale panel filters by
-# quantity, or the parser missed it. Sweeping is correct under all three, so
-# the watcher does that rather than depending on which one is true.
-# Search for one ticket only, by request. This is also the most sensitive
-# probe available: "there aren't enough tickets" is an answer about the number
-# you asked for, so asking for the smallest number gives the earliest possible
-# yes. Anything that exists at all shows up here.
+# ONE, by David's instruction, and it is not to be widened. This is also the
+# most sensitive probe available: "there aren't enough tickets" is an answer
+# about the number you asked for, so asking for the smallest number gives the
+# earliest possible yes. The page defaults to 2, and searching for 2 when you
+# would happily take 1 manufactures its own refusal against a listing that is
+# really there. Anything that exists at all shows up at quantity 1.
 #
-# Set WANTED_QUANTITIES=1,2,3 to sweep several instead — each is a separate
-# question whose answer does not imply the others.
+# This block used to carry both instructions at once — an older paragraph
+# arguing that sweeping several quantities is correct, followed immediately by
+# the standing instruction to search for one. Two contradictory rationales in
+# one comment is worse than either alone, because whichever a reader acts on
+# they can cite the file for it.
+#
+# Sweeping remains possible for a one-off diagnostic (WANTED_QUANTITIES=1,2,3
+# — each is a separate question whose answer does not imply the others), but
+# every extra quantity is another real search against the rate limit, on a
+# budget already close to the line that drew a block.
 WANTED_QUANTITIES = [
     int(q) for q in os.environ.get("WANTED_QUANTITIES", "1").split(",") if q.strip()
 ]
@@ -480,9 +482,35 @@ SECURE_ON_FIND = os.environ.get("EP_SECURE_ON_FIND", "0").lower() in ("1", "true
 #: icon that this project has already established is invisible to Playwright's
 #: flattened text. Landing on a page with no visible next step is how a
 #: one-command setup turns into a support conversation.
+#: Credentials for the automated sign-in on the `automated-login` branch.
+#:
+#: From the environment ONLY, and only ever from ~/.ep2026-watcher/env, which
+#: is chmod 600 and sourced by run_watcher.sh. Never a literal here, never in
+#: a commit, never a command-line argument — an argument is visible in `ps`
+#: to every process on the machine.
+#:
+#: The manual `login-buy` remains the default and needs none of this. David
+#: asked for the automated path on 2026-08-19 for a secondary Yahoo account he
+#: described as disposable, having been told that scripted sign-ins are what
+#: account security is built to catch. That trade is his to make; it is the
+#: reason this is opt-in and on its own branch rather than the default.
+TM_EMAIL = os.environ.get("TM_EMAIL", "")
+TM_PASSWORD = os.environ.get("TM_PASSWORD", "")
+
+
+def have_login_credentials() -> bool:
+    return bool(TM_EMAIL and TM_PASSWORD)
+
+
 SIGNIN_URLS = tuple(
     u.strip() for u in os.environ.get(
         "EP_SIGNIN_URLS",
+        # /member first because it redirects INTO the identity service with
+        # the right client parameters attached. David's password manager has
+        # the credential saved against auth.ticketmaster.com, which confirms
+        # that is where the .ie site hands off to — but the OAuth entry point
+        # cannot be constructed by hand without a real client_id, and an
+        # invented one would burn an attempt on a 400. Let the site build it.
         "https://www.ticketmaster.ie/member,"
         "https://www.ticketmaster.ie/myacct,"
         "https://identity.ticketmaster.ie/sign-in",
@@ -509,6 +537,31 @@ SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "45"))
 # long he has, and the error that costs a ticket is the optimistic one.
 HOLD_MINUTES_HINT = int(os.environ.get("EP_HOLD_MINUTES_HINT", "10"))
 
+# Margin added to the hold window before the watcher stops protecting it.
+#
+# While a hold is live the watchdog is told not to restart the watcher, since
+# restarting it kills the browser the basket lives in. That protection has to
+# END, though, or a hold nobody completes would silence the watch for the rest
+# of the fortnight — ambiguous silence being the one thing this project
+# refuses. So it lasts as long as the hold plus this, and then the ordinary
+# machinery resumes.
+#
+# Ten minutes on top of a ten-to-fifteen minute hold. Long enough to cover a
+# walk to the laptop and a card number typed badly twice; short enough that a
+# hold David never saw costs half an hour of watchdog cover rather than a day.
+HOLD_PAUSE_EXTRA_MINUTES = float(os.environ.get("EP_HOLD_PAUSE_EXTRA", "10"))
+
+
+def hold_window_minutes(measured=None) -> float:
+    """How long to treat a live hold as live, in minutes.
+
+    Prefers the countdown read off the checkout page over the configured
+    estimate, for the same reason the alert does: the estimate comes from one
+    observation of an entirely different event.
+    """
+    return float(measured or HOLD_MINUTES_HINT) + HOLD_PAUSE_EXTRA_MINUTES
+
+
 # Set EP_USE_BROWSER=0 to run API-sources-only. That is the mode for anywhere
 # without a real Chrome — GitHub Actions, a small VPS without a display — and
 # it is much weaker: no primary ground truth and no per-listing resale. See
@@ -517,6 +570,26 @@ USE_BROWSER = os.environ.get("EP_USE_BROWSER", "1").lower() in ("1", "true", "ye
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 REPO_DIR = Path(__file__).parent.parent
+
+# Where this repo lives on the MacBook, as a string to print in instructions.
+#
+# REPO_DIR is wherever the code happens to be running, which is right for
+# every message written on the Mac and wrong for the one message that is not.
+# The "your Mac watcher has gone quiet" email is sent from a GitHub runner, so
+# REPO_DIR there is the runner's checkout — and on 2026-08-19 David received
+# an alert telling him to run
+#
+#     cd /home/runner/work/ep2026-ticket-watcher/ep2026-ticket-watcher
+#
+# on his laptop. That is the single alert that arrives when he is away from
+# the machine and has to act on it from a phone, and its instructions pointed
+# at a directory that exists only inside a container that had already been
+# destroyed.
+#
+# So the Mac's path is stated rather than derived. Override with
+# EP_MAC_REPO_DIR if the checkout ever moves.
+MAC_REPO_DIR = os.environ.get(
+    "EP_MAC_REPO_DIR", "~/SideProjects/EPTicketRefresher")
 
 # Runtime state lives outside the repo. The old watcher committed and pushed
 # its state file on every single run, which is where ~1000 "Update watcher
@@ -612,6 +685,30 @@ def poll_interval() -> int:
     # entirely by the per-page gaps.
     fastest = min(e.fastest_gap_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
     return max(30, min(fastest, LOOP_TICK_CEILING_SECONDS))
+
+
+#: The instantaneous request rate that actually drew a block, in searches per
+#: hour, across all watched pages combined.
+#:
+#: Measured, not chosen. Polling every three minutes — roughly 20 searches an
+#: hour — got this client answering HTTP 403 on 2026-08-13, from the same
+#: headed Chrome that had been getting 200 all day, and the identical command
+#: that had worked fifteen minutes earlier got 403 too. Every cadence decision
+#: in this file is argued against that number.
+#:
+#: It is a constant here because until 2026-08-19 it existed only as the
+#: phrase "~20/hour" repeated in a dozen comments, where nothing could check
+#: it — and the comments had already drifted from the code they described,
+#: variously claiming 15.3, 17 and 12 searches an hour for a configuration
+#: really spending 18.5. Now `python -m ep_watcher budget` measures the live
+#: settings against it and tests/test_request_budget.py fails the suite if a
+#: cadence change crosses it.
+#:
+#: Treat it as a cliff with fog around it, not a fence. It is one observation
+#: on one connection on one day; the real threshold is unpublished and may
+#: move. Being under it has never been a guarantee — the watcher was blocked
+#: again on 2026-08-19 at 05:43 while running below this rate.
+BLOCK_RATE_PER_HOUR = float(os.environ.get("EP_BLOCK_RATE_PER_HOUR", "20"))
 
 
 def searches_per_hour_at(hour: int) -> float:
@@ -806,6 +903,54 @@ HEARTBEAT_HOURS = float(
 # poll or a brief network drop never triggers it — this alert must only fire
 # when the Mac is genuinely not running.
 MAC_SILENT_HOURS = float(os.environ.get("EP_MAC_SILENT_HOURS", "1.5"))
+
+# How often the Mac actually publishes that heartbeat.
+#
+# It used to publish on every handled reading — about 18 times an hour at the
+# current cadence, roughly 450 a day, for a signal whose only consumer asks
+# "was there one in the last 1.5 hours?". On 2026-08-19 that caught up with
+# it: ntfy.sh answered HTTP 429 to the health check's own publish, and the
+# most recent beacon was 76 minutes old against a 90-minute deadline. The
+# dead man's switch was one slow poll away from declaring a perfectly healthy
+# Mac dead.
+#
+# Worse than a false alarm, though, is what the quota is being spent ON.
+# ntfy is the fast channel — the one that reaches a phone in seconds when a
+# listing appears — and every beacon is a request that channel might have
+# needed. Spending the budget proving the watcher is well, and running out
+# when it has something to say, is precisely backwards.
+#
+# What actually happened, measured on 2026-08-19: 56 beacons went out at 3-4
+# minute gaps, ntfy started answering 429, and NOTHING got through for the
+# next 2.8 hours. The GitHub backstop — which judges the Mac by beacon age —
+# duly emailed "your Mac watcher has gone quiet" about a watcher that was
+# running perfectly and had just completed its 800th check.
+#
+# So the cost is not theoretical and it is not only waste. It was a false
+# alarm, three hours of a disabled dead man's switch, and — because the beacon
+# and the alert share one anonymous ntfy quota — three hours in which a real
+# listing could not have reached the phone either. Email would still have
+# worked; the fast channel would not.
+#
+# The limit being hit is the per-visitor daily message allowance rather than a
+# burst limit, which is why it did not clear on its own: hammering it every
+# three minutes for three hours kept it exhausted.
+#
+# Fifteen minutes is 96 beacons a day instead of ~450, which leaves the great
+# majority of the allowance for messages that actually say something, and
+# still fits six beacons inside every 1.5-hour silence window — five may fail
+# before the switch has anything to complain about.
+LIVENESS_INTERVAL_MINUTES = float(os.environ.get("EP_LIVENESS_MINUTES", "15"))
+
+# How long to stop publishing entirely after ntfy answers 429.
+#
+# The throttle above stops the quota being exhausted; this stops it being held
+# exhausted once it has been. A rate limiter refills over time and continuous
+# requests keep the bucket empty, so the beacon that reacts to a refusal by
+# trying again shortly is the reason the refusal lasts three hours. Backing
+# well off is what lets it recover.
+LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES = float(
+    os.environ.get("EP_LIVENESS_COOLDOWN", "60"))
 
 # ── Alternating between home Wi-Fi and the phone hotspot ─────────────────────
 # The watcher asks David to switch the MacBook's network after this long, or

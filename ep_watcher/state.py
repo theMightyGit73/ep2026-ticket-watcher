@@ -5,6 +5,7 @@ field here never needs a migration and deleting state.json is always safe.
 """
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -84,6 +85,11 @@ def _defaults():
         # future the watcher is *supposed* to be idle, and neither the
         # watchdog nor doctor should treat the still timestamp as a hang.
         "backoff_until": None,            # ISO8601
+        # When a live basket is expected to expire. While this is in the
+        # future the watcher is holding a ticket and MUST NOT be restarted:
+        # the basket lives in the browser the watcher launched, so killing
+        # the process throws the ticket away. See note_hold().
+        "hold_until": None,               # ISO8601
         # When the browser profile was last thrown away and rebuilt. The
         # bot-check cookies age out, so this drives a pre-emptive refresh —
         # see config.PROFILE_MAX_AGE_MINUTES.
@@ -96,22 +102,79 @@ def _defaults():
 
 
 def load() -> dict:
+    """Read the state file, filling in defaults for anything missing.
+
+    A missing file is ordinary — a first run, or a deliberate reset — and is
+    silent. A file that EXISTS and cannot be parsed is not ordinary and says
+    so, because it means the watcher has just forgotten everything it knew:
+    which listings it has already alerted on, how many blocks this connection
+    has drawn, and whether a ticket is currently held. That last one matters
+    most, and losing it silently is how a corrupt file becomes a lost ticket.
+    """
     state = _defaults()
     try:
         with open(config.STATE_FILE, "r") as f:
             state.update(json.load(f))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError:
         pass
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        print(f"[{stamp()}] WARNING: state file unreadable ({exc}) — "
+              f"starting from defaults. Everything the watcher remembered is gone.")
     return state
 
 
 def save(state: dict) -> None:
+    """Write the state file atomically.
+
+    A plain `open(path, "w")` truncates the real file before a single byte of
+    the new content is written, so a process killed inside that window leaves
+    an empty or half-written state.json — and load() then quietly starts over
+    from defaults.
+
+    That window is not theoretical here. The watchdog's repair is
+    `launchctl kickstart -k`, which is a kill, and this file is written on
+    every cycle and every thirty seconds while a ticket is held. Among the
+    things that would be lost is `hold_until` — the marker that stops the
+    watchdog killing a live checkout — which makes the failure feed itself:
+    the kill destroys the evidence that the kill was the wrong thing to do.
+
+    Writing beside the file and renaming over it makes the swap atomic. A
+    reader — the watcher, the watchdog, `doctor` — sees either the whole old
+    file or the whole new one, never a fragment. The fsync is what makes that
+    true across a power cut as well as a kill, which this project has already
+    had one of.
+    """
+    tmp = None
     try:
         config.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(config.STATE_FILE, "w") as f:
+        tmp = config.STATE_FILE.parent / (config.STATE_FILE.name + ".tmp")
+        with open(tmp, "w") as f:
             json.dump(state, f, indent=2)
-    except OSError as exc:
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, config.STATE_FILE)
+    except Exception as exc:
+        # Deliberately every exception, not just OSError.
+        #
+        # run_once() saves in a `finally`, so anything raised here escapes
+        # from the middle of a poll and — because it is a finally — would
+        # mask whatever the poll was really doing. OSError covers the disk;
+        # it does not cover a value that will not serialise, which is a
+        # TypeError from json.dump and exactly the kind of thing a new field
+        # introduces. The watch loop would then catch it upstairs, decide the
+        # browser was at fault, and cold-restart Chrome once per cycle
+        # forever, chasing a fault in a file.
+        #
+        # Failing to write the state costs the memory of one poll. Raising
+        # costs the poll itself, and possibly every poll after it.
         print(f"[{stamp()}] WARNING: could not save state: {exc}")
+        # Do not leave a half-written temp file behind to be mistaken for
+        # anything, or to fail the next rename on a full disk.
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _parse(iso: Optional[str]) -> Optional[datetime]:
@@ -586,6 +649,44 @@ def note_backoff(state: dict, seconds: float) -> None:
 
 def clear_backoff(state: dict) -> None:
     state["backoff_until"] = None
+
+
+def note_hold(state: dict, minutes: float) -> None:
+    """Record that a ticket is held in a browser, until `minutes` from now.
+
+    This exists because the two halves of the project were about to destroy
+    each other. The watchdog restarts the watcher when its poll clock stops
+    advancing, which is right in every case but one: when the watcher has
+    stopped on purpose because it is holding a basket. On the primary-stock
+    path it did exactly that — printed "Reserve accepted — pausing the loop so
+    you can check out", then slept forever without writing anything down. The
+    poll became overdue, the watchdog ran its fifteen-minute check, and
+    `launchctl kickstart -k` killed the process. The basket lives in the
+    browser that process launched, so the ticket went with it.
+
+    That is the worst failure this codebase can produce. Every other bug
+    costs a ticket that was never in hand; this one throws away a ticket
+    already caught, silently, by the machinery meant to protect it.
+
+    Same shape as note_backoff and for the same reason: "deliberately not
+    polling" and "wedged" look identical from outside, and the correct
+    response is opposite. It is bounded rather than open-ended so that a hold
+    nobody completes cannot silence the watcher for the rest of the
+    fortnight — the one thing this project refuses is ambiguous silence.
+    """
+    state["hold_until"] = (utc_now() + timedelta(minutes=minutes)).isoformat()
+
+
+def clear_hold(state: dict) -> None:
+    state["hold_until"] = None
+
+
+def hold_remaining(state: dict) -> float:
+    """Seconds left on a live hold, or 0.0 if none is running."""
+    until = _parse(state.get("hold_until"))
+    if until is None:
+        return 0.0
+    return max(0.0, (until - utc_now()).total_seconds())
 
 
 # ── Day / night sessions ─────────────────────────────────────────────────────

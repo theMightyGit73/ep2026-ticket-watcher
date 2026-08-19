@@ -1,0 +1,54 @@
+name: Tests
+
+# Run the test suite on every push and pull request.
+#
+# This did not exist until 2026-08-19, and its absence was a real gap rather
+# than a tidiness one: there are 38 test files and ~7,000 lines of them,
+# encoding a fortnight of hard-won findings about how this page actually
+# behaves — and nothing ran any of it unless somebody remembered to. The only
+# other workflow in this repo is the API backstop, which watches Ticketmaster
+# and never touches the tests.
+#
+# Nothing here talks to Ticketmaster. Every test in tests/ is offline by
+# construction: the ones that exercise the browser source subclass
+# BrowserSession and replace the Chrome-touching methods, so the real verdict
+# logic runs against fixtures. That is what makes it safe to run this on a
+# datacentre IP, which is the one thing the watcher itself cannot do.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The playwright PACKAGE, not its browsers. Eight test files import
+      # ep_watcher.sources.browser, which imports playwright at module scope,
+      # so the import has to resolve — but no test ever launches anything, and
+      # `playwright install` would pull ~400MB to satisfy an import.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the suite
+        run: ./run_tests.sh
+
+      # A syntax error in one of these is invisible until the moment it is
+      # needed — restart.sh during an outage, watchdog.sh at 3am — so they get
+      # parsed here even though nothing executes them.
+      - name: Check the shell scripts parse
+        run: |
+          for script in run_watcher.sh restart.sh watchdog.sh run_tests.sh \
+                        deploy/bootstrap.sh deploy/entrypoint.sh; do
+            bash -n "$script" && echo "ok  $script"
+          done

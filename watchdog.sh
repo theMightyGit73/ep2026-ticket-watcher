@@ -67,6 +67,40 @@ if [ -n "$RESTING" ] && [ "$RESTING" -gt 0 ] 2>/dev/null; then
     exit 0
 fi
 
+# Is a ticket being held right now? Then the watcher has stopped polling ON
+# PURPOSE, and restarting it is the most expensive thing this script can do:
+# the basket lives in the browser the watcher launched, so
+# `launchctl kickstart -k` throws away a ticket that is already caught.
+#
+# This gap was real until 2026-08-19. The watcher printed "Reserve accepted —
+# pausing the loop so you can check out" and then slept without writing
+# anything down, so from here it was indistinguishable from a hung process —
+# and fifteen minutes later this script would have killed the checkout it
+# exists to protect.
+#
+# The marker is bounded by the watcher rather than by this script, so a hold
+# nobody completes cannot silence the watch for the rest of the fortnight.
+HOLDING=$(/usr/bin/python3 - "$STATE" <<'PY' 2>/dev/null
+import json, sys
+from datetime import datetime, timezone
+try:
+    with open(sys.argv[1]) as f:
+        until = json.load(f).get("hold_until")
+    if not until:
+        print(0)
+    else:
+        left = (datetime.fromisoformat(until) - datetime.now(timezone.utc)).total_seconds()
+        print(int(max(0, left) // 60))
+except Exception:
+    print(0)
+PY
+)
+
+if [ -n "$HOLDING" ] && [ "$HOLDING" -gt 0 ] 2>/dev/null; then
+    say "a ticket is held for another ${HOLDING} min — leaving it alone"
+    exit 0
+fi
+
 # Age of the last poll, in minutes.
 LAST=$(/usr/bin/python3 - "$STATE" <<'PY' 2>/dev/null
 import json, sys
