@@ -23,7 +23,7 @@ class Event:
                  poll_min_seconds: int = 0, poll_max_seconds: int = 0,
                  peak_min_seconds: int = 0, peak_max_seconds: int = 0,
                  offpeak_min_seconds: int = 0, offpeak_max_seconds: int = 0,
-                 secure: bool = True):
+                 secure: bool = True, secure_priority: int = 0):
         self.peak_min_seconds, self.peak_max_seconds = peak_min_seconds, peak_max_seconds
         self.offpeak_min_seconds = offpeak_min_seconds
         self.offpeak_max_seconds = offpeak_max_seconds
@@ -41,6 +41,27 @@ class Event:
         #: switch stays because the argument may return, and because a page
         #: added later may genuinely not deserve grabbing.
         self.secure = secure
+        #: Which page wins when two want the buying browser at once.
+        #:
+        #: Higher takes precedence, and it is a real precedence rather than a
+        #: preference: a page that outranks a live hold will CLOSE that
+        #: browser and take the ticket instead, dropping whatever was in the
+        #: basket.
+        #:
+        #: David set the rule on 2026-08-19 — "weekend ticket is always
+        #: priority, but try to get the early ticket as well". Both halves
+        #: matter. The Early Entry Pass is still watched and still secured
+        #: whenever the buying browser is free, because it is worth having;
+        #: but Ticketmaster only honours it alongside a Weekend Ticket, so a
+        #: held Early Entry pass while a weekend ticket goes by is the single
+        #: worst outcome available — it spends the one browser on the one
+        #: product that is useless on its own.
+        #:
+        #: The cost is stated plainly because it is real: preempting drops a
+        #: hold that was certain for one that may already be gone. That is the
+        #: trade his rule chooses, and it is the right way round, because a
+        #: weekend ticket is the thing this project exists to find.
+        self.secure_priority = secure_priority
         self.slug = slug
         self.name = name
         self.url = url
@@ -269,6 +290,12 @@ STANDARD_POLL_SECONDS = (STANDARD_POLL_MIN_SECONDS + STANDARD_POLL_MAX_SECONDS) 
 INSTALMENT_POLL_SECONDS = (INSTALMENT_POLL_MIN_SECONDS + INSTALMENT_POLL_MAX_SECONDS) // 2
 DEFAULT_EVENT_POLL_SECONDS = STANDARD_POLL_SECONDS
 
+#: Securing precedence, highest first. Only the ordering matters, not the
+#: numbers; they are spaced so a page can be slotted between them later.
+SECURE_PRIORITY_WEEKEND = int(os.environ.get("EP_PRIORITY_WEEKEND", "100"))
+SECURE_PRIORITY_ADDON = int(os.environ.get("EP_PRIORITY_ADDON", "10"))
+
+
 EVENTS = [
     Event(
         slug="weekend-camping",
@@ -280,6 +307,7 @@ EVENTS = [
         ),
         match_words=("electric picnic", "weekend"),
         tm_event_id=os.environ.get("TM_EVENT_ID", "18006314BD813D3E"),
+        secure_priority=SECURE_PRIORITY_WEEKEND,
         poll_min_seconds=STANDARD_POLL_MIN_SECONDS,
         poll_max_seconds=STANDARD_POLL_MAX_SECONDS,
         peak_min_seconds=STANDARD_PEAK_MIN_SECONDS,
@@ -299,6 +327,7 @@ EVENTS = [
             "/event/18006314CFB4A99E"
         ),
         match_words=("electric picnic", "weekend", "instalment"),
+        secure_priority=SECURE_PRIORITY_WEEKEND,
         poll_min_seconds=INSTALMENT_POLL_MIN_SECONDS,
         poll_max_seconds=INSTALMENT_POLL_MAX_SECONDS,
         peak_min_seconds=INSTALMENT_PEAK_MIN_SECONDS,
@@ -326,6 +355,8 @@ EVENTS = [
         offpeak_min_seconds=EARLY_ENTRY_OFFPEAK_MIN_SECONDS,
         offpeak_max_seconds=EARLY_ENTRY_OFFPEAK_MAX_SECONDS,
         secure=True,
+        # Watched and secured, but it gives way. See Event.secure_priority.
+        secure_priority=SECURE_PRIORITY_ADDON,
     ),
 ]
 

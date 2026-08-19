@@ -90,6 +90,11 @@ def _defaults():
         # the basket lives in the browser the watcher launched, so killing
         # the process throws the ticket away. See note_hold().
         "hold_until": None,               # ISO8601
+        # Which page the live hold belongs to, and how important it is. A
+        # weekend ticket is allowed to close the browser on a held Early Entry
+        # pass, so the decision needs to know what is in there.
+        "hold_event_slug": None,
+        "hold_priority": 0,
         # When ntfy last refused this client, and until when to stop asking.
         # Persisted rather than kept in the process, because a restart used to
         # reset the cooldown and immediately fire another request into an
@@ -662,7 +667,8 @@ def clear_backoff(state: dict) -> None:
     state["backoff_until"] = None
 
 
-def note_hold(state: dict, minutes: float) -> None:
+def note_hold(state: dict, minutes: float, event_slug: str = None,
+              priority: int = 0) -> None:
     """Record that a ticket is held in a browser, until `minutes` from now.
 
     This exists because the two halves of the project were about to destroy
@@ -686,10 +692,26 @@ def note_hold(state: dict, minutes: float) -> None:
     fortnight — the one thing this project refuses is ambiguous silence.
     """
     state["hold_until"] = (utc_now() + timedelta(minutes=minutes)).isoformat()
+    if event_slug is not None:
+        state["hold_event_slug"] = event_slug
+        state["hold_priority"] = int(priority)
 
 
 def clear_hold(state: dict) -> None:
     state["hold_until"] = None
+    state["hold_event_slug"] = None
+    state["hold_priority"] = 0
+
+
+def held_priority(state: dict) -> int:
+    """How important the live hold is, or 0 if nothing is held.
+
+    Reads 0 once the hold window has lapsed, so a stale marker cannot keep
+    outranking a real find for the rest of the day.
+    """
+    if hold_remaining(state) <= 0:
+        return 0
+    return int(state.get("hold_priority") or 0)
 
 
 def hold_remaining(state: dict) -> float:

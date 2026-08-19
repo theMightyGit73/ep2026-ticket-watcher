@@ -360,6 +360,48 @@ def profile_in_use(profile_dir=None) -> bool:
     return found.returncode == 0 and bool(found.stdout.strip())
 
 
+def release_buying_browser(profile_dir=None) -> bool:
+    """Close the buying browser, dropping whatever it is holding. True if one died.
+
+    Only ever called to make room for a HIGHER priority ticket — see
+    Event.secure_priority. It throws away a live basket, which is normally the
+    worst thing this codebase can do, and is right in exactly one case: an
+    Early Entry pass is being held and a Weekend Ticket has appeared. The pass
+    is only valid alongside a weekend ticket, so holding it while the ticket
+    goes by spends the one buying browser on the one product that is useless
+    on its own.
+
+    Done by killing the process rather than by calling close() on the session,
+    and that is not laziness. The session was created inside the securing
+    thread, and Playwright's sync objects belong to the thread that made them;
+    closing one from another thread fails in the same family of ways that made
+    the threading necessary in the first place. The process table does not
+    care which thread is asking.
+
+    The pattern is anchored on the end of the argument for the same reason
+    restart.sh's is: `pkill -f` matches substrings, and an unanchored buy
+    profile path would also match a longer one.
+    """
+    from pathlib import Path
+
+    profile_dir = Path(profile_dir or config.BUY_PROFILE_DIR)
+    specials = ".[]()*+?{}|^$\\"
+    quoted = "".join("\\" + ch if ch in specials else ch for ch in str(profile_dir))
+    try:
+        killed = subprocess.run(
+            ["pkill", "-f", f"user-data-dir={quoted}( |$)"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # Chrome needs a moment to let go of the profile lock, or the browser we
+    # are about to open for the weekend ticket fails on the way in.
+    if killed.returncode == 0:
+        time.sleep(2.0)
+        return True
+    return False
+
+
 @dataclass
 class HoldResult:
     """What came of trying to secure one listing."""
@@ -378,6 +420,10 @@ class HoldResult:
     #: Offered to David's phone as worth trying — see the note at the capture
     #: site. Empty when nothing was held.
     checkout_url: str = ""
+    #: True when an earlier, lower-priority hold was dropped to attempt this
+    #: one. The alerts say so either way: he needs to know the Early Entry
+    #: pass was let go, whether or not the weekend ticket was then caught.
+    preempted: bool = False
     #: True when minutes_hint was read from the page rather than estimated.
     #: The alert says which, because "you have about ten minutes" and "the
     #: page says 11:39" deserve different amounts of trust — and the estimate
@@ -516,7 +562,8 @@ class BuySession:
     # what secure(), doctor and check-buy all already use.
 
 
-def secure_in_thread(event, listing, timeout_s: int = None) -> HoldResult:
+def secure_in_thread(event, listing, timeout_s: int = None,
+                     may_preempt: bool = False) -> HoldResult:
     """Open the buying browser and hold `listing`, from its own thread.
 
     The thread is not an optimisation, it is the only way this works.
@@ -552,15 +599,22 @@ def secure_in_thread(event, listing, timeout_s: int = None) -> HoldResult:
         # certainly not to close the old window, which would drop a ticket
         # that is already caught in order to chase one that is not.
         if profile_in_use():
-            hold.reason = (
-                "the buying browser is already open — most likely holding an "
-                "earlier listing that has not been paid for yet. Finish or "
-                "close that window and this page can be secured by hand; "
-                "nothing was touched here."
-            )
-            hold.note(hold.reason)
-            box["result"] = hold
-            return
+            if not may_preempt:
+                hold.reason = (
+                    "the buying browser is already open holding something at "
+                    "least as important as this, so it was left alone. Finish "
+                    "or close that window and this page can be secured by "
+                    "hand; nothing was touched here."
+                )
+                hold.note(hold.reason)
+                box["result"] = hold
+                return
+            # Outranks what is being held. Let go of it and take this instead.
+            hold.note("a more important ticket than the one being held — "
+                      "releasing the buying browser to go for this one")
+            if release_buying_browser():
+                hold.preempted = True
+                hold.note("the earlier hold has been dropped")
         try:
             session = BuySession().start()
             hold = secure(session, event, listing, hold)

@@ -150,8 +150,8 @@ check("no browser was opened", started, [])
 check("nothing was claimed as held", hold.secured, False)
 check_true("and the reason says what is actually going on",
            "already open" in hold.reason)
-check_true("naming the earlier listing as the likely cause",
-           "earlier listing" in hold.reason)
+check_true("saying it deferred to what is already held, not just that it is busy",
+           "at least as important" in hold.reason)
 # The alert has to be actionable at a glance, on a phone, under a countdown.
 check_true("and telling him what to do about it",
            "close" in hold.reason.lower() or "finish" in hold.reason.lower())

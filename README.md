@@ -336,6 +336,39 @@ about it. The availability alert has already gone out either way.
 6. **If not**: an email that says plainly there is *no* hold, and names the
    step that failed.
 
+### The weekend ticket always wins the browser
+
+There is one buying browser and one account, so two listings cannot be held at
+once — and on 2026-08-19 the Early Entry Pass appeared four times against four
+weekend sightings, so the collision is an ordinary afternoon rather than a
+corner case.
+
+David's rule: **the weekend ticket is always priority, but try to get the
+early one as well.** Both halves are implemented.
+
+- The pass is still watched, still alerted on, and still secured whenever the
+  buying browser is free. It is worth having.
+- A weekend ticket outranks it, and outranking is real: a weekend find will
+  **close the browser on a held pass** and go for the ticket instead.
+- The pass may never do the reverse, and neither weekend page may evict the
+  other — they rank equally, because either is the real ticket.
+- The most important page is also polled first, so a cycle cut short by a 403
+  never skips the weekend ticket.
+
+The reason precedence is worth the complexity: Ticketmaster only honours an
+Early Entry pass alongside a Weekend Ticket. Holding one while a weekend
+ticket goes past spends the single browser on the single product that is
+useless on its own — the worst outcome available.
+
+The cost is real and is stated in the alerts rather than hidden: preempting
+drops a hold that was certain for one that may already be gone. Both the
+"held" email and the "could not hold it" email say plainly that the pass was
+let go, and why, so finding out never means walking to a laptop that is
+showing something different. If the swap fails, the record stops claiming
+anything is held.
+
+Set `EP_PRIORITY_WEEKEND` and `EP_PRIORITY_ADDON` to change the ranking.
+
 ### Nothing may restart the watcher while a ticket is held
 
 A basket lives in the browser the watcher launched, so anything that kills the
@@ -728,6 +761,10 @@ Environment variables, all optional:
 | `EP_SECURE_ON_FIND` | `0` | Set `1` to let the buying browser hold a resale listing. Needs `login-buy` first |
 | `EP_SECURE_TIMEOUT_SECONDS` | `45` | Seconds to spend trying to secure before giving up |
 | `EP_HOLD_PAUSE_EXTRA` | `10` | Minutes added to the hold window during which nothing will restart the watcher |
+| `EP_PRIORITY_WEEKEND` | `100` | Securing precedence of the two weekend pages. Higher wins the buying browser |
+| `EP_PRIORITY_ADDON` | `10` | Securing precedence of the Early Entry Pass. Lower, so a weekend ticket preempts a held pass |
+| `EP_MAC_SILENT_RENAG_HOURS` | `6` | How often the GitHub backstop may repeat "your Mac has gone quiet" about the same silence |
+| `EP_LIVENESS_COOLDOWN` | `30` | Minutes to stop publishing the heartbeat after ntfy answers 429 |
 | `EP_LIVENESS_MINUTES` | `10` | How often the Mac publishes its "still alive" beacon. Throttled because it shares an ntfy quota with the alert that matters |
 | `EP_BUY_PROFILE_DIR` | `~/.ep2026-watcher/chrome-profile-buy` | Where the signed-in buying profile lives |
 | `EP_POLL_SECONDS` | `300` | Fallback per-page gap for a page configured without a range |

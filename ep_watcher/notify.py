@@ -296,6 +296,23 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     )
 
 
+def _preempt_line(hold) -> str:
+    """One line saying an earlier hold was dropped to attempt this one.
+
+    Never omitted, and never buried. A weekend ticket is allowed to close the
+    browser on a held Early Entry pass — that is David's rule — but he has to
+    be told the pass is gone, whether the swap paid off or not. Finding out by
+    walking to a laptop that is showing something different is not acceptable.
+    """
+    if not getattr(hold, "preempted", False):
+        return ""
+    return (
+        "NOTE: an Early Entry pass was being held and has been LET GO to try\n"
+        "for this. That is your rule — the weekend ticket comes first, and the\n"
+        "pass is only valid alongside one anyway.\n\n"
+    )
+
+
 def _where_to_finish(hold) -> str:
     """Where to go to pay, phone first when there is a link to try.
 
@@ -383,6 +400,7 @@ def secured_hold(reading: Reading, hold) -> None:
         f"A ticket is IN A BASKET under your account right now.\n\n"
         f"  {_headline(pick)}\n"
         f"  {name}\n\n"
+        f"{_preempt_line(hold)}"
         f"{_where_to_finish(hold)}"
         f"{_clock_line(hold, minutes)}"
         f"The watcher will not pay for it: it stops at the basket, every\n"
@@ -442,6 +460,7 @@ def secure_failed(reading: Reading, hold) -> None:
         f"A listing appeared and the watcher tried to put it in a basket for\n"
         f"you. It did not manage to.\n\n"
         f"Why: {reason}\n\n"
+        f"{_preempt_line(hold)}"
         f"There is NO hold. The separate 'TICKETS AVAILABLE' email has the\n"
         f"link — if the listing is still there it is still yours to take.\n\n"
         f"What it saw:\n{_listing_block(reading.listings)}\n\n"

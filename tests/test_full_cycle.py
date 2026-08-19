@@ -234,8 +234,8 @@ print("\nA find reaches the buyer, and the buyer's answer reaches the inbox")
 attempts = []
 
 
-def fake_secure(event, listing, timeout_s=None):
-    attempts.append((event.slug, listing.section))
+def fake_secure(event, listing, timeout_s=None, may_preempt=False):
+    attempts.append((event.slug, listing.section, may_preempt))
     hold = buyer.HoldResult(secured=True, minutes_hint=11, minutes_measured=True,
                             checkout_url="https://www.ticketmaster.ie/checkout/abc")
     return hold
@@ -257,6 +257,7 @@ try:
     check("the buyer was asked to hold exactly one listing", len(attempts), 1)
     check("for the page the listing was on", attempts[0][0], BUSY)
     check("and the listing it was actually told about", attempts[0][1], "STNDN1")
+    check("with nothing to preempt, since nothing was held", attempts[0][2], False)
     subs = " | ".join(m["Subject"] or "" for m in mails)
     check_true("the availability alert still went out", "AVAILABLE" in subs)
     check_true("and so did the held-ticket alert",

@@ -230,7 +230,7 @@ def handle(reading: Reading, st: dict) -> None:
         # ways; letting it run before the alert would mean a browser problem
         # could delay or swallow the one message this project exists to send.
         notify.available(reading, reason, new_listings)
-        hold = _maybe_secure(reading)
+        hold = _maybe_secure(reading, st)
         if hold is not None and hold.secured:
             # The single most valuable line in this function. A basket lives
             # in the browser this process launched, so anything that restarts
@@ -239,7 +239,13 @@ def handle(reading: Reading, st: dict) -> None:
             # checkout looks like from outside. Writing the hold down is what
             # tells it the difference. See state.note_hold().
             minutes = config.hold_window_minutes(hold.minutes_hint)
-            state_mod.note_hold(st, minutes)
+            event = next(
+                (e for e in config.EVENTS if e.slug == reading.event_slug), None)
+            state_mod.note_hold(
+                st, minutes,
+                event_slug=reading.event_slug,
+                priority=getattr(event, "secure_priority", 0),
+            )
             print(f"[{stamp()}] hold recorded — nothing will restart the "
                   f"watcher for {minutes:.0f} min")
     # Keep what it was, not just that there was one. By the time the session
@@ -416,7 +422,7 @@ def watchdog_reason(reading: Reading) -> str:
     return f"{cause}\n\n{coda}" if cause else coda
 
 
-def _maybe_secure(reading: Reading):
+def _maybe_secure(reading: Reading, st: dict = None):
     """Try to hold a resale listing, if that has been switched on.
 
     Returns the HoldResult when an attempt was made, or None when securing is
@@ -469,8 +475,35 @@ def _maybe_secure(reading: Reading):
     if listing is None:
         return None
 
+    # Who wins the one buying browser?
+    #
+    # David's rule, set on 2026-08-19: "weekend ticket is always priority, but
+    # try to get the early ticket as well." Both halves are implemented here.
+    # The Early Entry Pass is still secured whenever the browser is free —
+    # it is worth having — but it gives way, because Ticketmaster only honours
+    # it alongside a Weekend Ticket. A held pass while a weekend ticket goes
+    # past is the worst available outcome: the one browser spent on the one
+    # product that is useless on its own.
+    #
+    # Preempting drops a certain hold for one that may already be gone. That
+    # is the trade the rule chooses, and it is the right way round.
+    held = state_mod.held_priority(st) if st is not None else 0
+    mine = getattr(event, "secure_priority", 0)
+    may_preempt = bool(held) and mine > held
+    if held and not may_preempt:
+        print(f"[{stamp()}] {event.slug}: a hold of equal or higher importance "
+              f"is already live ({st.get('hold_event_slug')}) — leaving it alone")
+    elif may_preempt:
+        print(f"[{stamp()}] {event.slug} outranks the live hold on "
+              f"{st.get('hold_event_slug')} — that hold will be dropped for this")
+
     print(f"[{stamp()}] listing found — opening the signed-in browser to hold it")
-    hold = buyer.secure_in_thread(event, listing)
+    hold = buyer.secure_in_thread(event, listing, may_preempt=may_preempt)
+
+    # A dropped hold is news whether or not the swap paid off, and if it did
+    # not pay off the record must not keep claiming a ticket is held.
+    if hold.preempted and st is not None and not hold.secured:
+        state_mod.clear_hold(st)
 
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")
@@ -672,6 +705,14 @@ def run_once(session=None) -> Reading:
         # the yield. Weighting them costs no extra requests — see
         # config.searches_per_hour().
         due = state_mod.due_events(st, config.EVENTS)
+        # Most important page first. Two reasons, and the second is the one
+        # that bites: a cycle can end early — a 403 stops it dead — and
+        # whichever page went last is the one that gets skipped. It should
+        # never be the weekend ticket. It also means that when listings appear
+        # on two pages in the same cycle, the buying browser is spent on the
+        # weekend one and the Early Entry pass is the thing that has to give
+        # way, rather than the other way round by accident of list order.
+        due.sort(key=lambda e: -getattr(e, "secure_priority", 0))
         if not due:
             # Nothing is due. The loop ticks faster than the shortest gap so
             # that a low draw can be honoured, so most ticks land here — this
