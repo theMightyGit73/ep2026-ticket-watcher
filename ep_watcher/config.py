@@ -556,6 +556,15 @@ LIVE_RENAG_MINUTES = float(os.environ.get("EP_LIVE_RENAG_MINUTES", "4"))
 _POLL_PER_EVENT_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "300"))
 
 
+#: Upper bound on the watch loop's tick, in seconds.
+#:
+#: The tick is how often the loop WAKES to ask "is any page due yet", not how
+#: often it asks Ticketmaster anything. Finer means the drawn gaps are
+#: honoured more precisely; it does not mean more requests, because a tick
+#: with nothing due returns without opening a page.
+LOOP_TICK_CEILING_SECONDS = int(os.environ.get("EP_LOOP_TICK_SECONDS", "60"))
+
+
 def poll_interval() -> int:
     """Seconds between ticks of the watch loop.
 
@@ -568,11 +577,23 @@ def poll_interval() -> int:
     function of the cycle, which is what lets the pages be weighted by yield
     without spending more. See searches_per_hour().
     """
-    # The SHORTEST gap any page can draw, not the mean. If the loop ticked at
-    # the mean it could not honour a low draw: a page that drew 180s would not
-    # be looked at until the next tick at 270s, and the bottom half of every
-    # range would be silently unreachable.
-    return min(e.fastest_gap_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
+    # Capped well below the shortest gap any page can draw, because the tick
+    # is the resolution at which a due page can be noticed — not a rate at
+    # which anything is requested.
+    #
+    # Ticking at the shortest gap sounds right and quantises badly. Measured
+    # live on 2026-08-19 with a 300s tick against a 300-540s target: a page
+    # that drew 516s comes due at 387s, the next tick lands at ~600s, and the
+    # page is searched 10-12 minutes apart instead of 5-9. Observed gaps that
+    # afternoon were 5, 11, 6, 7, 11, 8, 12 — a configured mean of 7 minutes
+    # delivering nearly 9.
+    #
+    # A tick costs nothing on its own. When nothing is due, run_once() returns
+    # an idle reading without opening a page or touching the network, so the
+    # only price of a finer tick is a few CPU cycles. Request volume is set
+    # entirely by the per-page gaps.
+    fastest = min(e.fastest_gap_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
+    return max(30, min(fastest, LOOP_TICK_CEILING_SECONDS))
 
 
 def searches_per_hour_at(hour: int) -> float:

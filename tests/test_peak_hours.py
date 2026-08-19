@@ -99,10 +99,16 @@ check_true("and the busy page is always the faster of the two",
 print("\nThe loop must tick fast enough to honour the fastest window")
 # Ticking at the ordinary range's floor would make the peak window's shorter
 # draws unreachable — the page would not be looked at until the next tick.
-check("the tick follows the fastest gap any page can draw",
-      config.poll_interval(), min(e.fastest_gap_seconds for e in config.EVENTS))
-check_true("which is at least as fast as the peak floor",
-           config.poll_interval() <= BUSY.gap_range(at(14))[0])
+# The tick is the RESOLUTION at which a due page is noticed, not a request
+# rate — a tick with nothing due opens no page. Measured live on 2026-08-19,
+# a 300s tick against a 300-540s target delivered gaps of 5, 11, 6, 7, 11, 8,
+# 12 minutes: a configured mean of 7 arriving as nearly 9, because a page
+# coming due at 387s waits for the tick at 600s.
+check_true("the tick is fine enough to honour the shortest gap",
+           config.poll_interval() <= min(e.fastest_gap_seconds for e in config.EVENTS))
+check_true("and fine enough that quantising cannot widen a gap much",
+           config.poll_interval() * 1.25 <= BUSY.gap_range(at(14))[0] * 0.35)
+check_true("but never absurdly fast", config.poll_interval() >= 30)
 
 print("\nSpending the same budget, not more")
 check_true("the busiest hour stays under the ~20/hour that drew a block",

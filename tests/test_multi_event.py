@@ -91,8 +91,12 @@ print("\nRequest volume does not grow with the event count")
 # that has to stay controlled, whatever the split between them.
 # The tick follows the shortest gap a page can DRAW, not its mean. Ticking at
 # the mean would make the bottom half of every range unreachable.
-check("the tick is the shortest gap any page can draw", config.poll_interval(),
-      min(e.poll_min_seconds for e in config.EVENTS))
+# The tick is the resolution at which a due page is noticed, not a request
+# rate — a tick with nothing due opens no page and touches no network. It was
+# the shortest drawable gap until 2026-08-19, which quantised the real cadence
+# upward: a 300s tick against a 300-540s target delivered 10-12 minute gaps.
+check_true("the tick is fine enough to honour the shortest gap",
+           config.poll_interval() <= min(e.poll_min_seconds for e in config.EVENTS))
 # Raised from 12/hour on 2026-08-19, when David asked for 3-6 minutes on the
 # standard page. This is the cost of that change, stated rather than hidden:
 # the mean gap there fell from 360s to 270s. The 20/hour line is the one that

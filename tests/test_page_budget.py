@@ -76,8 +76,8 @@ for event in config.EVENTS:
               (event.poll_min_seconds, event.poll_max_seconds),
               (event.peak_min_seconds, event.peak_max_seconds))
 check_true("the busy page is searched more often", A.poll_seconds < B.poll_seconds)
-check("the tick follows the busiest page's floor",
-      config.poll_interval(), A.poll_min_seconds)
+check_true("the tick is fine enough for the busiest page",
+           config.poll_interval() <= A.poll_min_seconds)
 check_true("and the busy page carries most of the volume",
            A.searches_per_hour > B.searches_per_hour * 3)
 
