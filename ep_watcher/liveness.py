@@ -95,6 +95,16 @@ def publish(note: str = "", force: bool = False, state=None) -> bool:
         return False
     if not (force or due(state=state)):
         return False
+
+    # Stand down when the day is nearly spent. The beacon is the least
+    # important thing this project publishes and was the thing that emptied
+    # the quota; a ticket alert is the most important and must never find it
+    # empty. Ceding the last messages is the same rule David set for tickets
+    # — the important thing wins the scarce resource.
+    from . import pushquota
+
+    if not (force or pushquota.may_send(config.NTFY_ALERT_RESERVE)):
+        return False
     # Held off before the attempt, not after. A failing ntfy must not turn
     # into a retry on every single poll, which is the surest way to stay rate
     # limited — the next scheduled beacon is soon enough.
@@ -110,6 +120,9 @@ def publish(note: str = "", force: bool = False, state=None) -> bool:
         return False
 
     if resp.status_code == 429:
+        from . import pushquota
+
+        pushquota.note_exhausted()
         # Back a long way off, and say so once. Continuous requests hold a
         # rate limiter empty; on 2026-08-19 a beacon retrying every three
         # minutes kept ntfy refusing for 2.8 hours, which disabled the dead
@@ -137,6 +150,9 @@ def publish(note: str = "", force: bool = False, state=None) -> bool:
         return False
 
     if resp.status_code == 200:
+        from . import pushquota
+
+        pushquota.note_sent()
         # Recovered: clear the persisted cooldown so it cannot outlive the
         # refusal that set it.
         if state is not None and state.get("ntfy_cooldown_until"):

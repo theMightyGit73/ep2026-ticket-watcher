@@ -1116,6 +1116,29 @@ def cmd_doctor(_args) -> int:
     else:
         print("  [ -- ]  Push not configured — email only, which is minutes slower")
 
+    # The number that decides whether push works for the rest of the day.
+    # Nothing counted it until 2026-08-19, which is how the allowance was
+    # spent invisibly and the channel a ticket alert travels on stayed dead
+    # for five hours while every local check reported healthy.
+    if config.NTFY_TOPIC:
+        from . import pushquota
+
+        left = pushquota.remaining()
+        if left <= 0:
+            # A warning, not a failure. Nothing here can be run: the allowance
+            # resets on its own and email is unaffected, so listing it under
+            # "Fixes, in order" would put a line with no command under a
+            # heading that promises one.
+            warn("Push quota",
+                 f"{pushquota.summary()} — no more push today. It resets "
+                 f"daily; email alerts are unaffected")
+        elif left <= config.NTFY_ALERT_RESERVE:
+            warn("Push quota",
+                 f"{pushquota.summary()} — the heartbeat has stood down to "
+                 f"keep what is left for alerts")
+        else:
+            ok("Push quota", pushquota.summary())
+
     # Is the off-Mac dead man's switch actually armed? It is what covers the
     # laptop being off, so it failing quietly would remove the last line of
     # defence without any visible change.

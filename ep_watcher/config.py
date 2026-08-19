@@ -1019,6 +1019,27 @@ LIVENESS_INTERVAL_MINUTES = float(os.environ.get("EP_LIVENESS_MINUTES", "15"))
 LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES = float(
     os.environ.get("EP_LIVENESS_COOLDOWN", "30"))
 
+# How many ntfy messages a day this machine may send, and how many of them to
+# keep back for messages that actually say something.
+#
+# 250 is the anonymous allowance on ntfy.sh, confirmed the hard way on
+# 2026-08-19: the server answered code 42908, "daily message quota reached",
+# after the beacon had been publishing at 336 a day. Nothing counted, so the
+# first anyone knew was a false "your Mac has gone quiet" five hours later —
+# with the push channel dead throughout, which is the channel a ticket alert
+# travels on.
+#
+# The reserve makes the beacon yield. When fewer than this many messages are
+# left in the day, the heartbeat stops publishing and the remainder is kept
+# for alerts: the same rule David set for tickets, that the important thing
+# wins the scarce resource, applied to the other scarce resource here.
+#
+# A free ntfy.sh ACCOUNT raises the allowance well above this. That is the
+# real fix and it needs David to create one; until then these numbers keep the
+# watcher inside the anonymous limit with room to spare.
+NTFY_DAILY_LIMIT = int(os.environ.get("EP_NTFY_DAILY_LIMIT", "250"))
+NTFY_ALERT_RESERVE = int(os.environ.get("EP_NTFY_ALERT_RESERVE", "80"))
+
 # ── Alternating between home Wi-Fi and the phone hotspot ─────────────────────
 # The watcher asks David to switch the MacBook's network after this long, or
 # this many searches, whichever comes first. Splitting the volume across two

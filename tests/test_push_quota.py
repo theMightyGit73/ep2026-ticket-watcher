@@ -1,0 +1,144 @@
+"""The push allowance must be counted, and the beacon must yield it to alerts.
+
+ntfy.sh gives an anonymous publisher a fixed number of messages a day per IP.
+On 2026-08-19 the watcher spent them without noticing. The liveness beacon
+published on every handled reading — 95 between 10:08 and 16:55 UTC, a rate of
+336 a day against a limit of 250 — and at 16:55 the server began answering:
+
+    {"code":42908,"http":429,"error":"limit reached: daily message quota
+     reached; increase your limits with a paid plan, see https://ntfy.sh"}
+
+Nothing on the machine knew. The first symptom was an email from GitHub five
+hours later saying the Mac had gone quiet, about a watcher on its 800th check.
+Throughout those five hours the push channel was dead — and that is the
+channel a ticket alert travels on, against listings that live minutes.
+
+Two properties are tested here. The spending has to be visible, and when the
+day runs short the beacon has to stand down and leave the rest for messages
+that actually say something. That is the rule David set for tickets — the
+important thing wins the scarce resource — applied to the other scarce
+resource in the system.
+
+Run with:  .venv/bin/python tests/test_push_quota.py
+"""
+
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ep_watcher import config, liveness, pushquota  # noqa: E402
+
+failures = []
+
+
+def check(label, got, want):
+    ok = got == want
+    print(f"  {'PASS' if ok else 'FAIL'}  {label}: got {got!r}, want {want!r}")
+    if not ok:
+        failures.append(label)
+
+
+def check_true(label, got):
+    check(label, bool(got), True)
+
+
+class FakeResponse:
+    def __init__(self, status):
+        self.status_code = status
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    was_state = config.STATE_FILE
+    config.STATE_FILE = Path(tmp) / "state.json"
+    try:
+        print("\nCounting")
+        check("a fresh day starts at zero", pushquota.used(), 0)
+        check("with the whole allowance left",
+              pushquota.remaining(), config.NTFY_DAILY_LIMIT)
+        pushquota.note_sent()
+        pushquota.note_sent(4)
+        check("sends accumulate", pushquota.used(), 5)
+        check("and the remainder falls", pushquota.remaining(),
+              config.NTFY_DAILY_LIMIT - 5)
+        check_true("the summary says both halves",
+                   "5" in pushquota.summary()
+                   and str(config.NTFY_DAILY_LIMIT) in pushquota.summary())
+
+        print("\nThe server's refusal beats our own tally")
+        # Our count only knows what this process sent since the counter
+        # existed. On the day it was introduced ntfy was already refusing
+        # while the local count stood at zero, so doctor reported 250 messages
+        # remaining beside a line saying the quota was spent.
+        pushquota.note_exhausted()
+        check("a refusal marks the day spent", pushquota.remaining(), 0)
+        check("and the count reconciles upward, never down",
+              pushquota.used() >= config.NTFY_DAILY_LIMIT, True)
+
+        print("\nThe beacon stands down before the alerts do")
+        # The ordering that matters: the least important message must run out
+        # of room first, and the most important must still have some.
+        check("with the day spent, the beacon may not send",
+              pushquota.may_send(config.NTFY_ALERT_RESERVE), False)
+        check("and neither may anything else", pushquota.may_send(0), False)
+
+        # Reset to a day that is nearly, but not quite, spent.
+        (Path(tmp) / "push-quota.json").write_text(
+            '{"day": "%s", "count": %d}'
+            % (pushquota._today(), config.NTFY_DAILY_LIMIT
+               - config.NTFY_ALERT_RESERVE + 1))
+        check("inside the reserve, the beacon stands down",
+              pushquota.may_send(config.NTFY_ALERT_RESERVE), False)
+        check_true("but an alert may still be sent — that is the point",
+                   pushquota.may_send(0))
+
+        print("\nAnd the beacon really does check before publishing")
+        sent = []
+        was_topic, was_next, was_requests = (
+            config.NTFY_TOPIC, liveness._next_allowed, liveness.requests)
+        try:
+            config.NTFY_TOPIC = "test-topic"
+            liveness.requests = type("_R", (), {
+                "post": staticmethod(lambda *a, **kw: (sent.append(1),
+                                                       FakeResponse(200))[1]),
+                "RequestException": Exception})()
+            liveness._next_allowed = 0.0
+            check("a beacon inside the reserve is not published",
+                  liveness.publish("x"), False)
+            check("nothing left the machine", sent, [])
+
+            # With room, it publishes and counts itself.
+            (Path(tmp) / "push-quota.json").write_text(
+                '{"day": "%s", "count": 0}' % pushquota._today())
+            liveness._next_allowed = 0.0
+            check("with room it publishes", liveness.publish("x"), True)
+            check("exactly once", len(sent), 1)
+            check("and counts what it sent", pushquota.used(), 1)
+        finally:
+            config.NTFY_TOPIC, liveness._next_allowed, liveness.requests = (
+                was_topic, was_next, was_requests)
+
+        print("\nThe reserve has to be big enough to matter")
+        check_true("some of the day is genuinely held back",
+                   config.NTFY_ALERT_RESERVE > 0)
+        check_true("but not so much that the beacon can never run",
+                   config.NTFY_ALERT_RESERVE < config.NTFY_DAILY_LIMIT / 2)
+        # And the routine traffic has to fit inside the allowance at all.
+        beacon = 24 * 60 / config.LIVENESS_INTERVAL_MINUTES
+        heartbeat = 24 / config.HEARTBEAT_HOURS
+        check_true(
+            f"routine traffic ({beacon + heartbeat:.0f}/day) leaves room for "
+            f"alerts inside the {config.NTFY_DAILY_LIMIT}/day allowance",
+            beacon + heartbeat < config.NTFY_DAILY_LIMIT
+            - config.NTFY_ALERT_RESERVE)
+
+        print("\nA corrupt or missing counter must not suppress alerts")
+        (Path(tmp) / "push-quota.json").write_text("{ not json")
+        check("unreadable reads as a fresh day", pushquota.used(), 0)
+        check_true("so sending is still allowed", pushquota.may_send(0))
+    finally:
+        config.STATE_FILE = was_state
+
+print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
+sys.exit(1 if failures else 0)

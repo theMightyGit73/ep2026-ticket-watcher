@@ -765,6 +765,8 @@ Environment variables, all optional:
 | `EP_PRIORITY_ADDON` | `10` | Securing precedence of the Early Entry Pass. Lower, so a weekend ticket preempts a held pass |
 | `EP_MAC_SILENT_RENAG_HOURS` | `6` | How often the GitHub backstop may repeat "your Mac has gone quiet" about the same silence |
 | `EP_LIVENESS_COOLDOWN` | `30` | Minutes to stop publishing the heartbeat after ntfy answers 429 |
+| `EP_NTFY_DAILY_LIMIT` | `250` | ntfy.sh's anonymous daily message allowance, per IP. `doctor` reports the day's usage against it |
+| `EP_NTFY_ALERT_RESERVE` | `80` | Messages held back for real alerts. The heartbeat stops publishing once fewer than this remain |
 | `EP_LIVENESS_MINUTES` | `10` | How often the Mac publishes its "still alive" beacon. Throttled because it shares an ntfy quota with the alert that matters |
 | `EP_BUY_PROFILE_DIR` | `~/.ep2026-watcher/chrome-profile-buy` | Where the signed-in buying profile lives |
 | `EP_POLL_SECONDS` | `300` | Fallback per-page gap for a page configured without a range |

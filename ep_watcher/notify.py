@@ -85,7 +85,18 @@ def _send_ntfy(title: str, message: str, priority: str = "default", tags=None,
     # A 200 is the only thing that means the message is on its way. Silently
     # accepting a 4xx/5xx would report a delivery that never happened, which
     # is the whole failure this module is being hardened against.
+    if resp.status_code == 429:
+        # The server knows its own limit better than our tally does.
+        from . import pushquota
+
+        pushquota.note_exhausted()
     resp.raise_for_status()
+    # Counted only when ntfy accepted it. A refusal spends no quota, and
+    # counting one would make the watcher throttle itself against a limit it
+    # had not actually reached.
+    from . import pushquota
+
+    pushquota.note_sent()
     print(f"[{stamp()}] Push sent")
 
 
@@ -1083,6 +1094,9 @@ def verify_push() -> tuple:
             timeout=15,
         )
         if resp.status_code == 429:
+            from . import pushquota
+
+            pushquota.note_exhausted()
             # Named specifically, because the fix is the opposite of the one
             # printed for every other failure. A 429 means the topic is
             # correct and the quota is spent; telling David to go and check
