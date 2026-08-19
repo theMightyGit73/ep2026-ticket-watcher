@@ -214,6 +214,21 @@ def cmd_watch(args) -> int:
     if inventory_api.configured():
         print("  Inventory Status API: configured")
 
+    # Securing is the one setting that changes what the watcher DOES rather
+    # than how often it looks, so it says so on every start. And it says so
+    # loudly when it is armed but cannot work: an unsigned buying profile
+    # fails only at the moment a real listing appears, which is the worst
+    # possible time to discover it — the flag was enabled on 2026-08-19 with
+    # the profile not yet created, and nothing anywhere said so.
+    if config.SECURE_ON_FIND:
+        signed_in = (config.BUY_PROFILE_DIR / "Default" / "Cookies").exists()
+        print(f"  Securing: ON — will hold a resale listing, never pay for it")
+        if not signed_in:
+            print(f"    ⚠ the buying profile is NOT signed in, so securing")
+            print(f"      cannot work yet. Run:  python -m ep_watcher login-buy")
+    else:
+        print("  Securing: off — notify only (EP_SECURE_ON_FIND=1 to enable)")
+
     if not config.USE_BROWSER:
         # API-only: no browser to keep warm, so this is just a polling loop.
         print("  Browser DISABLED — API sources only\n")
