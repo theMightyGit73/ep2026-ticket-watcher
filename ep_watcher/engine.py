@@ -145,6 +145,12 @@ def handle(reading: Reading, st: dict) -> None:
         # zero. Written once, at the start of the run of failures.
         if not st.get("outage_started_at"):
             st["outage_started_at"] = st.get("last_success") or state_mod.utc_now().isoformat()
+        # The worst this outage ever got, recorded as it happens. The recovery
+        # gate cannot reconstruct it afterwards: pages recover one at a time
+        # and the global counter falls to the least-broken survivor as each
+        # one does, so by the time the last page recovers the counter no
+        # longer describes the outage that just ended.
+        st["outage_peak_failures"] = max(st.get("outage_peak_failures") or 0, failures)
         print(f"[{stamp()}] check failed ({failures} in a row)")
         _maybe_watchdog(reading, st, failures)
         # A run of failures must not suppress the hourly report — a silent
@@ -178,20 +184,36 @@ def handle(reading: Reading, st: dict) -> None:
             f"{', '.join(reading.answering_sources) or 'nothing'}"
         )
         _maybe_watchdog(reading, st, failures)
-    elif was_broken >= config.WATCHDOG_FAILURE_THRESHOLD and st["consecutive_failures"] == 0:
-        # Gated on EVERY page being healthy again, not just this one. The
-        # global counter tracks the worst event, so handling page one while
-        # page two was still broken used to fire this, and handling page two
-        # fired it again — two "recovered" emails and two pushes for one
-        # recovery, observed on 2026-08-18.
-        notify.recovered(
-            was_broken,
-            state_mod.minutes_since(st.get("outage_started_at")),
-            st.get("last_failure_reason") or "",
-        )
+    elif st["consecutive_failures"] == 0 and st.get("outage_started_at"):
+        # Every page is healthy again, and an outage was in progress.
+        #
+        # The gate used to be `was_broken >= THRESHOLD`, reading the global
+        # counter at the moment THIS page recovered. That silently stopped
+        # working when the pages were given different intervals: the busy page
+        # accumulates ~5x the failures of the quiet one, so when it recovers
+        # first the global counter drops to the quiet page's much smaller
+        # streak. By the time the quiet page recovered and satisfied `== 0`,
+        # was_broken was below the threshold and the branch never ran. The
+        # 71-minute blackout of 2026-08-18 sent no recovery notice at all, and
+        # left outage_started_at set for the next 21 hours — long enough that
+        # the following outage would have reported a blackout measured from
+        # the previous afternoon.
+        #
+        # So the peak is now recorded while failing (see record_failure) and
+        # read back here, and the clearing is unconditional: whether or not
+        # the outage was bad enough to have been announced, it is over, and
+        # its bookkeeping must not outlive it.
+        peak = st.get("outage_peak_failures") or was_broken
+        if peak >= config.WATCHDOG_FAILURE_THRESHOLD:
+            notify.recovered(
+                peak,
+                state_mod.minutes_since(st.get("outage_started_at")),
+                st.get("last_failure_reason") or "",
+            )
         st["last_watchdog_alert"] = None
         st["last_failure_reason"] = None
         st["outage_started_at"] = None
+        st["outage_peak_failures"] = 0
 
     if not should:
         print(f"[{stamp()}] nothing to report")
