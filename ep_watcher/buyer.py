@@ -431,6 +431,66 @@ class BuySession:
     def page(self):
         return self._session.page
 
+    def await_listings(self, result: "HoldResult", budget_s: float) -> bool:
+        """Wait until the resale panel can actually be read. True if it can.
+
+        The reason the first three real securing attempts all failed.
+        
+        Pressing search does not produce listings. The search resolves, and
+        only THEN does a separate call to /api/quickpicks/{event}/resale come
+        back and render "Other Options → Verified Resale Tickets" — a fact the
+        watcher's own module establishes at length, because reading the page
+        too early is what once recorded a quarter of its polls as resale-blind.
+
+        The buyer ignored all of that. It clicked search and looked for the
+        listing row five seconds later, which on the watcher's own measurements
+        is well before the panel exists. So it reported "the listing was gone
+        from the page by the time the buying browser reached it" on 2026-08-19
+        at 17:58, 19:05 and 19:12 — three real listings, each almost certainly
+        still sitting there, each recorded as sold.
+
+        That verdict was worse than the failure. It read as losing a race,
+        which invites making the watcher faster; the actual fault was looking
+        before the page had drawn anything, which no amount of speed fixes.
+
+        Reuses the watcher's own two waits rather than reimplementing them.
+        They encode a fortnight of findings about when this page is readable,
+        and a second copy would drift from the first.
+        """
+        session = self._session
+        deadline = time.monotonic() + budget_s
+
+        # Two thirds of what is left for the search to come back, because a
+        # search that has not resolved cannot have a panel under it.
+        outcome = session._await_result(timeout_s=max(5.0, (deadline - time.monotonic()) * 0.66))
+        if outcome == "basket":
+            result.note("the search went straight to a basket")
+            return True
+        if outcome == "timeout":
+            result.note("the search did not resolve in time — the page is slow, "
+                        "not necessarily empty")
+            return False
+        result.note("search resolved")
+
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return False
+        readable, why = session._await_resale_panel(
+            timeout_s=max(5.0, left),
+            render_s=min(8.0, max(2.0, left / 3.0)),
+        )
+        result.note(f"resale panel: {'readable' if readable else why}")
+        return readable
+
+    def listings_now(self, event, qty: int):
+        """Ask the resale endpoint what is actually on offer, right now.
+
+        Used to tell "the listing has sold" apart from "the page has not drawn
+        it yet" — which the row hunt alone cannot do, and which decides whether
+        a failure means the race was lost or the code looked too early.
+        """
+        return self._session.fetch_resale_json(event, qty)
+
     def set_quantity(self, qty: int, result: "HoldResult") -> None:
         """Drive the page's quantity stepper, reusing the watcher's logic.
 
@@ -603,16 +663,54 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         if out_of_time():
             return result
 
+        # Wait for the panel before looking for anything in it. Pressing
+        # search does not produce listings — a separate call has to answer and
+        # the panel has to paint. Skipping this is why the first three real
+        # attempts all reported the listing as gone. See await_listings().
+        session.await_listings(result, budget_s=max(5.0, deadline - time.monotonic()))
+
+        if out_of_time():
+            return result
+
         # Find the listing row. Matched on the section rather than on the
         # listing id, because the id is an API field and has never been seen
         # in the rendered page — and section plus price is what distinguishes
         # one row from another when several are live.
         row = _find_listing_row(page, listing, result)
         if row is None:
-            result.reason = (
-                "the listing was gone from the page by the time the buying "
-                "browser reached it"
-            )
+            # Do not guess at why. "Gone" and "not drawn" call for opposite
+            # responses — one means the race was lost and nothing can be done,
+            # the other means this code looked too early and is fixable — and
+            # for three attempts they were reported identically, as the former.
+            # The endpoint that the panel is a drawing of can tell them apart.
+            still_there = None
+            try:
+                record = session.listings_now(event, config.WANTED_QUANTITY)
+                data = (record or {}).get("data")
+                if isinstance(data, dict):
+                    picks = data.get("picks") or data.get("listings") or []
+                    still_there = len(picks)
+            except Exception:
+                still_there = None
+
+            if still_there:
+                result.reason = (
+                    f"the resale endpoint still shows {still_there} listing(s), "
+                    f"but no row for them could be found on the page. That is a "
+                    f"rendering or selector problem in the buying browser, not a "
+                    f"lost race — the ticket was there and reachable by hand."
+                )
+            elif still_there == 0:
+                result.reason = (
+                    "the listing had genuinely sold — the resale endpoint "
+                    "reports nothing left. The race was lost at the last step."
+                )
+            else:
+                result.reason = (
+                    "the listing could not be found on the page, and the resale "
+                    "endpoint could not be asked either, so whether it sold or "
+                    "simply never rendered is unknown"
+                )
             result.note(result.reason)
             return result
 

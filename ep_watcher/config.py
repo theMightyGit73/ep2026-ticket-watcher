@@ -525,7 +525,16 @@ BUY_PROFILE_DIR = Path(
 # How long to keep trying to secure one listing before giving up and just
 # alerting. Past this the listing is almost certainly in someone else's
 # basket, and the honest thing is to tell him rather than keep clicking.
-SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "45"))
+# Raised from 45 on 2026-08-19, when it was established that the buyer had
+# never waited for the resale panel at all. Once it does wait, 45s is not
+# enough to hold: the search alone can take 30s on a slow link, and the panel
+# is a separate call after that.
+#
+# Spending longer is close to free. If the listing has gone, the extra seconds
+# are spent by a browser that was going to fail anyway, and the availability
+# alert has already been sent. If the listing is there, this is the whole
+# game. The asymmetry says be patient.
+SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "120"))
 
 # How long David has once a ticket is held. Used only to word the alert,
 # never to decide anything.
