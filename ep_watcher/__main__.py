@@ -141,10 +141,37 @@ def cmd_login_buy(_args) -> int:
     with _browser().BrowserSession(
         headless=False, profile_dir=config.BUY_PROFILE_DIR
     ) as session:
-        try:
-            session.page.goto(config.EVENT_URL, wait_until="domcontentloaded")
-        except Exception as exc:
-            print(f"  (navigation hiccup, carry on in the window anyway: {exc})")
+        # Land on the sign-in page, not the event page.
+        #
+        # This used to open the event URL, on the assumption that signing in
+        # from there was obvious. It is not: David ran it on 2026-08-19, was
+        # taken straight to the Electric Picnic listing, and was never
+        # prompted for anything. Ticketmaster does not ask — the account
+        # control is an icon in the top bar, and it is the same control this
+        # project already established is invisible to Playwright's flattened
+        # text. Being dropped on a page with no visible next step is how a
+        # one-command setup becomes a support conversation.
+        #
+        # The candidates are tried in order because the exact path is not
+        # something to be confident about from memory; the event page remains
+        # the last resort, so the window always opens on something usable and
+        # he can navigate by hand if none of them land.
+        landed = ""
+        for candidate in config.SIGNIN_URLS + (config.EVENT_URL,):
+            try:
+                response = session.page.goto(candidate, wait_until="domcontentloaded")
+            except Exception:
+                continue
+            if response is None or response.status < 400:
+                landed = candidate
+                break
+        if landed:
+            print(f"  Opened: {landed}\n")
+        else:
+            print("  (could not open any page — sign in by hand in the window)\n")
+        print("  If you see the event page rather than a sign-in form, click the")
+        print("  account icon in the top bar, or type ticketmaster.ie/member in")
+        print("  the address bar. Ticketmaster never prompts on its own.\n")
         try:
             input("  Press Enter when you're signed in and the page looks right... ")
         except (EOFError, KeyboardInterrupt):

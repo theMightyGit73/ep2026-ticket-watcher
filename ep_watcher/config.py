@@ -471,6 +471,24 @@ SECURE_ON_FIND = os.environ.get("EP_SECURE_ON_FIND", "0").lower() in ("1", "true
 # an exclusive lock on a profile directory, so the buying browser cannot share
 # the watcher's while the watcher is running. Keeping them apart is also what
 # keeps the signed-in cookies out of the browser that does the polling.
+#: Where to send David to sign the buying profile in, most likely first.
+#:
+#: Tried in order until one loads, with the event page as a final fallback.
+#: The exact path is not worth being confident about: `login-buy` opened the
+#: event page until 2026-08-19, and he ran it and was never prompted for
+#: anything, because Ticketmaster does not ask — the account control is an
+#: icon that this project has already established is invisible to Playwright's
+#: flattened text. Landing on a page with no visible next step is how a
+#: one-command setup turns into a support conversation.
+SIGNIN_URLS = tuple(
+    u.strip() for u in os.environ.get(
+        "EP_SIGNIN_URLS",
+        "https://www.ticketmaster.ie/member,"
+        "https://www.ticketmaster.ie/myacct,"
+        "https://identity.ticketmaster.ie/sign-in",
+    ).split(",") if u.strip()
+)
+
 BUY_PROFILE_DIR = Path(
     os.environ.get("EP_BUY_PROFILE_DIR",
                    Path.home() / ".ep2026-watcher" / "chrome-profile-buy")
