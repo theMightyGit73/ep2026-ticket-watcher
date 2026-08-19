@@ -90,6 +90,17 @@ def _defaults():
         # the basket lives in the browser the watcher launched, so killing
         # the process throws the ticket away. See note_hold().
         "hold_until": None,               # ISO8601
+        # When ntfy last refused this client, and until when to stop asking.
+        # Persisted rather than kept in the process, because a restart used to
+        # reset the cooldown and immediately fire another request into an
+        # endpoint that was still refusing — which is what holds a rate
+        # limiter empty. Two restarts on 2026-08-19 cost two such requests.
+        "ntfy_cooldown_until": None,      # ISO8601
+        # The backstop's own re-nag control: which silence it last alerted
+        # about, and when. Without these it emailed "your Mac has gone quiet"
+        # every hour about the same unmoved heartbeat.
+        "mac_silent_alerted_at": None,    # ISO8601
+        "mac_silent_beacon_at": None,     # ISO8601 — identifies WHICH silence
         # When the browser profile was last thrown away and rebuilt. The
         # bot-check cookies age out, so this drives a pre-emptive refresh —
         # see config.PROFILE_MAX_AGE_MINUTES.

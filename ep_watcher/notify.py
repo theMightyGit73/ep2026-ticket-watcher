@@ -844,7 +844,7 @@ def network_switched(now_label: str, now_ip: str, was_label: str, was_ip: str,
     # noise — and the push channel has to stay worth looking at.
 
 
-def mac_watcher_silent(hours: float) -> None:
+def mac_watcher_silent(hours: float, repeat: bool = False) -> None:
     """Sent from GitHub when the Mac has stopped checking in.
 
     This is the alert nothing on the Mac could ever send, because by
@@ -868,7 +868,8 @@ def mac_watcher_silent(hours: float) -> None:
     what it actually knows and gives him a way to tell the two apart from his
     phone.
     """
-    subject = "EP2026: your Mac watcher has gone quiet"
+    subject = ("EP2026: your Mac watcher is STILL quiet"
+               if repeat else "EP2026: your Mac watcher has gone quiet")
     body = (
         f"Hi David,\n\n"
         f"The watcher on your MacBook has not checked in for {hours:.1f} hours.\n"

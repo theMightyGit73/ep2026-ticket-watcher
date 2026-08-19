@@ -881,12 +881,39 @@ def cmd_check_mac(_args) -> int:
 
     hours = age / 3600.0
     print(f"  Mac last checked in {hours:.2f}h ago (limit {limit_h}h).")
+
+    st = state_mod.load()
+    # Which silence is this? Identified by when the last beacon actually
+    # arrived, not by how stale it is — the staleness grows every hour while
+    # the silence stays the same one.
+    beacon_at = (state_mod.utc_now() - datetime.timedelta(seconds=age)).replace(
+        microsecond=0, second=0)
+
     if hours < limit_h:
         print("  Mac watcher is alive.")
+        if st.get("mac_silent_alerted_at"):
+            print("  ...and it was previously reported quiet — clearing that.")
+            st["mac_silent_alerted_at"] = None
+            st["mac_silent_beacon_at"] = None
+            state_mod.save(st)
         return 0
 
+    # Repeat suppression. Without it this fired every hour about a heartbeat
+    # that had not moved — and on 2026-08-19 the heartbeat had not moved
+    # because ntfy was rate-limiting the Mac, so the alert was false as well
+    # as repetitive.
+    same_silence = st.get("mac_silent_beacon_at") == beacon_at.isoformat()
+    since = state_mod._hours_since(st.get("mac_silent_alerted_at"))
+    if same_silence and since is not None and since < config.MAC_SILENT_RENAG_HOURS:
+        print(f"  Already reported this silence {since:.1f}h ago; next repeat "
+              f"after {config.MAC_SILENT_RENAG_HOURS:.0f}h. Not alerting again.")
+        return 1
+
     print("  Mac watcher looks DOWN — alerting.")
-    notify.mac_watcher_silent(hours)
+    notify.mac_watcher_silent(hours, repeat=same_silence)
+    st["mac_silent_alerted_at"] = state_mod.utc_now().isoformat()
+    st["mac_silent_beacon_at"] = beacon_at.isoformat()
+    state_mod.save(st)
     return 1
 
 

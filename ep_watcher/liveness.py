@@ -44,17 +44,40 @@ def topic() -> Optional[str]:
 _next_allowed = 0.0
 
 
-def due(now: float = None) -> bool:
+def _stored_until(state) -> float:
+    """The persisted cooldown as epoch seconds, or 0.0 if there is none."""
+    if not state:
+        return 0.0
+    raw = state.get("ntfy_cooldown_until")
+    if not raw:
+        return 0.0
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(raw).timestamp()
+    except (ValueError, TypeError, OSError):
+        return 0.0
+
+
+def due(now: float = None, state=None) -> bool:
     """Is another beacon worth sending yet?
 
     See config.LIVENESS_INTERVAL_MINUTES for why this is throttled at all, and
     LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES for why a refusal pushes it out much
     further than the ordinary interval.
+
+    Takes the later of the process-local hold-off and the one written into
+    state. The stored one is what survives a restart — and a restart is
+    exactly when this matters, because launchd will restart the watcher for
+    all sorts of reasons and each restart used to fire a request straight into
+    an endpoint that was still refusing. That is how a rate limiter is held
+    empty rather than allowed to refill.
     """
-    return (time.time() if now is None else now) >= _next_allowed
+    now = time.time() if now is None else now
+    return now >= max(_next_allowed, _stored_until(state))
 
 
-def publish(note: str = "", force: bool = False) -> bool:
+def publish(note: str = "", force: bool = False, state=None) -> bool:
     """Say "still here". Never raises, never blocks a poll for long.
 
     A failed heartbeat must not fail the check that carries it — the watcher
@@ -70,7 +93,7 @@ def publish(note: str = "", force: bool = False) -> bool:
     t = topic()
     if not t:
         return False
-    if not (force or due()):
+    if not (force or due(state=state)):
         return False
     # Held off before the attempt, not after. A failing ntfy must not turn
     # into a retry on every single poll, which is the surest way to stay rate
@@ -98,13 +121,28 @@ def publish(note: str = "", force: bool = False) -> bool:
         # this project exists to send.
         _next_allowed = (
             time.time() + config.LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES * 60)
+        # Written down, so a restart does not throw the cooldown away and
+        # immediately ask again. The caller saves the state it passed in.
+        if state is not None:
+            from datetime import datetime, timedelta, timezone
+
+            state["ntfy_cooldown_until"] = (
+                datetime.now(timezone.utc)
+                + timedelta(minutes=config.LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES)
+            ).isoformat()
         print(f"[{stamp()}] ntfy is rate limiting this client (429) — pausing "
               f"the liveness beacon for "
               f"{config.LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES:.0f} min so the "
               f"quota can recover for real alerts")
         return False
 
-    return resp.status_code == 200
+    if resp.status_code == 200:
+        # Recovered: clear the persisted cooldown so it cannot outlive the
+        # refusal that set it.
+        if state is not None and state.get("ntfy_cooldown_until"):
+            state["ntfy_cooldown_until"] = None
+        return True
+    return False
 
 
 def age_seconds() -> Optional[float]:

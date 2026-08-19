@@ -913,6 +913,21 @@ HEARTBEAT_HOURS = float(
 # when the Mac is genuinely not running.
 MAC_SILENT_HOURS = float(os.environ.get("EP_MAC_SILENT_HOURS", "1.5"))
 
+# How often the backstop may repeat "your Mac watcher has gone quiet" about a
+# silence it has already reported.
+#
+# It had no re-nag control at all, so it emailed and pushed once an hour for
+# as long as the heartbeat was stale. On 2026-08-19 the heartbeat was stale
+# because ntfy was rate-limiting the Mac, not because the Mac was down, and
+# the prospect was an identical false alarm every hour until the quota reset —
+# which is how an alert becomes something David swipes away without reading,
+# including the time it is real.
+#
+# A silence is identified by WHEN the last beacon arrived, so a genuinely new
+# outage still alerts immediately; only a repeat of the same unmoved silence
+# is held back. Six hours matches the watchdog's own re-nag.
+MAC_SILENT_RENAG_HOURS = float(os.environ.get("EP_MAC_SILENT_RENAG_HOURS", "6"))
+
 # How often the Mac actually publishes that heartbeat.
 #
 # It used to publish on every handled reading — about 18 times an hour at the
@@ -955,11 +970,23 @@ LIVENESS_INTERVAL_MINUTES = float(os.environ.get("EP_LIVENESS_MINUTES", "15"))
 #
 # The throttle above stops the quota being exhausted; this stops it being held
 # exhausted once it has been. A rate limiter refills over time and continuous
-# requests keep the bucket empty, so the beacon that reacts to a refusal by
-# trying again shortly is the reason the refusal lasts three hours. Backing
-# well off is what lets it recover.
+# requests keep the bucket empty, so a beacon that reacts to a refusal by
+# trying again in three minutes is the reason a refusal lasts hours.
+#
+# Thirty minutes rather than sixty, and the reason is measured. During the
+# 2026-08-19 block the Mac was refused for four hours straight — and yet a
+# real alert push went through at 20:51, with probes on either side of it
+# refused. So the bucket is not empty until some daily reset; it refills
+# slowly and hands out the occasional token. Waiting a full hour would throw
+# most of those away.
+#
+# The ceiling that matters is MAC_SILENT_HOURS: if the beacon cannot re-land
+# within 90 minutes, the backstop calls the Mac dead. A 30-minute cooldown
+# plus the 15-minute throttle gives two or three attempts inside that window
+# instead of one, which is the difference between recovering quietly and
+# sending David another false alarm.
 LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES = float(
-    os.environ.get("EP_LIVENESS_COOLDOWN", "60"))
+    os.environ.get("EP_LIVENESS_COOLDOWN", "30"))
 
 # ── Alternating between home Wi-Fi and the phone hotspot ─────────────────────
 # The watcher asks David to switch the MacBook's network after this long, or

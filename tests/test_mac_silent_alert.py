@@ -194,5 +194,73 @@ check_true("says the topic is fine", "topic is fine" in detail.lower())
 check_true("and that email is unaffected", "email" in detail.lower())
 check("without blaming the configuration", "check NTFY_TOPIC" in detail, False)
 
+
+print("\nThe cooldown must survive a restart, or a restart re-hammers ntfy")
+# Found the hard way on 2026-08-19: the cooldown lived only in the process, so
+# each restart reset it and fired another request straight into an endpoint
+# that was still refusing. Two restarts, two wasted requests, at exactly the
+# moment the bucket needed to be left alone to refill.
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from ep_watcher import state as _st  # noqa: E402
+
+fresh = dict(_st._defaults())
+check("a clean state permits a beacon", liveness.due(state=fresh), True)
+fresh["ntfy_cooldown_until"] = (
+    datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+check("a stored cooldown holds it off even in a brand new process",
+      liveness.due(state=fresh), False)
+fresh["ntfy_cooldown_until"] = (
+    datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+check("and lapses on its own", liveness.due(state=fresh), True)
+fresh["ntfy_cooldown_until"] = "not a timestamp"
+check("a corrupt value fails towards trying, not towards silence",
+      liveness.due(state=fresh), True)
+
+# And a 429 must write it down, while a success clears it.
+was_next, was_requests, was_topic = (
+    liveness._next_allowed, liveness.requests, config.NTFY_TOPIC)
+try:
+    config.NTFY_TOPIC = "test-topic"
+    carrier = dict(_st._defaults())
+
+    liveness.requests = type("_R", (), {
+        "post": staticmethod(lambda *a, **kw: FakeResponse(429)),
+        "RequestException": Exception})()
+    liveness._next_allowed = 0.0
+    liveness.publish("x", state=carrier)
+    check_true("a refusal is written into state", carrier["ntfy_cooldown_until"])
+
+    # While the stored cooldown is live it blocks the attempt outright — which
+    # is the whole point, and means the marker can only be cleared by a
+    # publish that actually happens. Once it lapses, or when something forces
+    # a send, a success must clear it so it cannot outlive the refusal.
+    liveness.requests = type("_R", (), {
+        "post": staticmethod(lambda *a, **kw: FakeResponse(200)),
+        "RequestException": Exception})()
+    liveness._next_allowed = 0.0
+    check("a live stored cooldown blocks even a would-be success",
+          liveness.publish("x", state=carrier), False)
+    check_true("so the marker is still set", carrier["ntfy_cooldown_until"])
+
+    check("a forced send goes through", liveness.publish("x", state=carrier, force=True), True)
+    check("and clears the marker", carrier["ntfy_cooldown_until"], None)
+finally:
+    liveness._next_allowed, liveness.requests, config.NTFY_TOPIC = (
+        was_next, was_requests, was_topic)
+
+print("\nThe cooldown must fit inside the window before the Mac is called dead")
+# If the beacon cannot re-land within MAC_SILENT_HOURS, the backstop alerts —
+# so a cooldown longer than that window guarantees a false alarm rather than
+# merely risking one.
+window_min = config.MAC_SILENT_HOURS * 60
+check_true(
+    f"cooldown ({config.LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES:.0f} min) plus one "
+    f"throttle gap ({config.LIVENESS_INTERVAL_MINUTES:.0f} min) fits in the "
+    f"{window_min:.0f} min silence window",
+    config.LIVENESS_RATE_LIMIT_COOLDOWN_MINUTES
+    + config.LIVENESS_INTERVAL_MINUTES <= window_min)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

@@ -131,7 +131,7 @@ def handle(reading: Reading, st: dict) -> None:
     # assumes the laptop is on; this is the only signal that survives it
     # being shut, flat, or off the network.
     if config.USE_BROWSER:
-        liveness.publish(f"poll {st.get('checks_total', 0)} at {stamp()}")
+        liveness.publish(f"poll {st.get('checks_total', 0)} at {stamp()}", state=st)
 
     if reading.failed:
         failures = state_mod.record_failure(st, reading)
