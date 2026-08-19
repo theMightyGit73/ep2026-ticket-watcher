@@ -503,6 +503,12 @@ def have_login_credentials() -> bool:
 SIGNIN_URLS = tuple(
     u.strip() for u in os.environ.get(
         "EP_SIGNIN_URLS",
+        # /member first because it redirects INTO the identity service with
+        # the right client parameters attached. David's password manager has
+        # the credential saved against auth.ticketmaster.com, which confirms
+        # that is where the .ie site hands off to — but the OAuth entry point
+        # cannot be constructed by hand without a real client_id, and an
+        # invented one would burn an attempt on a 400. Let the site build it.
         "https://www.ticketmaster.ie/member,"
         "https://www.ticketmaster.ie/myacct,"
         "https://identity.ticketmaster.ie/sign-in",

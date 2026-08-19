@@ -128,6 +128,29 @@ def profile_cookies(profile_dir=None) -> dict:
                 pass
 
 
+def anonymous_baseline() -> set:
+    """Cookie names a signed-OUT profile on this machine actually carries.
+
+    The watcher's own profile is the baseline, and it is a good one: it is
+    real, it is current, and it is guaranteed signed out — staying signed out
+    is the whole reason it exists. Anything present in it proves nothing about
+    an account.
+
+    Measured rather than assumed, because assuming was wrong. The hardcoded
+    KNOWN_ANONYMOUS_COOKIES list was written from a single partial sample and
+    missed fifteen ordinary names, so a profile that had never signed in was
+    confidently reported as signed in.
+
+    Returns an empty set if the watcher's profile cannot be read, in which
+    case the hardcoded list is all there is — weaker, but never worse than
+    before.
+    """
+    try:
+        return set(profile_cookies(config.PROFILE_DIR))
+    except Exception:
+        return set()
+
+
 def record_signed_in_fingerprint(profile_dir=None) -> dict:
     """Remember what this profile looked like at the moment of signing in.
 
@@ -137,7 +160,10 @@ def record_signed_in_fingerprint(profile_dir=None) -> dict:
     their names.
     """
     cookies = profile_cookies(profile_dir)
-    auth = sorted(set(cookies) - KNOWN_ANONYMOUS_COOKIES)
+    # Both baselines: the hardcoded list and the live signed-out profile. The
+    # second is what stops fifteen ordinary anonymous cookies being recorded
+    # as the account's, which would make every later check meaningless.
+    auth = sorted(set(cookies) - KNOWN_ANONYMOUS_COOKIES - anonymous_baseline())
     record = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "auth_cookies": auth,
@@ -174,20 +200,30 @@ def session_evidence(profile_dir=None) -> dict:
     try:
         recorded = json.loads(SESSION_FILE.read_text())
     except (OSError, ValueError):
-        # A profile that predates the fingerprint, or one whose record was
-        # lost. Fall back to the shipped anonymous set, and say that the
-        # answer is weaker than it would otherwise be.
-        extra = sorted(set(cookies) - KNOWN_ANONYMOUS_COOKIES)
+        # No fingerprint: a profile that predates it, or one whose record was
+        # lost. Compare against the WATCHER's profile instead of a hardcoded
+        # list, because that profile is on this machine, is guaranteed signed
+        # out, and is always current.
+        #
+        # The hardcoded list alone is not good enough and was caught being
+        # wrong on 2026-08-19. It was written by hand from one partial sample,
+        # so fifteen perfectly ordinary anonymous cookies — SID, TMUO,
+        # eps_sid, tmp_id and the rest — were missing from it, and a profile
+        # that had never signed in was reported as signed in. That is the
+        # dangerous direction: doctor goes green, the banner warning
+        # disappears, and the first anyone knows is a listing not being held.
+        extra = sorted(set(cookies) - KNOWN_ANONYMOUS_COOKIES - anonymous_baseline())
         if extra:
             out.update(
                 signed_in=True,
-                reason=f"{len(extra)} cookie(s) beyond the anonymous set "
-                       f"(no sign-in fingerprint recorded — re-run login-buy "
-                       f"to make this check exact)",
+                reason=f"{len(extra)} cookie(s) that a signed-out profile on "
+                       f"this machine does not have (no sign-in fingerprint "
+                       f"recorded — re-run login-buy to make this exact)",
             )
         else:
             out.update(signed_in=False,
-                       reason="only anonymous cookies present — not signed in")
+                       reason="every cookie here is one a signed-out profile "
+                              "also has — not signed in")
         return out
 
     expected = set(recorded.get("auth_cookies") or [])

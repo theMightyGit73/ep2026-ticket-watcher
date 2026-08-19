@@ -57,10 +57,24 @@ PASSWORD_SELECTORS = (
     "input[autocomplete='current-password']",
 )
 
-#: Buttons that move the form forward. Ticketmaster's identity flow has been
-#: seen as one page and as two (email, then password), so "next"/"continue"
-#: matter as much as "sign in".
-SUBMIT_LABELS = ("sign in", "log in", "continue", "next", "submit")
+#: Buttons that move the form forward.
+#:
+#: Order matters, and the first version had it backwards. The real page —
+#: dumped on 2026-08-19 — is a two-step form whose submit control is labelled
+#: "Continue", sitting beside a second button labelled "Sign In With A
+#: Passkey". Trying "sign in" first matched the passkey button on a substring,
+#: clicked it, and the run died with "no password field appeared" while
+#: actually being three steps into a passkey flow nobody wanted. Exactly the
+#: same class of mistake as "Find More Tickets" on the resale dead end.
+#:
+#: `button[type=submit]` is tried before any of these anyway, because the real
+#: Continue button carries it and the passkey button does not. Labels are the
+#: fallback for a page that does not mark its submit properly.
+SUBMIT_LABELS = ("continue", "next", "log in", "sign in", "submit")
+
+#: Never clicked, whatever else matches. A passkey flow cannot be completed
+#: with a stored password and only wastes the attempt.
+NEVER_CLICK = ("passkey", "sign in with", "create account", "forgot")
 
 #: Text that means a human is needed. Checked before anything is called a
 #: failure, because "wrong password" and "prove you are human" are different
@@ -113,14 +127,39 @@ def _first_visible(page, selectors, timeout_ms: int = 4000):
     return None, ""
 
 
+def _never_click(label: str) -> bool:
+    lowered = (label or "").strip().lower()
+    return any(bad in lowered for bad in NEVER_CLICK)
+
+
 def _press_submit(page, result: LoginResult) -> bool:
+    # The form's own submit control first. On the real page this is the
+    # "Continue" button and it carries type=submit, while the passkey button
+    # beside it does not — so this one selector avoids the whole class of
+    # label-matching mistakes.
+    try:
+        submit = page.locator("button[type='submit']").first
+        if submit.is_visible(timeout=2000):
+            label = (submit.inner_text(timeout=1500) or "").strip()
+            if not _never_click(label):
+                submit.click(timeout=5000)
+                result.note(f"pressed the form's submit button ({label!r})")
+                return True
+            result.note(f"refusing to press {label!r}")
+    except Exception:
+        pass
+
     for label in SUBMIT_LABELS:
         try:
             button = page.get_by_role("button", name=label, exact=False).first
             if not button.is_visible(timeout=1500):
                 continue
+            actual = (button.inner_text(timeout=1500) or "").strip()
+            if _never_click(actual):
+                result.note(f"refusing to press {actual!r}")
+                continue
             button.click(timeout=5000)
-            result.note(f"pressed {label!r}")
+            result.note(f"pressed {actual!r}")
             return True
         except Exception:
             continue

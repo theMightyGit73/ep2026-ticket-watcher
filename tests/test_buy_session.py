@@ -103,7 +103,10 @@ with tempfile.TemporaryDirectory() as tmp:
     buyer.SESSION_FILE = Path(tmp) / "missing.json"
     ev = buyer.session_evidence(root)
     check("recognised as signed out", ev["signed_in"], False)
-    check_true("and says why", "anonymous" in ev["reason"])
+    # Wording changed on 2026-08-19 when the baseline stopped being a
+    # hardcoded list and became the watcher's own signed-out profile.
+    check_true("and says why",
+               "signed-out profile" in ev["reason"] or "anonymous" in ev["reason"])
 
 print("\nA missing profile is a definite no, not a shrug")
 with tempfile.TemporaryDirectory() as tmp:
@@ -200,6 +203,62 @@ with tempfile.TemporaryDirectory() as tmp:
     ev = buyer.session_evidence(root)
     check("still counted as signed in", ev["signed_in"], True)
     check("with no expiry to report", ev["days_left"], None)
+
+print("\nAn incomplete anonymous list must not invent an account")
+# Caught on 2026-08-19 against the real profiles. KNOWN_ANONYMOUS_COOKIES was
+# written by hand from one partial sample, so fifteen ordinary anonymous
+# names — SID, TMUO, eps_sid, tmp_id and the rest — were missing from it. A
+# buying profile that had never signed in was therefore reported as SIGNED
+# IN. That is the dangerous direction: doctor goes green, the startup warning
+# disappears, and the first anyone knows is a listing not being held.
+#
+# The fix is to diff against the watcher's own profile, which is on the same
+# machine, always current, and guaranteed signed out.
+UNLISTED = {"SID": FAR, "TMUO": FAR, "eps_sid": FAR, "tmp_id": FAR, "sticky": FAR}
+
+with tempfile.TemporaryDirectory() as tmp:
+    signed_out = make_profile(Path(tmp) / "watcher", dict(ANON, **UNLISTED))
+    buying = make_profile(Path(tmp) / "buy", dict(ANON, **UNLISTED))
+    buyer.SESSION_FILE = Path(tmp) / "no-fingerprint.json"
+
+    real_profile_dir = buyer.config.PROFILE_DIR
+    try:
+        buyer.config.PROFILE_DIR = signed_out
+        ev = buyer.session_evidence(buying)
+        check("a profile matching the signed-out one is NOT signed in",
+              ev["signed_in"], False)
+        check_true("and says the cookies are all ones a signed-out profile has",
+                   "signed-out profile also has" in ev["reason"])
+
+        # A genuine account cookie, absent from the signed-out profile, still
+        # reads as signed in.
+        genuine = make_profile(Path(tmp) / "real", dict(ANON, **UNLISTED,
+                                                       **{"tm-identity": FAR}))
+        ev = buyer.session_evidence(genuine)
+        check("a cookie the signed-out profile lacks IS evidence",
+              ev["signed_in"], True)
+
+        # And the fingerprint must not record the anonymous ones as the
+        # account's, or every later check compares against noise.
+        rec = buyer.record_signed_in_fingerprint(genuine)
+        check("only the genuine cookie is recorded", rec["auth_cookies"], ["tm-identity"])
+
+        # The baseline itself.
+        check("the baseline is read from the watcher's profile",
+              buyer.anonymous_baseline(), set(dict(ANON, **UNLISTED)))
+    finally:
+        buyer.config.PROFILE_DIR = real_profile_dir
+
+# With no watcher profile to read, it degrades to the hardcoded list rather
+# than raising.
+real_profile_dir = buyer.config.PROFILE_DIR
+try:
+    buyer.config.PROFILE_DIR = Path("/nonexistent-profile-dir")
+    check("a missing baseline is empty, not an exception",
+          buyer.anonymous_baseline(), set())
+finally:
+    buyer.config.PROFILE_DIR = real_profile_dir
+
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

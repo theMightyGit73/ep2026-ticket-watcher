@@ -62,7 +62,10 @@ class FakeButton:
         self.page, self.label = page, label
 
     def is_visible(self, timeout=None):
-        return True
+        return bool(self.label)
+
+    def inner_text(self, timeout=None):
+        return self.label
 
     def click(self, timeout=None):
         self.page.clicks.append(self.label)
@@ -75,7 +78,14 @@ class _First:
 
 
 class FakePage:
-    """An identity page that can be one-step, two-step, or a challenge."""
+    """An identity page that can be one-step, two-step, or a challenge.
+
+    `button` is the label of the form's submit control, and an empty string
+    means the page has no usable one. That distinction matters since the
+    submit is found by `button[type=submit]` rather than by label: any
+    non-empty label is now a working button, so "no form" has to be modelled
+    by the absence of one rather than by an unrecognised name.
+    """
 
     def __init__(self, body="", has_password=True, button="sign in"):
         self.body, self.has_password, self.button = body, has_password, button
@@ -92,13 +102,26 @@ class FakePage:
         return self.body
 
     def locator(self, selector):
-        if "password" in selector.lower():
+        lowered = selector.lower()
+        # The real page's submit control is a button[type=submit] labelled
+        # "Continue", sitting beside a "Sign In With A Passkey" button that is
+        # NOT type=submit. Modelled here because targeting the submit
+        # attribute rather than the label is what stopped the passkey button
+        # being clicked — see NEVER_CLICK.
+        if "button" in lowered and "submit" in lowered:
+            return _First(FakeButton(self, self.button))
+        if "password" in lowered:
             return _First(FakeElement(self, "password", visible=self.has_password))
         return _First(FakeElement(self, "email"))
 
     def get_by_role(self, role, name=None, exact=False):
-        if name and name.lower() in self.button:
-            return _First(FakeButton(self, name))
+        # Returns the button's REAL label, not the query that found it. That
+        # distinction is the whole point: Playwright's substring match finds
+        # "Sign In With A Passkey" when asked for "sign in", and the guard can
+        # only refuse it if it sees what the button actually says. A fake that
+        # echoed the query back made the trap untestable.
+        if name and name.lower() in self.button.lower():
+            return _First(FakeButton(self, self.button))
         return _First(FakeElement(self, "none", visible=False))
 
     @property
@@ -172,7 +195,7 @@ for scenario, page in (
     ("two-step", FakePage(has_password=False)),
     ("challenge", FakePage(body="Please complete the CAPTCHA to continue")),
     ("rejected", FakePage(body="That password is incorrect")),
-    ("no form", FakePage(has_password=False, button="nothing")),
+    ("no form", FakePage(has_password=False, button="")),
 ):
     r = autologin.sign_in(FakeSession(page))
     check(f"[{scenario}] the password does not appear anywhere", leaked(r), False)
@@ -211,6 +234,29 @@ for name, text in (("autologin.py", source), ("config.py", config_source),
                  if "example" not in m and m not in allowed]
     check(f"[{name}] no login identity is hardcoded", mailboxes, [])
 
+print("\nThe passkey button beside Continue must never be clicked")
+# The real page, dumped on 2026-08-19, carries two buttons: "Continue"
+# (type=submit) and "Sign In With A Passkey" (type=button). Trying "sign in"
+# first matched the passkey one on a substring and clicked it, and the run
+# died reporting "no password field appeared" while three steps into a
+# passkey flow nobody wanted.
+check_true("a passkey button is refused", autologin._never_click("Sign In With A Passkey"))
+check_true("and so is 'Sign in with Google'", autologin._never_click("Sign in with Google"))
+check_true("create-account is refused", autologin._never_click("Create Account"))
+check_true("forgot-password is refused", autologin._never_click("Forgot password?"))
+check("but plain Continue is fine", autologin._never_click("Continue"), False)
+check("and plain Sign In is fine", autologin._never_click("Sign In"), False)
+# Order matters: continue before sign in, so the real submit wins a tie.
+check_true("continue is tried before sign in",
+           autologin.SUBMIT_LABELS.index("continue") < autologin.SUBMIT_LABELS.index("sign in"))
+
+with_credentials()
+trap = FakePage(has_password=False, button="Sign In With A Passkey")
+r = autologin.sign_in(FakeSession(trap))
+check("the passkey button is not pressed", trap.clicks, [])
+check("and the attempt reports honestly", r.outcome, "no-form")
+
+
 print("\nA human check stops it dead — it is never retried")
 # Repeating a challenge is how a locked account becomes a banned one.
 for wording in ("Please complete the CAPTCHA",
@@ -231,7 +277,7 @@ check("outcome", r.outcome, "rejected")
 check_true("and points at the env file", "ep2026-watcher/env" in r.reason)
 
 print("\nA page it cannot read is reported honestly, not guessed at")
-page = FakePage(has_password=False, button="nothing")
+page = FakePage(has_password=False, button="")
 r = autologin.sign_in(FakeSession(page))
 check("outcome", r.outcome, "no-form")
 check("not claimed as signed in", r.signed_in, False)
