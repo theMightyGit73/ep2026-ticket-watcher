@@ -104,6 +104,14 @@ def publish(note: str = "", force: bool = False, state=None) -> bool:
     from . import pushquota
 
     if not (force or pushquota.may_send(config.NTFY_ALERT_RESERVE)):
+        # Standing down is also how the outage gets REPORTED. Once the
+        # allowance is known to be gone the beacon stops attempting, so no
+        # further 429 arrives — and the email announcing that push has
+        # stopped would never fire, which is the exact silence this whole
+        # change exists to remove. note_exhausted() is idempotent: it marks
+        # the day and mails at most once.
+        if pushquota.remaining() <= 0:
+            pushquota.note_exhausted()
         return False
     # Held off before the attempt, not after. A failing ntfy must not turn
     # into a retry on every single poll, which is the surest way to stay rate

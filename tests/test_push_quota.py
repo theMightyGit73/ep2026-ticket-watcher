@@ -228,5 +228,44 @@ with tempfile.TemporaryDirectory() as tmp2:
         config.STATE_FILE = was_state
 
 
+
+print("\nAn allowance already known to be gone still reports itself")
+# The gap that nearly swallowed the whole feature. Once the quota is known
+# spent the beacon stops attempting, so no further 429 arrives — and an email
+# that only fires on a refusal would never fire at all. Discovering it from
+# our own count has to count as discovering it.
+with tempfile.TemporaryDirectory() as tmp3:
+    was_state = config.STATE_FILE
+    config.STATE_FILE = Path(tmp3) / "state.json"
+    was_topic, was_next, was_requests = (
+        config.NTFY_TOPIC, liveness._next_allowed, liveness.requests)
+    try:
+        posted.clear()
+        config.NTFY_TOPIC = "test-topic"
+        attempts = []
+        liveness.requests = type("_R", (), {
+            "post": staticmethod(lambda *a, **kw: (attempts.append(1),
+                                                   FakeResponse(200))[1]),
+            "RequestException": Exception})()
+        # Spend the day without ever seeing a 429 — as happens when the count
+        # reaches the limit locally.
+        (Path(tmp3) / "push-quota.json").write_text(
+            '{"day": "%s", "count": %d}' % (pushquota._today(),
+                                            config.NTFY_DAILY_LIMIT))
+        liveness._next_allowed = 0.0
+        check("the beacon stands down", liveness.publish("x"), False)
+        check("without troubling the network", attempts, [])
+        check("and the outage is reported by email anyway", len(posted), 1)
+        check_true("saying push has stopped",
+                   "stopped" in posted[0]["Subject"].lower())
+        liveness._next_allowed = 0.0
+        liveness.publish("x")
+        check("and it still says it only once", len(posted), 1)
+    finally:
+        config.NTFY_TOPIC, liveness._next_allowed, liveness.requests = (
+            was_topic, was_next, was_requests)
+        config.STATE_FILE = was_state
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
