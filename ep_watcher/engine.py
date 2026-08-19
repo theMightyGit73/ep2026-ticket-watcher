@@ -3,7 +3,7 @@
 from typing import List, Optional
 
 from . import config, liveness, network, notify, state as state_mod
-from .model import Reading, better_status
+from .model import GOOD_STATUSES, Reading, better_status
 from .sources import discovery, inventory_api
 from .state import stamp
 
@@ -203,7 +203,12 @@ def handle(reading: Reading, st: dict) -> None:
     if any("RESERVE ACCEPTED" in n for n in reading.notes):
         notify.reserved_in_browser(reading)
     else:
+        # The ordinary alert goes FIRST and unconditionally. Securing is an
+        # optimistic extra that takes up to 45 seconds and can fail in a dozen
+        # ways; letting it run before the alert would mean a browser problem
+        # could delay or swallow the one message this project exists to send.
         notify.available(reading, reason, new_listings)
+        _maybe_secure(reading)
     # Keep what it was, not just that there was one. By the time the session
     # summary goes out the listing has almost certainly sold, and the count
     # alone cannot tell you what these actually go for.
@@ -376,6 +381,58 @@ def watchdog_reason(reading: Reading) -> str:
         coda = f"The {lost} source is failing; {kept} still answers."
 
     return f"{cause}\n\n{coda}" if cause else coda
+
+
+def _maybe_secure(reading: Reading) -> None:
+    """Try to hold a resale listing, if that has been switched on.
+
+    Resale only. Primary stock reserves itself as a side effect of the search
+    the watcher already does — that is what the RESERVE ACCEPTED path above
+    handles — so opening a second signed-in browser for it would be a second
+    request for a ticket already held.
+
+    Every failure here is swallowed into an email rather than raised. The
+    availability alert has already gone out by the time this runs; nothing
+    below it is allowed to break the poll loop.
+    """
+    if not config.SECURE_ON_FIND:
+        return
+    if reading.resale not in GOOD_STATUSES:
+        return
+
+    from . import buyer
+
+    listing = next((l for l in reading.listings if l.kind == "resale"), None)
+    if listing is None:
+        return
+
+    event = next((e for e in config.EVENTS if e.slug == reading.event_slug), None)
+    if event is None:
+        print(f"[{stamp()}] cannot secure: no event matches {reading.event_slug!r}")
+        return
+
+    print(f"[{stamp()}] listing found — opening the signed-in browser to hold it")
+    session, hold = None, buyer.HoldResult()
+    try:
+        session = buyer.BuySession().start()
+        hold = buyer.secure(session, event, listing, hold)
+    except Exception as exc:
+        hold.reason = f"{type(exc).__name__}: {exc}"
+        print(f"[{stamp()}] secure attempt failed to start: {hold.reason}")
+    finally:
+        # Left OPEN on success: closing the browser is what drops the basket,
+        # and the whole point is that David walks to this window and pays in
+        # it. Closed on failure, because a signed-in Chrome nobody is going to
+        # use is just an idle session for Ticketmaster to fingerprint.
+        if session is not None and not hold.secured:
+            session.close()
+
+    if hold.secured:
+        print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")
+        notify.secured_hold(reading, hold)
+    else:
+        print(f"[{stamp()}] could not hold it: {hold.reason}")
+        notify.secure_failed(reading, hold)
 
 
 def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
@@ -569,8 +626,18 @@ def run_once(session=None) -> Reading:
         # the yield. Weighting them costs no extra requests — see
         # config.searches_per_hour().
         due = state_mod.due_events(st, config.EVENTS)
+        if not due:
+            # Nothing is due. The loop ticks faster than the shortest gap so
+            # that a low draw can be honoured, so most ticks land here — this
+            # is the normal quiet case, not a fault, and must not be recorded
+            # as a check or a failure.
+            idle = Reading(source="idle")
+            idle.note("no page due yet — waiting out its interval")
+            return idle
         for index, event in enumerate(due):
-            state_mod.note_event_polled(st, event.slug)
+            # Drawn now and stored, so the wait is decided once rather than
+            # re-rolled on every tick. See state.note_event_polled().
+            state_mod.note_event_polled(st, event.slug, event.next_gap())
             reading = poll(session, event)
             handle(reading, st)
             readings.append(reading)

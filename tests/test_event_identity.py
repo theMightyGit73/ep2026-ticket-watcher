@@ -124,8 +124,18 @@ for event in config.EVENTS:
     check_true(f"[{event.slug}] body links to this page", event.url in body)
     for other in others(event):
         check(f"[{event.slug}] and never links to {other.slug}", other.url in body, False)
-    check_true(f"[{event.slug}] push links to this page",
-               pushed[-1]["headers"].get("Click") == event.url)
+    # Since 2026-08-19 the availability push points at the event URL plus the
+    # quantity, so David lands on a page already asking for one ticket rather
+    # than on the default of two. What this check is really for is that the
+    # push never sends him to the OTHER page — so it tests the prefix, and
+    # then tests the thing it actually cares about explicitly.
+    click = pushed[-1]["headers"].get("Click")
+    check_true(f"[{event.slug}] push links to this page", click.startswith(event.url))
+    check_true(f"[{event.slug}] push carries the quantity",
+               f"quantity={config.WANTED_QUANTITY}" in click)
+    for other in others(event):
+        check(f"[{event.slug}] push never links to {other.slug}",
+              other.url in click, False)
 
 print("\nThe basket alert — the one with a countdown running")
 # This is the alert that was broken: it named and linked config.EVENT_* no

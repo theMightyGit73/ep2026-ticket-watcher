@@ -174,8 +174,19 @@ def event_state(state: dict, slug: str) -> dict:
 DUE_TOLERANCE = 0.75
 
 
-def note_event_polled(state: dict, slug: str) -> None:
-    event_state(state, slug)["last_polled_at"] = utc_now().isoformat()
+def note_event_polled(state: dict, slug: str, gap_seconds: int = 0) -> None:
+    """Record that this page was just searched, and when it is next due.
+
+    `gap_seconds` is drawn once, HERE, and stored — not recomputed while
+    waiting. Drawing it on each tick instead would collapse the configured
+    range to its floor, because the page would become due the first time any
+    draw landed low. Storing it also means the gap survives a restart, so a
+    watcher that is restarted every few minutes cannot poll continuously.
+    """
+    ev = event_state(state, slug)
+    ev["last_polled_at"] = utc_now().isoformat()
+    if gap_seconds:
+        ev["next_gap_seconds"] = int(gap_seconds)
 
 
 def minutes_since_event_poll(state: dict, slug: str):
@@ -184,31 +195,75 @@ def minutes_since_event_poll(state: dict, slug: str):
     return None if hours is None else hours * 60.0
 
 
+def event_gap_seconds(state: dict, event) -> int:
+    """The gap this page is currently waiting out, in seconds.
+
+    The stored draw when there is one; otherwise a fresh draw which is then
+    STORED, so every later question about this page gets the same answer. The
+    fallback covers a state file written before ranges existed and a page
+    added while the watcher is running.
+
+    Persisting the fallback is not tidiness. event_due() is asked about the
+    same page several times in a tick, and a fallback that re-drew each time
+    made it answer differently within one cycle — a page could be "not due"
+    for the loop and "due" for anything that asked afterwards. It also made
+    the effective interval the minimum of many draws rather than a sample
+    from the range, which is the exact failure this whole design avoids.
+    """
+    ev = event_state(state, event.slug)
+    stored = ev.get("next_gap_seconds")
+    if isinstance(stored, (int, float)) and stored > 0:
+        return int(stored)
+    drawn = event.next_gap()
+    ev["next_gap_seconds"] = int(drawn)
+    return int(drawn)
+
+
 def event_due(state: dict, event) -> bool:
     """Is this page due a search?
 
     A page that has never been searched is always due, so a fresh state file
     or a newly added page is read on the first tick rather than waiting out
     its interval.
+
+    Measured against the gap drawn when the page was last searched, so the
+    randomised cadence is honoured rather than re-rolled — see
+    note_event_polled().
     """
     since = minutes_since_event_poll(state, event.slug)
     if since is None:
         return True
-    return since * 60.0 >= event.poll_seconds * DUE_TOLERANCE
+    return since * 60.0 >= event_gap_seconds(state, event) * DUE_TOLERANCE
 
 
 def due_events(state: dict, events) -> list:
     """Which pages to search on this tick.
 
-    Never returns nothing. If the jitter lands short and no page is strictly
-    due, the one that has waited longest is searched anyway — a tick that
-    polls nothing would count as a cycle in the logs while learning nothing,
-    which is the sort of quiet no-op this project keeps having to dig out.
+    May legitimately return nothing, and that is the point. Each page waits
+    out a gap drawn from its own range, and the watch loop ticks faster than
+    the shortest of those gaps so it can honour a low draw. A tick that finds
+    nothing due must therefore do nothing and sleep again.
+
+    This used to force the longest-waiting page instead of returning empty,
+    on the grounds that a tick which polls nothing is a silent no-op. That was
+    right while the tick equalled the busiest page's interval, so something
+    was always due. Once the gaps became ranges on 2026-08-19 it would have
+    defeated the whole mechanism — the forced poll would fire on nearly every
+    tick and the page would be searched at the tick rate, not at its own.
+
+    The stall guard below keeps the original protection: a page that is more
+    than twice its longest gap overdue is searched regardless, so a clock
+    jumping forward or a corrupted timestamp cannot park a page for ever.
     """
     due = [e for e in events if event_due(state, e)]
-    if due or not events:
+    if due:
         return due
-    return [max(events, key=lambda e: minutes_since_event_poll(state, e.slug) or 0.0)]
+    stalled = [
+        e for e in events
+        if (minutes_since_event_poll(state, e.slug) or 0.0) * 60.0
+        > max(e.poll_max_seconds, e.poll_seconds) * 2
+    ]
+    return stalled
 
 
 def event_summaries(state: dict) -> list:

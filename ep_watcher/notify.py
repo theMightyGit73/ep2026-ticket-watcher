@@ -161,6 +161,69 @@ def _listing_block(listings: List[Listing]) -> str:
     return "\n".join(f"  • {l.describe()}" for l in listings)
 
 
+def buy_url(event_url: str, quantity: int = None, listing: Listing = None) -> str:
+    """The shortest link that lands on the listing rather than on the event.
+
+    The plain event URL costs David the whole search by hand — pick the
+    quantity, press Find Tickets, scroll to Other Options — and on 2026-08-19
+    he reported that this is where the ticket is usually lost. Every listing
+    found so far has been visible for a single poll, so the seconds are the
+    product.
+
+    `quantity` is the load-bearing part and is the one parameter we are sure
+    of: the page defaults to 2, resale results are filtered by quantity, and a
+    single ticket is invisible to a search for two. Carrying it in the URL
+    removes the step most likely to be fumbled at speed.
+
+    `listing_id` is appended as a fragment when known. That is a guess about
+    Ticketmaster's routing rather than something observed — an unknown
+    fragment is ignored by any page that does not use it, so it costs nothing
+    if wrong, and the find recorder writes the constructed URL alongside the
+    listing so the next live sighting settles whether it works.
+    """
+    if not event_url:
+        return event_url
+    quantity = config.WANTED_QUANTITY if quantity is None else quantity
+    joiner = "&" if "?" in event_url else "?"
+    url = f"{event_url}{joiner}quantity={quantity}"
+    if listing is not None and getattr(listing, "listing_id", None):
+        url = f"{url}#resale-{listing.listing_id}"
+    return url
+
+
+def _best_listing(listings: List[Listing]) -> Listing:
+    """The listing an alert should point at when several are live at once.
+
+    Resale before primary, because resale is what actually appears here, and
+    a known id before an unknown one, because only the former can be linked
+    to. Beyond that the first, which is the order Ticketmaster returned them.
+    """
+    if not listings:
+        return None
+    ranked = sorted(
+        listings,
+        key=lambda l: (l.kind != "resale", not getattr(l, "listing_id", None)),
+    )
+    return ranked[0]
+
+
+def _headline(listing: Listing) -> str:
+    """Section and price in one line, for a phone's lock screen.
+
+    The push used to say only "a ticket is on the resale" and put the detail
+    in the body, so deciding whether it was worth opening meant opening it.
+    Section and price are what that decision actually needs.
+    """
+    if listing is None:
+        return "a ticket is live"
+    bits = []
+    if getattr(listing, "section", None):
+        bits.append(f"Section {listing.section}")
+    if listing.price:
+        bits.append(listing.price)
+    return " · ".join(bits) or listing.name
+
+
 def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     which = []
     if reading.primary in GOOD_STATUSES:
@@ -178,38 +241,119 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     # with nothing on it while the real listing sells.
     name, url = _event_of(reading)
 
-    subject = f"TICKETS AVAILABLE ({where}): {name}{_from_watcher()}"
+    pick = _best_listing(reading.listings)
+    link = buy_url(url, config.WANTED_QUANTITY, pick)
+
+    # The link goes first, and alone on its line. Everything below it is
+    # context for afterwards; a listing that lives four minutes is not read
+    # top to bottom.
+    subject = f"TICKETS AVAILABLE ({where}): {_headline(pick)} — {name}{_from_watcher()}"
     body = (
         f"Hi David,\n\n"
-        f"A ticket has shown up for {name} on the {where}.\n\n"
+        f"GO — {_headline(pick)} on the {where}, {name}.\n\n"
+        f"{link}\n\n"
+        f"That link asks for the page with the quantity already set to "
+        f"{config.WANTED_QUANTITY}.\n"
+        f"Open it in a BROWSER, not the app — the resale panel only exists on\n"
+        f"the website.\n\n"
+        f"IF THE LISTING IS NOT THERE, the link did not do its job — do this:\n\n"
+        f"  1. Set the quantity to {config.WANTED_QUANTITY}. The page defaults to 2, and\n"
+        f"     resale results are filtered by quantity — a single ticket does\n"
+        f"     not appear at all when you ask for two.\n"
+        f"  2. Press 'Find Tickets' (or 'Search Again').\n"
+        f"  3. Scroll to 'Other Options' > 'Verified Resale Tickets'.\n\n"
         f"{_which_ticket(name)}\n\n"
         f"What the watcher saw:\n{_listing_block(reading.listings)}\n{new_block}\n"
         f"Trigger : {reason}\n"
         f"Source  : {reading.source}\n"
         f"Wanted  : {config.WANTED_QUANTITY} ticket(s)\n\n"
-        f"HOW TO SEE IT — this matters, a listing can be there and invisible:\n\n"
-        f"  1. Open the link below in a BROWSER, not the app. The resale panel\n"
-        f"     only exists after a search on the website.\n"
-        f"  2. Set the quantity to {config.WANTED_QUANTITY}. The page defaults to 2, and\n"
-        f"     resale results are filtered by quantity — a single ticket does\n"
-        f"     not appear at all when you ask for two.\n"
-        f"  3. Press 'Find Tickets' (or 'Search Again').\n"
-        f"  4. Scroll to 'Other Options' > 'Verified Resale Tickets'.\n\n"
         f"If it is gone, it may be in someone else's basket rather than sold —\n"
         f"those holds expire, so it is worth trying again a few minutes later.\n\n"
-        f"The watcher deliberately does not buy on your behalf.\n\n"
-        f"{url}\n\n"
+        f"Plain event page, if the link above misbehaves:\n{url}\n\n"
         f"Checked at: {stamp()}\n"
     )
     _safe("available-email", _send_email, subject, body)
     _push(
         "available-push",
-        title=f"EP2026: ticket on the {where}",
+        # Section and price in the title, so the lock screen alone is enough
+        # to decide whether to move.
+        title=f"EP2026 {_headline(pick)}",
         message=f"{name}\n\n" + _listing_block(reading.listings)
-                + "\n\nTap to open this event.",
+                + f"\n\nTap to open at quantity {config.WANTED_QUANTITY}.",
         priority="urgent",
         tags=["tickets", "rotating_light"],
-        click=url,
+        click=link,
+    )
+
+
+def secured_hold(reading: Reading, hold) -> None:
+    """A resale listing is sitting in a basket, signed in as David, right now.
+
+    The loudest thing this project sends, and the only one with a countdown
+    on it. Everything about the wording assumes he is not at the machine: it
+    says which machine, it says the hold dies without him, and it does not
+    bury either under context.
+
+    Deliberately does NOT offer a link as the primary action. A Ticketmaster
+    basket belongs to the session that created it, so a link opened on his
+    phone is a different session with an empty checkout — sending him there
+    while a real hold ticks away on the laptop would be the worst possible
+    outcome of this whole feature.
+    """
+    name, _url = _event_of(reading)
+    pick = _best_listing(reading.listings)
+    minutes = getattr(hold, "minutes_hint", 0) or config.HOLD_MINUTES_HINT
+
+    subject = f"HELD — GO TO THE LAPTOP NOW: {_headline(pick)} — {name}{_from_watcher()}"
+    body = (
+        f"Hi David,\n\n"
+        f"A ticket is IN A BASKET under your account right now.\n\n"
+        f"  {_headline(pick)}\n"
+        f"  {name}\n\n"
+        f"GO TO THE MACHINE RUNNING THE WATCHER. The Chrome window that holds\n"
+        f"it has been brought to the front, already signed in and sitting on\n"
+        f"the checkout page. Finish paying there.\n\n"
+        f"Do NOT try to pick this up on your phone. The hold lives in that\n"
+        f"browser's session — any other device gets an empty basket, and the\n"
+        f"hold dies while you look at it.\n\n"
+        f"You have roughly {minutes} minutes. The watcher will not pay for it:\n"
+        f"it stops at the basket, every time, by design.\n\n"
+        f"{_which_ticket(name)}\n\n"
+        f"What was held:\n{_listing_block(reading.listings)}\n\n"
+        f"Held at: {stamp()}\n"
+    )
+    _safe("secured-email", _send_email, subject, body)
+    _push(
+        "secured-push",
+        title=f"HELD {_headline(pick)} — GO TO THE LAPTOP",
+        message=f"{name}\n\nIn a basket under your account. Roughly {minutes} "
+                f"minutes to pay, on the watcher's machine only.",
+        priority="urgent",
+        tags=["rotating_light", "shopping_cart"],
+    )
+
+
+def secure_failed(reading: Reading, hold) -> None:
+    """We tried to hold it and could not. Say so plainly, and why.
+
+    Sent alongside the ordinary availability alert rather than instead of it.
+    Its job is to stop him trusting a hold that does not exist — silence here
+    would be read as "it's in the basket" the moment the feature is switched
+    on and he stops reading the other email closely.
+    """
+    name, _url = _event_of(reading)
+    reason = getattr(hold, "reason", "") or "no reason recorded"
+    _safe(
+        "secure-failed-email", _send_email,
+        f"could not hold it — buy it yourself: {name}{_from_watcher()}",
+        f"Hi David,\n\n"
+        f"A listing appeared and the watcher tried to put it in a basket for\n"
+        f"you. It did not manage to.\n\n"
+        f"Why: {reason}\n\n"
+        f"There is NO hold. The separate 'TICKETS AVAILABLE' email has the\n"
+        f"link — if the listing is still there it is still yours to take.\n\n"
+        f"What it saw:\n{_listing_block(reading.listings)}\n\n"
+        f"Tried at: {stamp()}\n",
     )
 
 

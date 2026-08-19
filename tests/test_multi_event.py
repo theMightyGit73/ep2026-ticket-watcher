@@ -88,12 +88,21 @@ print("\nRequest volume does not grow with the event count")
 # home IP flagged. Pages now have their own intervals rather than sharing a
 # cycle, so the volume is the sum of their rates — and that sum is the number
 # that has to stay controlled, whatever the split between them.
-check("the tick is the shortest page interval", config.poll_interval(),
-      min(e.poll_seconds for e in config.EVENTS))
-check("total volume is what it always was",
-      round(config.searches_per_hour()), 12)
-check_true("comfortably under the ~20/hour that drew a block",
-           config.searches_per_hour() <= 15)
+# The tick follows the shortest gap a page can DRAW, not its mean. Ticking at
+# the mean would make the bottom half of every range unreachable.
+check("the tick is the shortest gap any page can draw", config.poll_interval(),
+      min(e.poll_min_seconds for e in config.EVENTS))
+# Raised from 12/hour on 2026-08-19, when David asked for 3-6 minutes on the
+# standard page. This is the cost of that change, stated rather than hidden:
+# the mean gap there fell from 360s to 270s. The 20/hour line is the one that
+# actually matters — it is what drew a block in development — and this stays
+# under it, but by less room than before.
+check("total volume reflects the 3-6 minute standard page",
+      round(config.searches_per_hour()), 15)
+check_true("still under the ~20/hour that drew a block",
+           config.searches_per_hour() < 20)
+check_true("and not creeping towards it unnoticed",
+           config.searches_per_hour() <= 16)
 
 # Weighted by yield, not split evenly. Eight of the nine resale sightings
 # between 13 and 18 August were on the standard page and one on the instalment

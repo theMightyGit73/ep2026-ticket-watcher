@@ -43,6 +43,17 @@ class Listing:
     price: Optional[str] = None
     kind: str = "primary"        # "primary" | "resale"
     locked: bool = False         # needs an unlock/presale code
+    #: Ticketmaster's own id for a resale listing, and its section. Carried so
+    #: an alert can point at the specific listing rather than at the event,
+    #: which is the difference between one tap and a hand-driven search.
+    #:
+    #: Deliberately NOT part of describe(). That string drives the
+    #: new-listing diff, and if these ids turn out to be regenerated per poll
+    #: the same ticket would look new on every check and re-alert on a
+    #: four-minute clock. Identity stays with the human-readable description
+    #: until we have enough sightings to know the id is stable.
+    listing_id: Optional[str] = None
+    section: Optional[str] = None
 
     def describe(self) -> str:
         bits = [self.name]

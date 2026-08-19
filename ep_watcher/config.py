@@ -5,6 +5,7 @@ from the environment — nothing sensitive is committed.
 """
 
 import os
+import random
 from pathlib import Path
 
 # ── The event ────────────────────────────────────────────────────────────────
@@ -18,7 +19,8 @@ class Event:
     """
 
     def __init__(self, slug: str, name: str, url: str, match_words=(),
-                 tm_event_id: str = "", poll_seconds: int = 0):
+                 tm_event_id: str = "", poll_seconds: int = 0,
+                 poll_min_seconds: int = 0, poll_max_seconds: int = 0):
         self.slug = slug
         self.name = name
         self.url = url
@@ -29,10 +31,43 @@ class Event:
         #: so — see sources/inventory_api.py. Answering with another page's
         #: inventory would be a confident statement about the wrong ticket.
         self.tm_event_id = tm_event_id
-        #: How often this page is worth searching, in seconds. Pages are not
-        #: equally productive and the polling budget should not pretend they
-        #: are — see EVENT_POLL_SECONDS below. 0 means "use the default".
-        self.poll_seconds = poll_seconds or DEFAULT_EVENT_POLL_SECONDS
+
+        #: The gap between searches of this page is drawn fresh from
+        #: [poll_min_seconds, poll_max_seconds] after every search, rather
+        #: than being a fixed number. Two reasons, and the second is the one
+        #: that matters:
+        #:
+        #:   * A metronome is a bot signature. A page hit at 12:00:03,
+        #:     12:06:03, 12:12:04 is describing itself; a range is not.
+        #:   * The average gap can be shortened without the peak request rate
+        #:     rising as much as a fixed cadence at the same average would,
+        #:     because the draws spread rather than stacking.
+        #:
+        #: `poll_seconds` remains the MEAN of that range and is what the
+        #: budget arithmetic uses, so searches_per_hour() still answers the
+        #: question that actually matters: how much traffic is this sending.
+        if poll_min_seconds or poll_max_seconds:
+            lo = poll_min_seconds or poll_max_seconds
+            hi = poll_max_seconds or poll_min_seconds
+            self.poll_min_seconds, self.poll_max_seconds = min(lo, hi), max(lo, hi)
+            self.poll_seconds = (self.poll_min_seconds + self.poll_max_seconds) // 2
+        else:
+            self.poll_seconds = poll_seconds or DEFAULT_EVENT_POLL_SECONDS
+            self.poll_min_seconds = self.poll_max_seconds = self.poll_seconds
+
+    def next_gap(self) -> int:
+        """How long to wait before searching this page again.
+
+        Drawn ONCE per search and then stored on the event's state — never
+        re-drawn while waiting. Re-drawing on each tick of the watch loop
+        would quietly collapse the range to its floor: with a fresh draw every
+        30 seconds, the page becomes due as soon as any one draw lands low,
+        so the effective interval is the minimum of many draws rather than a
+        sample from the range. See state.note_event_polled().
+        """
+        if self.poll_max_seconds <= self.poll_min_seconds:
+            return self.poll_min_seconds
+        return random.randint(self.poll_min_seconds, self.poll_max_seconds)
 
     @property
     def searches_per_hour(self) -> float:
@@ -62,8 +97,33 @@ class Event:
 # roughly 40% at a 10-minute cycle. Moving the busy page to 6 minutes raises
 # its share to about 56%. Weighted by where listings actually appear, that is
 # close to a third more finds for the same number of requests.
-STANDARD_POLL_SECONDS = int(os.environ.get("EP_STANDARD_POLL_SECONDS", "360"))
-INSTALMENT_POLL_SECONDS = int(os.environ.get("EP_INSTALMENT_POLL_SECONDS", "1800"))
+#
+# Since 2026-08-19 each page's gap is a RANGE rather than a single number, and
+# is drawn fresh after every search. David asked for 3-6 minutes on the
+# standard page. Two things that buys:
+#
+#   * The traffic stops being a metronome. A fixed 360s cadence prints a
+#     recognisable pattern — the ±25% jitter on the loop's own sleep did not
+#     fix that, because the page was still searched the moment it came due.
+#   * The mean gap drops from 360s to 270s, so a listing with a ~4.6 minute
+#     life is more likely to be seen at all.
+#
+# The cost is real and is the thing to watch: the standard page goes from 10
+# searches an hour to ~13.3, and the total from 12/hour to ~15.3/hour, against
+# the ~20/hour that got the home connection flagged in development. It is
+# still under that line, but by less than it was.
+STANDARD_POLL_MIN_SECONDS = int(os.environ.get("EP_STANDARD_POLL_MIN", "180"))
+STANDARD_POLL_MAX_SECONDS = int(os.environ.get("EP_STANDARD_POLL_MAX", "360"))
+# The instalment plan is randomised too, around its existing 30-minute mean.
+# One of the nine sightings to date was on this page, so it keeps its small
+# share of the budget; the range only stops it being predictable.
+INSTALMENT_POLL_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_POLL_MIN", "1200"))
+INSTALMENT_POLL_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_POLL_MAX", "2400"))
+
+#: Kept as the mean of the standard range, for anything that still wants a
+#: single number (the banner, and any page added without its own range).
+STANDARD_POLL_SECONDS = (STANDARD_POLL_MIN_SECONDS + STANDARD_POLL_MAX_SECONDS) // 2
+INSTALMENT_POLL_SECONDS = (INSTALMENT_POLL_MIN_SECONDS + INSTALMENT_POLL_MAX_SECONDS) // 2
 DEFAULT_EVENT_POLL_SECONDS = STANDARD_POLL_SECONDS
 
 EVENTS = [
@@ -77,7 +137,8 @@ EVENTS = [
         ),
         match_words=("electric picnic", "weekend"),
         tm_event_id=os.environ.get("TM_EVENT_ID", "18006314BD813D3E"),
-        poll_seconds=STANDARD_POLL_SECONDS,
+        poll_min_seconds=STANDARD_POLL_MIN_SECONDS,
+        poll_max_seconds=STANDARD_POLL_MAX_SECONDS,
     ),
     # The instalment-plan listing for the same festival. A separate page with
     # its own inventory and its own resale panel, so it needs watching in its
@@ -91,7 +152,8 @@ EVENTS = [
             "/event/18006314CFB4A99E"
         ),
         match_words=("electric picnic", "weekend", "instalment"),
-        poll_seconds=INSTALMENT_POLL_SECONDS,
+        poll_min_seconds=INSTALMENT_POLL_MIN_SECONDS,
+        poll_max_seconds=INSTALMENT_POLL_MAX_SECONDS,
     ),
 ]
 
@@ -215,6 +277,42 @@ OFFSCREEN = os.environ.get("EP_OFFSCREEN", "1").lower() in ("1", "true", "yes")
 
 PAGE_TIMEOUT_MS = 45_000
 
+# ── Securing a find ──────────────────────────────────────────────────────────
+# From 2026-08-19 the watcher may do more than report: on a resale find it can
+# open a SECOND browser, signed in, click into the listing and hold it in a
+# basket — then stop, and hand the live hold to David to pay for.
+#
+# The split into two browsers is the whole point and is David's design. The
+# watcher's own browser stays signed out and does all the polling, so the
+# ~140 page-loads a day are anonymous and a block costs nothing but a profile
+# reset. The account only ever appears at the moment a real listing exists —
+# six times on 2026-08-18, against 140 polls. Do not be tempted to collapse
+# these into one signed-in session for simplicity; that trades the account's
+# safety for a few seconds of browser startup.
+#
+# Default OFF. This spends nothing and signs nothing, but it does put his
+# account in front of Ticketmaster's bot detection, so it must be turned on
+# deliberately rather than inherited by a fresh checkout.
+SECURE_ON_FIND = os.environ.get("EP_SECURE_ON_FIND", "0").lower() in ("1", "true", "yes")
+
+# A separate user-data-dir from PROFILE_DIR, and not negotiable: Chrome takes
+# an exclusive lock on a profile directory, so the buying browser cannot share
+# the watcher's while the watcher is running. Keeping them apart is also what
+# keeps the signed-in cookies out of the browser that does the polling.
+BUY_PROFILE_DIR = Path(
+    os.environ.get("EP_BUY_PROFILE_DIR",
+                   Path.home() / ".ep2026-watcher" / "chrome-profile-buy")
+)
+
+# How long to keep trying to secure one listing before giving up and just
+# alerting. Past this the listing is almost certainly in someone else's
+# basket, and the honest thing is to tell him rather than keep clicking.
+SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "45"))
+
+# Ticketmaster's own hold is a few minutes and it does not publish the number.
+# Used only to word the alert, never to decide anything.
+HOLD_MINUTES_HINT = int(os.environ.get("EP_HOLD_MINUTES_HINT", "4"))
+
 # Set EP_USE_BROWSER=0 to run API-sources-only. That is the mode for anywhere
 # without a real Chrome — GitHub Actions, a small VPS without a display — and
 # it is much weaker: no primary ground truth and no per-listing resale. See
@@ -292,7 +390,11 @@ def poll_interval() -> int:
     function of the cycle, which is what lets the pages be weighted by yield
     without spending more. See searches_per_hour().
     """
-    return min(e.poll_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
+    # The SHORTEST gap any page can draw, not the mean. If the loop ticked at
+    # the mean it could not honour a low draw: a page that drew 180s would not
+    # be looked at until the next tick at 270s, and the bottom half of every
+    # range would be silently unreachable.
+    return min(e.poll_min_seconds for e in EVENTS) if EVENTS else _POLL_PER_EVENT_SECONDS
 
 
 def searches_per_hour() -> float:

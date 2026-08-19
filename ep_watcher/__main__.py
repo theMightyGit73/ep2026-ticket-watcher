@@ -63,6 +63,50 @@ def cmd_login(_args) -> int:
     return 0
 
 
+def cmd_login_buy(_args) -> int:
+    """Sign in the BUYING profile — the only one that ever carries the account.
+
+    Separate from `login` and separate from the watcher's profile on purpose.
+    The watcher polls signed out, roughly 140 times a day, so a block costs a
+    profile reset and nothing else. This profile is opened only when a real
+    listing exists and is the one that holds a basket.
+
+    Nobody's password is stored, typed or read by this program. It opens a
+    window; David signs in the way he would on any other day; Ticketmaster
+    leaves cookies in the profile directory and those are what later runs use.
+    That is why the watcher never needs to be told a password — and it should
+    never be changed to accept one.
+    """
+    _banner("Opening Chrome so you can sign in the BUYING profile")
+    print(f"  Profile: {config.BUY_PROFILE_DIR}")
+    print("  This is the session that will hold a basket for you.\n")
+    print("  1. Accept the cookie dialog if it appears.")
+    print("  2. Sign in to the Ticketmaster account you want to BUY with.")
+    print("  3. Come back here and press Enter.\n")
+
+    config.OFFSCREEN = False
+    with _browser().BrowserSession(
+        headless=False, profile_dir=config.BUY_PROFILE_DIR
+    ) as session:
+        try:
+            session.page.goto(config.EVENT_URL, wait_until="domcontentloaded")
+        except Exception as exc:
+            print(f"  (navigation hiccup, carry on in the window anyway: {exc})")
+        try:
+            input("  Press Enter when you're signed in and the page looks right... ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Cancelled.")
+            return 1
+        text = session.visible_text().lower()
+
+    if "sign out" in text or "my account" in text:
+        print(f"\n  Signed in. Buying session saved to {config.BUY_PROFILE_DIR}")
+        print("  Turn the feature on with EP_SECURE_ON_FIND=1 when you want it.\n")
+        return 0
+    print("\n  Could not confirm a signed-in session — run `login-buy` again.\n")
+    return 1
+
+
 def cmd_check(_args) -> int:
     """Read every watched event once and print the results. Sends nothing."""
     print(f"\n[{stamp()}] Manual check of {len(config.EVENTS)} event(s) — no notifications\n")
@@ -892,6 +936,7 @@ def cmd_status(_args) -> int:
 
 COMMANDS = {
     "login": cmd_login,
+    "login-buy": cmd_login_buy,
     "check": cmd_check,
     "run": cmd_run,
     "watch": cmd_watch,

@@ -119,16 +119,44 @@ happened.
 ## Two pages, watched separately
 
 Electric Picnic sells the same weekend twice — an ordinary ticket and an
-instalment plan — on two pages with separate inventory. Both are watched on
-every cycle, and that has consequences worth knowing:
+instalment plan — on two pages with separate inventory. Each is searched on
+its own clock, and that has consequences worth knowing:
 
-**Request volume does not grow with the page count.** Every page is searched
-every cycle, so the *cycle* interval scales with the number of pages:
-`EP_POLL_SECONDS` is the per-page budget and the cycle is that times the
-number of pages. Holding the interval fixed while adding a second page would
-have doubled the hourly rate to ~24 searches, above the ~20/hour that got the
-home IP flagged. Coverage was traded for frequency deliberately, rather than
-buying the second page with risk.
+**Each page has its own interval, and it is a range rather than a number.**
+Since 2026-08-19 the gap between searches is drawn fresh after every search:
+3–6 minutes on the standard page, 20–40 on the instalment plan. Two reasons,
+and the second matters more than the first:
+
+- A fixed cadence is a signature. A page hit at 12:00:03, 12:06:03, 12:12:04
+  is describing itself. The ±25% jitter already on the loop's sleep never
+  fixed that, because the page was still searched the instant it came due.
+- The mean gap on the busy page drops from 360s to 270s, so a listing with a
+  ~4.6 minute life is likelier to be seen at all.
+
+**Request volume is the sum of the per-page rates**, not a function of the
+cycle — which is what lets the pages be weighted by yield without spending
+more. The split is deliberate: of the nine resale sightings between 13 and 18
+August, eight were on the standard page and one on the instalment plan, so
+searching both equally spent half the budget for an eighth of the return.
+
+| Page | Gap | Searches/hour |
+| --- | --- | --- |
+| Weekend Camping | 3–6 min | 13.3 |
+| Weekend Camping Instalment Plan | 20–40 min | 2.0 |
+| | **total** | **15.3** |
+
+That total is the number to watch. Roughly 20/hour is what got the home
+connection flagged in development, so this sits under the line with less room
+than the 12/hour it replaced. A test fails if it ever creeps past 16/hour, so
+a later tweak cannot drift there quietly.
+
+**The drawn gap is stored, not recomputed.** It lives in `state.json` and
+survives a restart. Re-drawing while waiting would collapse the range to its
+floor — the page becomes due the first time any draw lands low, so the
+effective interval is the minimum of many draws rather than a sample from the
+range. For the same reason the watch loop ticks at the shortest gap any page
+can draw (180s) and legitimately does nothing on most ticks; a tick that finds
+nothing due sleeps again rather than forcing a search.
 
 **Each page keeps its own availability history.** Sharing one set of "last
 seen" values across two pages means the quiet page's poll overwrites the busy
@@ -160,6 +188,79 @@ like a correct email. The only real find so far was on the instalment page.
 
 The tests for this run against every configured event rather than a fixed
 one, so adding a third page cannot quietly reintroduce it.
+
+---
+
+## Securing a ticket automatically (opt-in, off by default)
+
+For most of this project's life the scope was explicitly notification only.
+That changed on 2026-08-19, after several days in which real resale listings
+were found and alerted on and still sold before the buy screen could be
+reached. The watcher can now click into a listing and hold it. It never pays.
+
+**This is off unless you turn it on.** `EP_SECURE_ON_FIND=1`.
+
+### How it runs
+
+Two browsers, and the separation is the point:
+
+| Browser | Profile | Signed in? | Does what |
+| --- | --- | --- | --- |
+| Watcher | `chrome-profile` | **no** | Every poll, all day |
+| Buyer | `chrome-profile-buy` | **yes** | Only when a listing is found |
+
+Keeping the polling anonymous means the account is exposed roughly six times a
+day rather than a hundred and forty. It also means a block on the watcher
+costs a profile reset, as it always has, rather than landing on the account
+you need working at checkout.
+
+Sign the buying profile in once, by hand:
+
+```bash
+python -m ep_watcher login-buy
+```
+
+Your password is never asked for, stored, or handled. Chrome opens, you sign
+in, the cookies persist in that profile. Same mechanism as `login`, separate
+profile — Chrome takes an exclusive lock on a user-data-dir, so the buyer
+cannot share the watcher's.
+
+### What happens when a listing appears
+
+1. The availability alert goes out **first**, always, before any securing is
+   attempted. If everything below fails you are no worse off than before.
+2. The buying browser opens, sets the quantity to 1, searches, and clicks the
+   listing.
+3. It presses only buttons on an allowlist — Continue, Next, Get tickets,
+   Select — and refuses anything matching pay, buy, purchase, checkout,
+   confirm order, or place order.
+4. It gives up after 45 seconds.
+5. **If a basket appears**: a second, louder alert, and the window is left
+   open and frontmost on the checkout page. You have roughly four minutes.
+6. **If not**: an email that says plainly there is *no* hold, and names the
+   step that failed.
+
+### The hold cannot travel
+
+A Ticketmaster basket lives in the session cookies of the browser that created
+it. Opening a link on your phone gets you a different session and an empty
+basket while the hold expires. This is why the buyer must run on the machine
+you will finish payment on, and why the "held" email contains **no link** —
+only an instruction to go to that Mac.
+
+### What is proven and what is not
+
+Tested offline, no network: it will not press a payment button; it will not
+claim a hold it cannot see on the page; the availability alert fires
+regardless; the failure email always sends; it stays off until enabled; it
+refuses to act on an event it was not given.
+
+**Not proven:** the click-through itself. The button labels between a resale
+listing and a basket were inferred, not observed — nobody has walked that flow
+on this event. Expect the first live attempt to fail and to name the step that
+broke. Walking the flow by hand on any event that currently has a resale
+listing, and reading off the real button labels, is worth more than any amount
+of further guessing.
 
 ---
 
@@ -399,6 +500,7 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 | `selftest` | Offline checks — no network, no credentials, nothing sent |
 | `doctor` | Is it healthy? Prints the exact fix for anything that isn't |
 | `login` | Open Chrome to sign in by hand (only needed for *buying*) |
+| `login-buy` | The same, for the **buying** profile — needed for `EP_SECURE_ON_FIND` |
 | `calibrate` | Dump screenshot + text + HTML after a search |
 | `networks` | List every connection the watcher has seen, with blocks against each |
 | `status` | Print config and health |
@@ -419,7 +521,14 @@ Environment variables, all optional:
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `WANTED_QUANTITIES` | `1` | Quantities to search per poll |
-| `EP_POLL_SECONDS` | `300` | Seconds **per page**. The cycle is this × the number of pages, so 600s with two — jittered ±25% |
+| `EP_STANDARD_POLL_MIN` | `180` | Shortest gap between searches of the standard page |
+| `EP_STANDARD_POLL_MAX` | `360` | Longest. The gap is drawn fresh from this range after each search |
+| `EP_INSTALMENT_POLL_MIN` | `1200` | The same, for the instalment plan |
+| `EP_INSTALMENT_POLL_MAX` | `2400` | |
+| `EP_SECURE_ON_FIND` | `0` | Set `1` to let the buying browser hold a resale listing. Needs `login-buy` first |
+| `EP_SECURE_TIMEOUT_SECONDS` | `45` | Seconds to spend trying to secure before giving up |
+| `EP_BUY_PROFILE_DIR` | `~/.ep2026-watcher/chrome-profile-buy` | Where the signed-in buying profile lives |
+| `EP_POLL_SECONDS` | `300` | Fallback per-page gap for a page configured without a range |
 | `EP_WATCH_LABEL` | `Electric Picnic 2026` | What to call the watch in emails covering every page |
 | `EP_HEARTBEAT_HOURS` | `1` | How often to send the "still nothing" report |
 | `EP_NIGHT_POLL_SECONDS` | `1800` | Overnight cycle. `0` disables the slowdown |
@@ -573,6 +682,8 @@ and links the page it is about — never "the event page" in the abstract:
 | --- | --- | --- |
 | **Tickets available** | A listing appears on the box office or verified resale | yes, urgent |
 | **In the basket** | A reserve actually succeeded — a live hold, with a countdown | yes, urgent |
+| **HELD — go to the laptop** | The buying browser secured a resale listing (opt-in) | yes, urgent |
+| **Could not hold it** | A securing attempt was made and failed, and why | no |
 | **No luck yet** | Hourly while nothing has turned up — reports **both** pages | only if failing |
 | **Watcher is broken** | 4 consecutive failed checks, then every 6h until fixed | yes |
 | **Working again** | It recovered from a run of failures | low |
@@ -590,6 +701,35 @@ at.
 The "watcher is broken" email names the worst-affected page *and its URL*: the
 likeliest cause of one page failing while the other is fine is that page's URL
 having changed, which takes seconds to check once you have the link.
+
+### The availability alert leads with a link, not a recipe
+
+The alert used to hand over the bare event URL followed by four numbered steps
+— open in a browser, set the quantity, press Find Tickets, scroll to Other
+Options. On 2026-08-19 David reported where the ticket is actually lost: not in
+noticing the email, but in the seconds spent working through those steps while
+a listing that lives about 4.6 minutes sells to somebody already on the page.
+
+So the alert now leads with a link carrying the quantity, and the push title
+carries the section and price:
+
+```text
+PUSH:  EP2026 Section STNDN1 · €366.39
+LINK:  …/event/18006314BD813D3E?quantity=1#resale-ly7vs38jkx
+```
+
+The lock screen alone is now enough to decide whether to move. The four steps
+are still in the email, demoted to a fallback under "IF THE LISTING IS NOT
+THERE", because the link is a **hypothesis, not an observation**: the find
+recorded on 2026-08-18 shows Ticketmaster's search changes page state without
+changing the address, so `?quantity=1` may not be honoured. Every find now
+records both the live URL and the link the alert sent, so the next real
+listing settles it.
+
+The listing id is carried on the `Listing` object but deliberately kept out of
+`describe()`. That string drives the new-listing diff, and if Ticketmaster
+regenerates ids per poll, leaking one in would make the same ticket look new
+on every check and re-alert on a four-minute clock.
 
 ### Session summaries, at each change of settings
 

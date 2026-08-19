@@ -151,7 +151,18 @@ def _listing_from_pick(pick) -> Listing:
     elif price is not None:
         price = str(price)
 
-    return Listing(name=" ".join(str(b) for b in bits), price=price, kind="resale")
+    # `resaleListingId` first, then `id` — the one observed listing carried
+    # both with the same value, but the API's own naming says which of the two
+    # is meant to be the listing's identity.
+    listing_id = first("resaleListingId", "id")
+
+    return Listing(
+        name=" ".join(str(b) for b in bits),
+        price=price,
+        kind="resale",
+        listing_id=str(listing_id) if listing_id is not None else None,
+        section=str(section) if section is not None else None,
+    )
 
 
 def _parse_resale_json(record, reading: Reading) -> bool:
@@ -835,13 +846,26 @@ class BrowserSession:
             base = config.DIAG_DIR / f"find-{time.strftime('%Y%m%d-%H%M%S')}-qty{qty}"
 
             record = getattr(self, "_resale_response", None)
+            # Both the URL the browser is actually sitting on with the listing
+            # visible, and the link the alert sent David to. The find of
+            # 2026-08-18 showed these were the same string — Ticketmaster's
+            # search changes page state without changing the address — which
+            # is why the alert's link can only be a hypothesis until a live
+            # find is opened from it. Recording both is what will settle it.
+            from .. import notify
             payload = {
                 "when": stamp(),
                 "quantity_searched": qty,
                 "url": self.page.url,
+                "alert_link": notify.buy_url(
+                    getattr(reading, "event_url", "") or self.page.url,
+                    qty,
+                    notify._best_listing(reading.listings),
+                ),
                 "primary": reading.primary,
                 "resale": reading.resale,
                 "listings": [l.describe() for l in reading.listings],
+                "listing_ids": [l.listing_id for l in reading.listings if l.listing_id],
                 "notes": list(reading.notes),
                 "resale_api": record,
             }

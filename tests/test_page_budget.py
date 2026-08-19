@@ -57,9 +57,11 @@ def aged(state, event, minutes):
 
 print("\nThe budget is weighted, and it is the same budget")
 
-check("total volume is unchanged", round(config.searches_per_hour()), 12)
+check("total volume reflects the 3-6 minute standard page",
+      round(config.searches_per_hour()), 15)
 check_true("the busy page is searched more often", A.poll_seconds < B.poll_seconds)
-check("the tick follows the busiest page", config.poll_interval(), A.poll_seconds)
+check("the tick follows the busiest page's floor",
+      config.poll_interval(), A.poll_min_seconds)
 check_true("and the busy page carries most of the volume",
            A.searches_per_hour > B.searches_per_hour * 3)
 
@@ -67,17 +69,23 @@ print("\nA page is searched when it comes due, and not before")
 
 s = fresh()
 check("a page never searched is due", st.event_due(s, A), True)
-st.note_event_polled(s, A.slug)
+# The gap is pinned rather than left to the draw. Measuring "slightly early"
+# against A.poll_seconds — the MEAN of the range — made this test flaky the
+# moment gaps became ranges on 2026-08-19: whether 0.8 of the mean cleared the
+# tolerance depended on where that poll's draw had landed. The behaviour under
+# test is about the gap actually in force, so the test states it.
+GAP = 300
+st.note_event_polled(s, A.slug, GAP)
 check("...and not again immediately", st.event_due(s, A), False)
 
-aged(s, A, A.poll_seconds / 60 + 1)
-check("due once its interval has passed", st.event_due(s, A), True)
+aged(s, A, GAP / 60 + 1)
+check("due once its gap has passed", st.event_due(s, A), True)
 
 # The loop's sleep is jittered by ±25%, so a tick landing a few seconds short
 # must not skip the page and silently double its real interval.
-aged(s, A, A.poll_seconds / 60 * 0.8)
+aged(s, A, GAP / 60 * 0.8)
 check("a tick landing slightly early still counts", st.event_due(s, A), True)
-aged(s, A, A.poll_seconds / 60 * 0.5)
+aged(s, A, GAP / 60 * 0.5)
 check("but a tick landing far early does not", st.event_due(s, A), False)
 
 print("\nThe quiet page is not forgotten, only slowed")
@@ -94,20 +102,51 @@ aged(s, B, 31)
 due = [e.slug for e in st.due_events(s, config.EVENTS)]
 check_true("after 31 the quiet one is too", B.slug in due)
 
-print("\nA tick never does nothing at all")
-# A tick that polls nothing still counts as a cycle in the log while learning
-# nothing — exactly the sort of quiet no-op this project keeps digging out.
+print("\nAn early tick must do nothing, and that is deliberate")
+# Reversed on 2026-08-19. This used to force the longest-waiting page whenever
+# nothing was strictly due, so that a tick was never a silent no-op. That was
+# right while the tick equalled the busiest page's interval — something was
+# always due. With gaps drawn from a range the loop must tick faster than the
+# shortest possible gap, so most ticks legitimately find nothing due; forcing
+# a poll on those would search the page at the tick rate and throw the whole
+# range away.
 
 s = fresh()
-st.note_event_polled(s, A.slug)
-st.note_event_polled(s, B.slug)
+st.note_event_polled(s, A.slug, A.poll_max_seconds)
+st.note_event_polled(s, B.slug, B.poll_max_seconds)
 aged(s, A, 1)
 aged(s, B, 2)
-due = st.due_events(s, config.EVENTS)
-check("something is always searched", len(due), 1)
-check("and it is whichever has waited longest", due[0].slug, B.slug)
+check("nothing due means nothing searched", st.due_events(s, config.EVENTS), [])
+
+# The protection the old rule provided is kept for the case it was really for:
+# a timestamp that has gone bad, or a clock that jumped, must not park a page
+# for ever.
+aged(s, A, (A.poll_max_seconds * 3) / 60)
+due = [e.slug for e in st.due_events(s, config.EVENTS)]
+check_true("a page far past its longest gap is searched anyway", A.slug in due)
 
 check("no events configured means nothing to do", st.due_events(s, []), [])
+
+print("\nThe drawn gap is honoured, not re-rolled")
+# The trap this design exists to avoid: re-drawing on every tick collapses the
+# range to its floor, because the page goes due the first time a draw lands
+# low. The gap is drawn once, stored, and compared against.
+
+s = fresh()
+st.note_event_polled(s, A.slug, A.poll_max_seconds)
+check("a page that drew its longest gap waits it out",
+      st.event_gap_seconds(s, A), A.poll_max_seconds)
+aged(s, A, A.poll_min_seconds / 60)
+check("and is not due at the range floor", st.event_due(s, A), False)
+check_true("the stored gap survives repeated asking",
+           all(st.event_gap_seconds(s, A) == A.poll_max_seconds for _ in range(20)))
+
+# Draws stay inside the configured range, and actually vary.
+draws = {A.next_gap() for _ in range(200)}
+check_true("every draw is within the range",
+           all(A.poll_min_seconds <= d <= A.poll_max_seconds for d in draws))
+check_true("and the range is genuinely used", len(draws) > 20)
+check_true("a page with no range drawn is stable", B.next_gap() >= B.poll_min_seconds)
 
 print("\nThe hourly report says how old each reading is")
 # The pages are read at different rates now, so two statuses side by side can
