@@ -400,11 +400,32 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # button whose name is not in it is never pressed, so a future page
         # that puts "Place Order" where "Continue" used to be cannot be
         # clicked by accident.
+        reached_detail = False
         for _ in range(4):
             if out_of_time():
                 return result
             if _basket_is_live(page, BASKET_MARKERS):
                 break
+            # Did we get as far as the listing's own page? Worth recording
+            # even when the answer that follows is bad news, because "never
+            # reached the listing" and "reached it and it was gone" need
+            # different fixes and used to read identically in the email.
+            if not reached_detail and _page_says(page, LISTING_DETAIL_MARKERS, all_of=True):
+                reached_detail = True
+                result.note("reached the listing's own page — the click-through works")
+            # A definite no. Stop at once rather than spending what is left of
+            # the window pressing buttons at a dead end; the only control on
+            # this screen is "Find More Tickets", which would restart the
+            # search and lose the page we are on.
+            if _page_says(page, LISTING_GONE_MARKERS):
+                result.reason = (
+                    "the listing was gone by the time we clicked into it — "
+                    "Ticketmaster says it has been sold or withdrawn. This is "
+                    "the race being lost at the last step, not a fault in the "
+                    "watcher."
+                )
+                result.note(result.reason)
+                return result
             if not _press_one_safe_button(page, result):
                 break
             time.sleep(1.5)
@@ -421,10 +442,22 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
                 pass
             return result
 
-        result.reason = (
-            "clicked through but no basket appeared — the listing was probably "
-            "taken while we were in it"
-        )
+        if _page_says(page, LISTING_GONE_MARKERS):
+            result.reason = (
+                "the listing was gone by the time we clicked into it — "
+                "Ticketmaster says it has been sold or withdrawn."
+            )
+        elif reached_detail:
+            result.reason = (
+                "reached the listing's own page but no basket appeared. The "
+                "click-through works; it is the step after it that did not. "
+                "The page text is recorded in the log."
+            )
+        else:
+            result.reason = (
+                "never reached the listing's own page — the row could not be "
+                "clicked, or the page did not respond to it"
+            )
         result.note(result.reason)
         return result
 
@@ -456,7 +489,40 @@ SAFE_BUTTONS = (
 #: if a page ever labels its payment control "Continue to payment", the
 #: allowlist alone would let it through on a prefix match, so the check below
 #: rejects anything containing these first.
-FORBIDDEN_BUTTONS = ("pay", "place order", "confirm order", "checkout", "purchase")
+#:
+#: "find more tickets" is here for a different reason, and it is observed
+#: rather than imagined: it is the button Ticketmaster puts on the dead-end
+#: screen you reach when a listing has gone (see LISTING_GONE_MARKERS).
+#: Pressing it throws away the listing detail page and starts the search
+#: again, which would spend the rest of the 45-second window going round a
+#: loop instead of reporting the truth.
+FORBIDDEN_BUTTONS = ("pay", "place order", "confirm order", "checkout", "purchase",
+                     "find more tickets")
+
+#: The listing detail screen — reached by clicking a resale row.
+#:
+#: Observed on 2026-08-19 on a different event ("Amble", Live at the
+#: Docklands), which is the same interface. This is the first direct evidence
+#: that clicking a listing row leads anywhere at all, and it is why the
+#: failure email can now distinguish "we never reached the listing" from "we
+#: reached it and it was gone" — two failures with completely different fixes,
+#: which used to produce the same message.
+LISTING_DETAIL_MARKERS = ("ticket type", "section")
+
+#: The dead end. Also observed on 2026-08-19, verbatim:
+#:
+#:     Sorry, these tickets are unavailable
+#:     The tickets you wanted have either been sold or removed from sale.
+#:
+#: This is precisely the experience David described on the Electric Picnic
+#: listings — the row is still on the page, and clicking it lands here. It is
+#: a definite answer, not a timeout, so seeing it should stop the attempt at
+#: once rather than spending the remaining seconds pressing hopefully.
+LISTING_GONE_MARKERS = (
+    "these tickets are unavailable",
+    "sold or removed from sale",
+    "tickets you wanted have either been sold",
+)
 
 
 def _press_one_safe_button(page, result: HoldResult) -> bool:
@@ -489,6 +555,23 @@ def is_forbidden(label: str) -> bool:
     """
     lowered = (label or "").strip().lower()
     return any(bad in lowered for bad in FORBIDDEN_BUTTONS)
+
+
+def _page_says(page, markers, all_of: bool = False) -> bool:
+    """Is this page showing these words? Never raises.
+
+    `all_of` distinguishes the two kinds of question asked of it. A dead end
+    is recognised by any one of several phrasings, while the listing detail
+    screen is recognised by several labels appearing TOGETHER — "section"
+    alone appears on the search results too, so any-of would call every page
+    the detail page.
+    """
+    try:
+        text = (page.inner_text("body") or "").lower()
+    except Exception:
+        return False
+    hits = (marker in text for marker in markers)
+    return all(hits) if all_of else any(hits)
 
 
 def _basket_is_live(page, markers) -> bool:

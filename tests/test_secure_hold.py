@@ -277,5 +277,69 @@ real_notify.secure_failed(resale_reading(), buyer.HoldResult(reason="listing van
 check_true("the failure email says there is no hold", "NO hold" in mails["body"])
 check_true("and passes the reason through", "listing vanished" in mails["body"])
 
+print("\nThe dead-end screen is recognised, from a real observation")
+# Captured by David on 2026-08-19 from a different event ("Amble", Live at the
+# Docklands) — the same Ticketmaster interface. This is exactly the experience
+# he described on the Electric Picnic listings: the row is still on the page,
+# and clicking it lands here.
+GONE_PAGE = """Amble
+Thu, Aug 20, 2026, 7:00 PM
+Live at the Docklands, Limerick, IE
+Over 18s - ID Required.
+Ticket Type
+Full Price Ticket
+Section
+STNDNG
+Sorry, these tickets are unavailable
+The tickets you wanted have either been sold or removed from sale.
+Find More Tickets
+18406b13-b763-4a89-bae2-204d0e85bad2"""
+
+
+class TextPage:
+    def __init__(self, text):
+        self.text = text
+
+    def inner_text(self, _sel=None):
+        return self.text
+
+
+gone = TextPage(GONE_PAGE)
+check_true("the dead end is recognised",
+           buyer._page_says(gone, buyer.LISTING_GONE_MARKERS))
+# The same capture proves the click-through reached the listing's own page —
+# "Ticket Type" and "Section" are both on it. That is the first direct
+# evidence that clicking a resale row leads anywhere at all.
+check_true("and so is having reached the listing page",
+           buyer._page_says(gone, buyer.LISTING_DETAIL_MARKERS, all_of=True))
+check("a basket is NOT claimed on it",
+      buyer._basket_is_live(gone, ("time left to complete", "your tickets are reserved")),
+      False)
+
+# all_of matters: "section" alone appears on the search results, so an any-of
+# rule would call every page the listing detail page.
+results_page = TextPage("Verified Resale Ticket\nSection STNDN1\n366.39")
+check("the search results are not mistaken for the listing page",
+      buyer._page_says(results_page, buyer.LISTING_DETAIL_MARKERS, all_of=True), False)
+
+check("a page that cannot be read says nothing",
+      buyer._page_says(object(), buyer.LISTING_GONE_MARKERS), False)
+
+
+print("\nThe dead end's only button must never be pressed")
+# "Find More Tickets" restarts the search. Pressing it would throw away the
+# listing detail page and spend the rest of the 45-second window going round
+# a loop instead of reporting the truth.
+check_true("Find More Tickets is forbidden", buyer.is_forbidden("Find More Tickets"))
+check_true("case and spacing do not matter", buyer.is_forbidden("  find more tickets "))
+# And it must not sneak in via the allowlist's substring matching.
+for safe in buyer.SAFE_BUTTONS:
+    check(f"the allowlist entry {safe!r} does not match it",
+          safe in "find more tickets", False)
+# The payment guards still hold.
+for bad in ("Pay now", "Continue to payment", "Place Order", "Checkout", "Purchase"):
+    check_true(f"{bad!r} is still refused", buyer.is_forbidden(bad))
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
