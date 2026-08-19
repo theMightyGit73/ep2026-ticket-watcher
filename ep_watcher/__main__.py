@@ -34,6 +34,60 @@ def _banner(title: str) -> None:
 
 # ── commands ─────────────────────────────────────────────────────────────────
 
+def cmd_check_buy(_args) -> int:
+    """Is the buying profile signed in and ready to hold a ticket?
+
+    The question this answers is the one that cannot be answered by looking
+    at the config: securing is armed and the flag is set, but is the SESSION
+    still good? Cookies expire, Ticketmaster invalidates them, and a profile
+    reset wipes them. All three fail silently and identically — the first
+    symptom is a listing appearing and not being held, which is the one
+    moment there is no time to investigate.
+
+    Deliberately read-only. It opens the page, reads whether the account is
+    present, and closes. It never types a credential, never clicks a listing,
+    and never puts anything in a basket. Signing in remains a thing David
+    does by hand in `login-buy`, so no password is ever stored or replayed —
+    which is also why there is nothing here that could lock the account.
+    """
+    from . import buyer
+
+    _banner("Checking the buying profile")
+    if not config.BUY_PROFILE_DIR.exists():
+        print(f"  [FAIL]  no buying profile at {config.BUY_PROFILE_DIR}")
+        print("\n  Fix:  python -m ep_watcher login-buy\n")
+        return 1
+
+    event = config.EVENTS[0]
+    session = buyer.BuySession(headless=False)
+    try:
+        session.start()
+        session.page.goto(event.url, wait_until="domcontentloaded")
+        # The bot check can eat the first load, exactly as it does for the
+        # watcher — so a single "not signed in" reading is not conclusive.
+        signed = session.signed_in()
+        if not signed:
+            print("  first load inconclusive — reloading past the bot check")
+            session.page.reload(wait_until="domcontentloaded")
+            time.sleep(3)
+            signed = session.signed_in()
+    except Exception as exc:
+        print(f"  [FAIL]  could not open the page: {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        session.close()
+
+    if signed:
+        print("  [ OK ]  signed in — securing can hold a listing")
+        print(f"\n  Profile: {config.BUY_PROFILE_DIR}")
+        print("  Re-run this now and then; the session does expire.\n")
+        return 0
+
+    print("  [FAIL]  the buying profile is NOT signed in")
+    print("\n  Fix:  python -m ep_watcher login-buy\n")
+    return 1
+
+
 def cmd_login(_args) -> int:
     """Sign in by hand, once. The cookies land in the profile dir and every
     later run reuses them — this is the whole reason the watcher can see a
@@ -745,6 +799,26 @@ def cmd_doctor(_args) -> int:
     else:
         ok("Resale visibility", headline)
 
+    # 2c. Securing is armed but the session behind it can rot silently.
+    #     Cookies expire, Ticketmaster invalidates them, a profile reset wipes
+    #     them — and all three first show up as a listing appearing and not
+    #     being held. This is the cheap half of the check: the profile exists
+    #     at all. Whether the session inside it is still valid needs a browser,
+    #     which is what `check-buy` is for.
+    if config.SECURE_ON_FIND:
+        cookies = config.BUY_PROFILE_DIR / "Default" / "Cookies"
+        login_fix = f"{config.REPO_DIR}/run_watcher.sh login-buy"
+        if not config.BUY_PROFILE_DIR.exists():
+            bad("Securing", "armed, but no buying profile exists — it cannot hold anything",
+                login_fix)
+        elif not cookies.exists():
+            bad("Securing", "buying profile has no cookies — it is not signed in", login_fix)
+        else:
+            ok("Securing", "armed, buying profile present")
+            print(f"  [ -- ]  Buying session  — run `check-buy` to confirm it is still signed in")
+    else:
+        print("  [ -- ]  Securing  — off; the watcher only notifies")
+
     age = state_mod.profile_age_minutes(st)
     if not config.PROFILE_MAX_AGE_MINUTES:
         print("  [ -- ]  Browser identity refresh disabled (EP_PROFILE_MAX_AGE=0)")
@@ -952,6 +1026,7 @@ def cmd_status(_args) -> int:
 COMMANDS = {
     "login": cmd_login,
     "login-buy": cmd_login_buy,
+    "check-buy": cmd_check_buy,
     "check": cmd_check,
     "run": cmd_run,
     "watch": cmd_watch,

@@ -225,6 +225,28 @@ in, the cookies persist in that profile. Same mechanism as `login`, separate
 profile — Chrome takes an exclusive lock on a user-data-dir, so the buyer
 cannot share the watcher's.
 
+**There is deliberately no automated sign-in, and there will not be.** Not
+squeamishness — three concrete reasons. It would require storing the password
+on disk. Scripted logins are what Ticketmaster's account security is built to
+catch, so *testing* one repeatedly is a good way to get the account locked
+before the event. And a cookie session obtained by hand is indistinguishable
+from one obtained by script once it exists, so automation buys nothing except
+the risk.
+
+What replaces it is verification. The session is the thing that rots — cookies
+expire, Ticketmaster invalidates them, a profile reset wipes them — and all
+three fail silently, first showing up as a listing appearing and not being
+held:
+
+```bash
+python -m ep_watcher check-buy
+```
+
+Read-only. It opens the page, reads whether the account is present, and
+closes. It types nothing and baskets nothing, so it cannot itself trip
+anything. `doctor` runs the cheap half of this check (does the profile exist,
+does it hold cookies) on every run.
+
 ### What happens when a listing appears
 
 1. The availability alert goes out **first**, always, before any securing is
@@ -501,6 +523,7 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 | `doctor` | Is it healthy? Prints the exact fix for anything that isn't |
 | `login` | Open Chrome to sign in by hand (only needed for *buying*) |
 | `login-buy` | The same, for the **buying** profile — needed for `EP_SECURE_ON_FIND` |
+| `check-buy` | Is the buying profile still signed in? Read-only, types nothing |
 | `calibrate` | Dump screenshot + text + HTML after a search |
 | `networks` | List every connection the watcher has seen, with blocks against each |
 | `status` | Print config and health |
