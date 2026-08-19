@@ -61,11 +61,20 @@ def aged(state, event, minutes):
 
 print("\nThe budget is weighted, and it is the same budget")
 
-# Three pages since 2026-08-19. This is the nominal flat sum; the numbers
-# that actually bind are peak_searches_per_hour() and searches_per_day(),
-# checked in test_peak_hours.py.
+# Three pages since 2026-08-19, two of them searched equally hard since David
+# said the Early Entry Pass matters as much as the ticket. This is the nominal
+# flat sum; the numbers that actually bind are peak_searches_per_hour() and
+# searches_per_day(), checked in test_peak_hours.py.
 check("total nominal volume across all three pages",
-      round(config.searches_per_hour()), 17)
+      round(config.searches_per_hour()), 18)
+# The nominal range must agree with the window actually in force. When these
+# drifted apart the standard page reported 13.3 searches an hour while really
+# running at 8.6 — the budget arithmetic quietly lying about itself.
+for event in config.EVENTS:
+    if event.peak_min_seconds:
+        check(f"[{event.slug}] nominal range matches the peak window",
+              (event.poll_min_seconds, event.poll_max_seconds),
+              (event.peak_min_seconds, event.peak_max_seconds))
 check_true("the busy page is searched more often", A.poll_seconds < B.poll_seconds)
 check("the tick follows the busiest page's floor",
       config.poll_interval(), A.poll_min_seconds)

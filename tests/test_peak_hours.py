@@ -125,6 +125,40 @@ clock = len(peak_hours) / 24.0
 check_true(f"peak carries {share:.0%} of the searches in {clock:.0%} of the day",
            share > clock * 1.4)
 
+print("\nThe Early Entry Pass is watched as hard as the ticket itself")
+# David's instruction on 2026-08-19: it matters as much as the weekend ticket,
+# so it is searched as often and secured like the others. These pin that, and
+# pin what it cost — three pages cannot all be searched every three minutes.
+EARLY = next(e for e in config.EVENTS if e.slug == "early-entry")
+STANDARD = next(e for e in config.EVENTS if e.slug == "weekend-camping")
+
+check("the same peak window as the standard page",
+      EARLY.gap_range(at(14)), STANDARD.gap_range(at(14)))
+check("and the same off-peak window",
+      EARLY.gap_range(at(22)), STANDARD.gap_range(at(22)))
+check("and the same nominal rate", EARLY.searches_per_hour, STANDARD.searches_per_hour)
+check_true("it is secured like the others", EARLY.secure)
+check_true("as are all the pages", all(e.secure for e in config.EVENTS))
+
+# Every page must be reachable by the loop, or one is watched in name only.
+for event in config.EVENTS:
+    check_true(f"[{event.slug}] the tick can honour its fastest draw",
+               config.poll_interval() <= event.fastest_gap_seconds)
+    check_true(f"[{event.slug}] off-peak is slower than peak, not faster",
+               event.gap_range(at(22))[0] >= event.gap_range(at(14))[0])
+    check_true(f"[{event.slug}] has an id the resale endpoint can be keyed on",
+               event.tm_event_id or "/event/" in event.url)
+
+# What parity cost, stated so it cannot be forgotten: two pages at this rate
+# plus the instalment plan is the whole budget, and the standard page slowed
+# from a 240s mean to 420s to pay for it.
+check_true("two pages are now searched at the same rate",
+           STANDARD.poll_seconds == EARLY.poll_seconds)
+check_true("and the standard page is slower than it was alone",
+           STANDARD.poll_seconds > 240)
+check_true("but the ceiling still holds", config.peak_searches_per_hour() < 20)
+
+
 print("\nA page with no peak configured is unaffected")
 plain = config.Event(slug="x", name="X", url="https://e/event/ABC",
                      poll_min_seconds=300, poll_max_seconds=600)

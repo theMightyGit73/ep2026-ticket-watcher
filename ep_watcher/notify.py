@@ -1037,11 +1037,19 @@ def test() -> None:
         f"At: {stamp()}\n",
     )
 
-    # Deliberately the LAST configured page — the instalment plan, if there is
-    # one. Every alert used to describe the first event whatever had actually
-    # been found, so a drill built on the first event proved nothing. This one
-    # is wrong the moment that regresses.
-    found_on = config.EVENTS[-1]
+    # Deliberately NOT the first configured page. Every alert used to describe
+    # config.EVENT_* whatever had actually been found, so a drill built on the
+    # first event proved nothing; this one is wrong the moment that regresses.
+    #
+    # Chosen by position until 2026-08-19, as "the last page, the instalment
+    # plan". Adding the Early Entry Pass silently made EVENTS[-1] a different
+    # page — the same positional assumption that had quietly broken three test
+    # files the same day. Named explicitly now, with a positional fallback so
+    # this still works if the pages are ever renamed.
+    found_on = next(
+        (e for e in config.EVENTS if e.slug == "weekend-camping-instalment"),
+        config.EVENTS[-1] if len(config.EVENTS) > 1 else config.EVENTS[0],
+    )
 
     print(f"[{stamp()}] 2/5 availability alert")
     sample = Reading(
@@ -1125,5 +1133,6 @@ def test() -> None:
     print("  'not spam' now if they did, not on the day it matters.")
     print()
     print(f"  The find and basket samples are about: {found_on.name}")
-    print("  Check they name and link THAT page — the two pages differ only by")
-    print("  a suffix, and an alert pointing at the wrong one costs the ticket.")
+    print(f"  Check they name and link THAT page — the {len(config.EVENTS)} pages are")
+    print("  easily confused, and an alert pointing at the wrong one costs the")
+    print("  ticket. One of them is an add-on that is worthless on its own.")

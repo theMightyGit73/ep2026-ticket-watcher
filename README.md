@@ -145,11 +145,28 @@ searching both equally spent half the budget for an eighth of the return.
 
 | Page | Peak (10:00–20:00) | Off-peak | Secured? |
 | --- | --- | --- | --- |
-| Weekend Camping | 3–5 min | 5–10 min | yes |
-| Weekend Camping Instalment Plan | 20–40 min | 40–60 min | yes |
-| Early Entry Pass | 30–60 min | 60–90 min | **no** |
+| Weekend Camping | 5–9 min | 10–15 min | yes |
+| Early Entry Pass | 5–9 min | 10–15 min | yes |
+| Weekend Camping Instalment Plan | 30–60 min | 60–90 min | yes |
 
-Peak load is 18.3 searches/hour and a day costs about 285.
+Peak load is 18.5 searches/hour and a day costs about 293.
+
+**The Early Entry Pass is searched exactly as hard as the weekend ticket**, on
+David's instruction of 2026-08-19. That parity has a price, and it is paid by
+the standard page. Three pages cannot all be searched every three minutes:
+
+| Both fast pages at | Peak searches/hour | |
+| --- | --- | --- |
+| 3 min mean | 42 | over the line |
+| 4 min mean | 32 | over the line |
+| 6 min mean | 22 | over the line |
+| **7 min mean** | **18.5** | fits |
+
+The ~20/hour ceiling is not arbitrary — it is what got the home connection
+flagged during development. So the standard page slows from a 4-minute mean
+to 7, which on a ~4.6 minute listing lifetime takes the chance of catching one
+from roughly 56% to about 45%. Raise `EP_STANDARD_PEAK_MIN` / `_MAX` to undo
+it and accept the request rate.
 
 The **Early Entry Pass** was added on 2026-08-19 and is treated differently on
 purpose. It is an add-on, not a ticket — Ticketmaster's own note reads "Early

@@ -30,12 +30,16 @@ class Event:
         #: May the buyer open a signed-in browser and hold this one?
         #:
         #: Per page, because "tell me about it" and "grab it for me" are not
-        #: the same instruction. The Early Entry Pass is an add-on that
-        #: Ticketmaster says is only valid alongside a Weekend Ticket, so
-        #: automatically holding one — under his account, with a countdown
-        #: running, pulling him to the laptop — would be spending his
-        #: attention on something he cannot use until the real ticket exists.
-        #: It is still watched and still alerted on; it is just not grabbed.
+        #: the same instruction, and a page may be worth watching without
+        #: being worth an urgent walk to the laptop.
+        #:
+        #: All three are True today. The Early Entry Pass was briefly False,
+        #: on the reasoning that it is an add-on Ticketmaster says is only
+        #: valid alongside a Weekend Ticket — so holding one would pull David
+        #: to a checkout for something he cannot use yet. He overruled that on
+        #: 2026-08-19: he wants it treated as importantly as the ticket. The
+        #: switch stays because the argument may return, and because a page
+        #: added later may genuinely not deserve grabbing.
         self.secure = secure
         self.slug = slug
         self.name = name
@@ -162,8 +166,6 @@ class Event:
 # searches an hour to ~13.3, and the total from 12/hour to ~15.3/hour, against
 # the ~20/hour that got the home connection flagged in development. It is
 # still under that line, but by less than it was.
-STANDARD_POLL_MIN_SECONDS = int(os.environ.get("EP_STANDARD_POLL_MIN", "180"))
-STANDARD_POLL_MAX_SECONDS = int(os.environ.get("EP_STANDARD_POLL_MAX", "360"))
 
 # Sellers keep daylight hours, so the watcher should too.
 #
@@ -185,33 +187,54 @@ STANDARD_POLL_MAX_SECONDS = int(os.environ.get("EP_STANDARD_POLL_MAX", "360"))
 PEAK_START_HOUR = int(os.environ.get("EP_PEAK_START_HOUR", "10"))
 PEAK_END_HOUR = int(os.environ.get("EP_PEAK_END_HOUR", "20"))
 
-STANDARD_PEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MIN", "180"))
-STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "300"))
-STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "300"))
-STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "600"))
+STANDARD_PEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MIN", "300"))
+STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "540"))
+STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "600"))
+STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "900"))
 
-# The Early Entry Pass, added 2026-08-19. Watched on the slowest clock of the
-# three, and the reasons are worth stating because they are not obvious:
-#
-#   * It is an ADD-ON, not a ticket. Ticketmaster's own note says "Early Entry
-#     passes are only valid with a Weekend Ticket", so it is worth nothing
-#     until the thing this whole project exists to find has been found.
-#   * It was on general sale at €39.40 when David added it, with stock showing
-#     and a four-per-order limit. A page that is selling is not a page that
-#     needs watching every three minutes; the question here is "has it sold
-#     out and come back", not "did a resale listing flash past".
-#
-# 30-60 minutes costs ~1.3 searches an hour, taking the peak from 17.0 to
-# 18.3 — still under the ~20/hour that drew a block.
-EARLY_ENTRY_PEAK_MIN_SECONDS = int(os.environ.get("EP_EARLY_PEAK_MIN", "1800"))
-EARLY_ENTRY_PEAK_MAX_SECONDS = int(os.environ.get("EP_EARLY_PEAK_MAX", "3600"))
-EARLY_ENTRY_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_EARLY_OFFPEAK_MIN", "3600"))
-EARLY_ENTRY_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_EARLY_OFFPEAK_MAX", "5400"))
+# The nominal range. Kept equal to the peak range by default so that
+# poll_seconds — and therefore searches_per_hour() — describes the cadence
+# actually in force. When these drifted apart on 2026-08-19 the standard page
+# reported 13.3 searches an hour while really running at 8.6, which is exactly
+# the kind of quiet lie the budget arithmetic exists to prevent.
+STANDARD_POLL_MIN_SECONDS = int(
+    os.environ.get("EP_STANDARD_POLL_MIN", str(STANDARD_PEAK_MIN_SECONDS)))
+STANDARD_POLL_MAX_SECONDS = int(
+    os.environ.get("EP_STANDARD_POLL_MAX", str(STANDARD_PEAK_MAX_SECONDS)))
 
-INSTALMENT_PEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MIN", "1200"))
-INSTALMENT_PEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MAX", "2400"))
-INSTALMENT_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MIN", "2400"))
-INSTALMENT_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MAX", "3600"))
+# The Early Entry Pass, added 2026-08-19.
+#
+# Started on the slowest clock of the three, on the reasoning that it is an
+# add-on rather than a ticket and was on general sale when it was added.
+# David overruled that the same day: he considers it as important as the
+# weekend ticket and wants it searched as hard. It is his festival, so it gets
+# the same range as the standard page — the two constants are set from the
+# same numbers deliberately, so they cannot drift apart.
+#
+# That parity has a price and it is paid by the standard page. Three pages
+# cannot all be searched every three minutes: two pages at a 240s mean plus
+# the instalment plan is 32 searches an hour, against the ~20 that got the
+# home connection blocked in development. The arithmetic only closes at a
+# ~420s mean for both, so the standard page slows from 3-5 minutes to 5-9.
+#
+# Concretely, on a ~4.6 minute listing lifetime, that is roughly a 56%
+# chance of catching one falling to about 45%. The honest summary is that
+# watching two pages equally hard costs about a fifth of the catch rate on
+# the page where eight of nine sightings actually happened. Raise
+# EP_STANDARD_PEAK_* again to undo it, and accept the request rate.
+EARLY_ENTRY_PEAK_MIN_SECONDS = int(
+    os.environ.get("EP_EARLY_PEAK_MIN", str(STANDARD_PEAK_MIN_SECONDS)))
+EARLY_ENTRY_PEAK_MAX_SECONDS = int(
+    os.environ.get("EP_EARLY_PEAK_MAX", str(STANDARD_PEAK_MAX_SECONDS)))
+EARLY_ENTRY_OFFPEAK_MIN_SECONDS = int(
+    os.environ.get("EP_EARLY_OFFPEAK_MIN", str(STANDARD_OFFPEAK_MIN_SECONDS)))
+EARLY_ENTRY_OFFPEAK_MAX_SECONDS = int(
+    os.environ.get("EP_EARLY_OFFPEAK_MAX", str(STANDARD_OFFPEAK_MAX_SECONDS)))
+
+INSTALMENT_PEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MIN", "1800"))
+INSTALMENT_PEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MAX", "3600"))
+INSTALMENT_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MIN", "3600"))
+INSTALMENT_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MAX", "5400"))
 
 
 def is_peak(now=None) -> bool:
@@ -235,8 +258,10 @@ def is_peak(now=None) -> bool:
 # The instalment plan is randomised too, around its existing 30-minute mean.
 # One of the nine sightings to date was on this page, so it keeps its small
 # share of the budget; the range only stops it being predictable.
-INSTALMENT_POLL_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_POLL_MIN", "1200"))
-INSTALMENT_POLL_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_POLL_MAX", "2400"))
+INSTALMENT_POLL_MIN_SECONDS = int(
+    os.environ.get("EP_INSTALMENT_POLL_MIN", str(INSTALMENT_PEAK_MIN_SECONDS)))
+INSTALMENT_POLL_MAX_SECONDS = int(
+    os.environ.get("EP_INSTALMENT_POLL_MAX", str(INSTALMENT_PEAK_MAX_SECONDS)))
 
 #: Kept as the mean of the standard range, for anything that still wants a
 #: single number (the banner, and any page added without its own range).
@@ -300,7 +325,7 @@ EVENTS = [
         peak_max_seconds=EARLY_ENTRY_PEAK_MAX_SECONDS,
         offpeak_min_seconds=EARLY_ENTRY_OFFPEAK_MIN_SECONDS,
         offpeak_max_seconds=EARLY_ENTRY_OFFPEAK_MAX_SECONDS,
-        secure=False,
+        secure=True,
     ),
 ]
 
