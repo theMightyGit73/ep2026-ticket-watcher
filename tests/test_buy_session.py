@@ -170,7 +170,8 @@ with tempfile.TemporaryDirectory() as tmp:
     make_profile(Path(tmp) / "prof", dict(ANON, **{"SESSION": PAST}))
     ev = buyer.session_evidence(Path(tmp) / "prof")
     check("signed_in is False", ev["signed_in"], False)
-    check_true("and says it expired", "expired" in ev["reason"])
+    check_true("and says a cookie lapsed",
+               "lapsed" in ev["reason"] or "expired" in ev["reason"])
 
 print("\nReading cookies must work while Chrome has the file open")
 # The database is copied before being read. A check that only works when the
@@ -195,14 +196,21 @@ with tempfile.TemporaryDirectory() as tmp:
     ev = buyer.session_evidence(root)
     check("and the verdict is a definite signed-out", ev["signed_in"], False)
 
-print("\nA session-only cookie has no expiry, and that is fine")
+print("\nA profile whose only account cookie is session-scoped cannot be judged")
+# Reversed on 2026-08-19. A session-scoped cookie is dropped by Chrome on
+# exit, so it cannot answer "is this profile still signed in" between runs —
+# there is nothing durable left to compare against. Saying so is honest;
+# claiming it is signed in would be a guess that survives exactly until the
+# browser closes.
 with tempfile.TemporaryDirectory() as tmp:
     root = make_profile(Path(tmp) / "prof", dict(ANON, **{"SESSION": None}))
     buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
-    buyer.record_signed_in_fingerprint(root)
+    rec = buyer.record_signed_in_fingerprint(root)
+    check("the session cookie is recorded", rec["auth_cookies"], ["SESSION"])
+    check("but nothing durable is watched", rec["persistent_cookies"], [])
     ev = buyer.session_evidence(root)
-    check("still counted as signed in", ev["signed_in"], True)
-    check("with no expiry to report", ev["days_left"], None)
+    check("so the verdict is 'cannot tell', not a guess", ev["signed_in"], None)
+    check_true("and it says to sign in again", "sign-in" in ev["reason"])
 
 print("\nAn incomplete anonymous list must not invent an account")
 # Caught on 2026-08-19 against the real profiles. KNOWN_ANONYMOUS_COOKIES was
@@ -258,6 +266,55 @@ try:
           buyer.anonymous_baseline(), set())
 finally:
     buyer.config.PROFILE_DIR = real_profile_dir
+
+
+print("\nSession cookies vanish when Chrome closes, and that is not a sign-out")
+# Measured on the real profile, 2026-08-19. Of fourteen cookies recorded at
+# sign-in, TMAUO and ma.SID carried no expiry — Chrome drops those on exit,
+# which it does after every securing attempt. Requiring all fourteen reported
+# a perfectly good profile as SIGNED OUT the first time the browser was used.
+with tempfile.TemporaryDirectory() as tmp:
+    at_signin = dict(ANON, **{"id-token": FAR, "ma.SID": None, "TMAUO": None})
+    root = make_profile(Path(tmp) / "prof", at_signin)
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    rec = buyer.record_signed_in_fingerprint(root)
+    check("the session-only cookies are recorded but not watched",
+          set(rec["auth_cookies"]) - set(rec["persistent_cookies"]),
+          {"ma.SID", "TMAUO"})
+    check_true("and the durable one is watched", "id-token" in rec["persistent_cookies"])
+
+    # Chrome exits: the session cookies go, the persistent one stays.
+    after_restart = make_profile(Path(tmp) / "prof", dict(ANON, **{"id-token": FAR}))
+    ev = buyer.session_evidence(after_restart)
+    check("still signed in after the browser has been closed", ev["signed_in"], True)
+
+    # Losing the durable one IS a sign-out.
+    make_profile(Path(tmp) / "prof", ANON)
+    ev = buyer.session_evidence(Path(tmp) / "prof")
+    check("but losing the durable cookie is", ev["signed_in"], False)
+    check_true("and it names what went", "id-token" in ev["reason"])
+
+print("\nAnalytics must not be mistaken for the account")
+# Google Analytics mints a per-property cookie once you are past a sign-in, so
+# it looked like an account cookie. It carried a 2027 expiry, and reporting
+# the longest-lived one announced the session was good for 400 days — as wrong
+# as the two hours it replaced.
+check_true("a per-property GA cookie is analytics", buyer._is_analytics("_ga_MNQMF2C2CB"))
+check_true("so is _gcl_au", buyer._is_analytics("_gcl_au"))
+check_true("and permutive-id", buyer._is_analytics("permutive-id"))
+check("but id-token is not", buyer._is_analytics("id-token"), False)
+check("nor is ma.SID", buyer._is_analytics("ma.SID"), False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = make_profile(Path(tmp) / "prof",
+                        dict(ANON, **{"id-token": SOON, "_ga_MNQMF2C2CB": FAR}))
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    rec = buyer.record_signed_in_fingerprint(root)
+    check("analytics is excluded from the account cookies",
+          [n for n in rec["auth_cookies"] if n.startswith("_ga")], [])
+    ev = buyer.session_evidence(root)
+    check_true("so the reported lapse is the account's, not the tracker's",
+               ev["days_left"] <= 3)
 
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")

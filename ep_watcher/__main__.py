@@ -133,12 +133,15 @@ def cmd_check_buy(_args) -> int:
     if ev["signed_in"] is True:
         print(f"  [ OK ]  signed in — {ev['reason']}")
         if ev["days_left"] is not None:
-            days = ev["days_left"]
-            word = "[ OK ]" if days > 3 else "[WARN]"
-            print(f"  {word}  session valid for another {days:g} day(s) "
-                  f"(until {ev['expires_at'][:16]})")
-            if days <= 3:
-                print("          Re-run login-buy before it lapses.")
+            # Information, not a verdict. Nothing here can know when
+            # Ticketmaster will end the session — it can do so server-side
+            # whenever it likes — and two attempts at a confident number both
+            # misled on 2026-08-19. What IS reliable is whether the recorded
+            # cookies are still in the profile, which is the line above.
+            print(f"  [ -- ]  first account cookie lapses "
+                  f"{ev['expires_at'][:16]} ({ev['days_left']:g} day(s))")
+            print("          That may or may not end the session. Re-run this")
+            print("          check afterwards rather than assuming either way.")
         print(f"\n  Profile: {config.BUY_PROFILE_DIR}\n")
         return 0
 
@@ -929,11 +932,14 @@ def cmd_doctor(_args) -> int:
             # The session expiring is the failure this is really watching
             # for: it is silent, and its first symptom would be a listing
             # appearing and not being held.
+            # Deliberately not a warning. See cmd_check_buy: the expiry of
+            # any one cookie is not the expiry of the session, and warning on
+            # it produced "0.1 days" on a perfectly healthy profile — the kind
+            # of alarm that teaches you to ignore alarms.
             days = ev["days_left"]
-            if days is not None and days <= 3:
-                warn("Buying session", f"expires in {days:g} day(s) — re-run login-buy")
-            elif days is not None:
-                ok("Buying session", f"valid for another {days:g} day(s)")
+            if days is not None:
+                print(f"  [ -- ]  Buying session  — first account cookie lapses "
+                      f"in {days:g} day(s); presence is the real check")
     else:
         print("  [ -- ]  Securing  — off; the watcher only notifies")
 

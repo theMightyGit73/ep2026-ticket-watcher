@@ -76,6 +76,22 @@ KNOWN_ANONYMOUS_COOKIES = {
     "eupubconsent-v2", "_gcl_au", "_fbp", "_uetvid", "_uetsid",
 }
 
+#: Prefixes of cookies that are analytics whatever else is true of them.
+#:
+#: The signed-out baseline catches most of these, but not all: Google
+#: Analytics mints a per-property cookie (_ga_MNQMF2C2CB) that only appears
+#: once you have visited the pages behind a sign-in, so it looked like part of
+#: the account. It carried a 2027 expiry, and reporting the longest-lived
+#: "account" cookie therefore announced the session was good for 400 days.
+#: That is exactly as wrong as the two hours it replaced.
+ANALYTICS_PREFIXES = ("_ga", "_gid", "_gcl", "_fbp", "_uet", "_scid", "__gads",
+                      "__gpi", "cto_", "_au_", "_pn_", "permutive", "_ddl")
+
+
+def _is_analytics(name: str) -> bool:
+    return any(name.startswith(p) for p in ANALYTICS_PREFIXES)
+
+
 #: Where the fingerprint taken at sign-in time is kept. Beside the profile
 #: rather than inside it, so a Chrome profile reset cannot silently take the
 #: evidence with it.
@@ -163,10 +179,24 @@ def record_signed_in_fingerprint(profile_dir=None) -> dict:
     # Both baselines: the hardcoded list and the live signed-out profile. The
     # second is what stops fifteen ordinary anonymous cookies being recorded
     # as the account's, which would make every later check meaningless.
-    auth = sorted(set(cookies) - KNOWN_ANONYMOUS_COOKIES - anonymous_baseline())
+    auth = sorted(n for n in (set(cookies) - KNOWN_ANONYMOUS_COOKIES
+                              - anonymous_baseline())
+                  if not _is_analytics(n))
+
+    # Split by whether they survive the browser closing.
+    #
+    # Two of the fourteen recorded on 2026-08-19 — TMAUO and ma.SID — carry no
+    # expiry at all. Those are session cookies: Chrome drops them when it
+    # exits, which it does after every securing attempt. Requiring all
+    # fourteen therefore reported a perfectly good profile as signed out the
+    # moment the browser had been used once. Only the persistent ones can
+    # answer "is this profile still signed in" between runs.
+    persistent = sorted(n for n in auth if cookies.get(n))
     record = {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "auth_cookies": auth,
+        #: The subset the later checks actually compare against.
+        "persistent_cookies": persistent,
         "cookie_count": len(cookies),
     }
     try:
@@ -226,30 +256,49 @@ def session_evidence(profile_dir=None) -> dict:
                               "also has — not signed in")
         return out
 
-    expected = set(recorded.get("auth_cookies") or [])
+    # Only the cookies that survive the browser closing. Session-scoped ones
+    # are dropped by Chrome on exit — see record_signed_in_fingerprint — so
+    # their absence says nothing about being signed out. Older records that
+    # predate the split fall back to filtering the full list the same way.
+    expected = set(recorded.get("persistent_cookies") or [])
     if not expected:
-        out.update(reason="the recorded sign-in found no account cookies to watch")
+        expected = {n for n in (recorded.get("auth_cookies") or []) if cookies.get(n)}
+    if not expected:
+        out.update(reason="the recorded sign-in found no lasting account cookies "
+                          "to watch — re-run the sign-in")
         return out
 
     missing = sorted(expected - set(cookies))
     if missing:
         out.update(
             signed_in=False,
-            reason=f"the session cookie(s) recorded at sign-in are gone "
+            reason=f"the account cookie(s) recorded at sign-in are gone "
                    f"({', '.join(missing[:3])}) — it has been signed out",
         )
         return out
 
-    # Still present. How long have they got?
+    # When the first account cookie lapses.
+    #
+    # Not "when the session expires", because nothing here can know that —
+    # only Ticketmaster does, and it can invalidate a session server-side at
+    # any time regardless of what the cookies say. Two attempts at a
+    # confident number both misled on 2026-08-19: the soonest expiry picked
+    # SOTC and announced "0.1 days" on a healthy profile, and the longest
+    # picked a Google Analytics cookie and announced 400 days.
+    #
+    # So this reports the earliest lapse among real account cookies, which is
+    # the first moment anything is known to change, and the callers word it as
+    # that rather than as a guarantee.
     expiries = [cookies[n] for n in expected if cookies.get(n)]
     soonest = min(expiries) if expiries else None
-    out.update(signed_in=True, reason="the cookies recorded at sign-in are all present")
+    out.update(signed_in=True,
+               reason="the account cookies recorded at sign-in are all present")
     if soonest:
         left = (soonest - datetime.now(timezone.utc)).total_seconds() / 86400.0
         out.update(expires_at=soonest.isoformat(), days_left=round(left, 1))
         if left <= 0:
             out.update(signed_in=False,
-                       reason="the session cookies have expired — sign in again")
+                       reason="an account cookie has lapsed — sign in again")
     return out
 
 
