@@ -42,7 +42,11 @@ def check_true(label, got):
     check(label, bool(got), True)
 
 
-A, B = config.EVENTS[0], config.EVENTS[-1]
+# Selected by slug, never by position. A third page was added on 2026-08-19
+# and EVENTS[-1] silently became the Early Entry Pass, so this file started
+# testing "the quiet page" against an entirely different page's cadence.
+A = next(e for e in config.EVENTS if e.slug == "weekend-camping")
+B = next(e for e in config.EVENTS if e.slug == "weekend-camping-instalment")
 
 
 def fresh():
@@ -57,8 +61,11 @@ def aged(state, event, minutes):
 
 print("\nThe budget is weighted, and it is the same budget")
 
-check("total volume reflects the 3-6 minute standard page",
-      round(config.searches_per_hour()), 15)
+# Three pages since 2026-08-19. This is the nominal flat sum; the numbers
+# that actually bind are peak_searches_per_hour() and searches_per_day(),
+# checked in test_peak_hours.py.
+check("total nominal volume across all three pages",
+      round(config.searches_per_hour()), 17)
 check_true("the busy page is searched more often", A.poll_seconds < B.poll_seconds)
 check("the tick follows the busiest page's floor",
       config.poll_interval(), A.poll_min_seconds)
@@ -95,12 +102,15 @@ st.note_event_polled(s, A.slug)
 st.note_event_polled(s, B.slug)
 aged(s, A, 7)
 aged(s, B, 7)
-due = [e.slug for e in st.due_events(s, config.EVENTS)]
+due = [e.slug for e in st.due_events(s, [A, B])]
 check("after 7 minutes only the busy page is due", due, [A.slug])
 
-aged(s, B, 31)
-due = [e.slug for e in st.due_events(s, config.EVENTS)]
-check_true("after 31 the quiet one is too", B.slug in due)
+# Derived from the page's own longest gap rather than a literal, so retuning
+# a cadence cannot silently turn this into a test of nothing.
+aged(s, B, B.poll_max_seconds / 60 + 1)
+due = [e.slug for e in st.due_events(s, [A, B])]
+check_true("and once its own longest gap has passed, the quiet one is too",
+           B.slug in due)
 
 print("\nAn early tick must do nothing, and that is deliberate")
 # Reversed on 2026-08-19. This used to force the longest-waiting page whenever
@@ -116,13 +126,13 @@ st.note_event_polled(s, A.slug, A.poll_max_seconds)
 st.note_event_polled(s, B.slug, B.poll_max_seconds)
 aged(s, A, 1)
 aged(s, B, 2)
-check("nothing due means nothing searched", st.due_events(s, config.EVENTS), [])
+check("nothing due means nothing searched", st.due_events(s, [A, B]), [])
 
 # The protection the old rule provided is kept for the case it was really for:
 # a timestamp that has gone bad, or a clock that jumped, must not park a page
 # for ever.
 aged(s, A, (A.poll_max_seconds * 3) / 60)
-due = [e.slug for e in st.due_events(s, config.EVENTS)]
+due = [e.slug for e in st.due_events(s, [A, B])]
 check_true("a page far past its longest gap is searched anyway", A.slug in due)
 
 check("no events configured means nothing to do", st.due_events(s, []), [])
@@ -154,13 +164,17 @@ print("\nThe hourly report says how old each reading is")
 # being exactly as fresh as the newer.
 
 s = fresh()
-st.note_event_polled(s, A.slug)
-aged(s, A, 4)
-aged(s, B, 26)
-rows = st.event_summaries(s)
+# Every configured page, so adding a fourth cannot leave a row with no age
+# and turn this into a TypeError instead of a failed assertion.
+for index, event in enumerate(config.EVENTS):
+    st.note_event_polled(s, event.slug)
+    aged(s, event, 4 + index * 11)
+rows = {row[0]: row for row in st.event_summaries(s)}
 check("every page is reported", len(rows), len(config.EVENTS))
-check("with its age", round(rows[0][4]), 4)
-check("...for each of them", round(rows[-1][4]), 26)
+check("with its age", round(rows[A.name][4]), 4)
+check("...for each of them", round(rows[B.name][4]), 15)
+check_true("and none of them is missing one",
+           all(row[4] is not None for row in rows.values()))
 
 print("\nA second watcher looks more often without talking more often")
 # Two watchers on different connections sample the page twice as often while

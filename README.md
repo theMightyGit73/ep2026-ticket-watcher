@@ -1,12 +1,16 @@
 # EP2026 Ticket Watcher
 
 Watches Electric Picnic 2026 and emails `davidcoyne73@gmail.com` when a ticket
-is actually buyable. Two pages, not one:
+is actually buyable. Three pages, not one:
 
 - [Weekend Camping](https://www.ticketmaster.ie/electric-picnic-2026-weekend-camping-co-laois-28-08-2026/event/18006314BD813D3E)
   — the standard, pay-in-full listing
 - [Weekend Camping Instalment Plan](https://www.ticketmaster.ie/electric-picnic-2026-weekend-camping-instalment-co-laois-28-08-2026/event/18006314CFB4A99E)
   — the same weekend, paid in stages
+- [Early Entry Pass](https://www.ticketmaster.ie/electric-picnic-2026-early-entry-pass-co-laois-27-08-2026/event/18006314E36BAC7B)
+  — campsite access from 2pm Thursday. An **add-on**, not a ticket: only
+  valid alongside a Weekend Ticket, so it is watched and alerted on but never
+  secured automatically
 
 They are separate products with separate inventory and separate resale panels.
 A ticket can appear on one and not the other, so both are watched and every
@@ -139,11 +143,31 @@ more. The split is deliberate: of the nine resale sightings between 13 and 18
 August, eight were on the standard page and one on the instalment plan, so
 searching both equally spent half the budget for an eighth of the return.
 
-| Page | Gap | Searches/hour |
-| --- | --- | --- |
-| Weekend Camping | 3–6 min | 13.3 |
-| Weekend Camping Instalment Plan | 20–40 min | 2.0 |
-| | **total** | **15.3** |
+| Page | Peak (10:00–20:00) | Off-peak | Secured? |
+| --- | --- | --- | --- |
+| Weekend Camping | 3–5 min | 5–10 min | yes |
+| Weekend Camping Instalment Plan | 20–40 min | 40–60 min | yes |
+| Early Entry Pass | 30–60 min | 60–90 min | **no** |
+
+Peak load is 18.3 searches/hour and a day costs about 285.
+
+The **Early Entry Pass** was added on 2026-08-19 and is treated differently on
+purpose. It is an add-on, not a ticket — Ticketmaster's own note reads "Early
+Entry passes are only valid with a Weekend Ticket" — and it was on general
+sale at €39.40 when it was added, with stock showing. A page that is selling
+does not need watching every three minutes, and the question here is "has it
+sold out and come back", not "did a resale listing flash past".
+
+It is also never secured automatically. Holding one under David's account,
+with a countdown running, would pull him to the laptop for something he cannot
+use until the ticket this project exists to find has been found. Per-page, via
+`Event.secure`. Its alert says so in its own words:
+
+```text
+This is the EARLY ENTRY PASS — an ADD-ON for campsite access from 2pm
+on the Thursday. It is NOT a festival ticket and is only valid alongside
+a Weekend Ticket. It is worth nothing on its own.
+```
 
 That total is the number to watch. Roughly 20/hour is what got the home
 connection flagged in development, so this sits under the line with less room

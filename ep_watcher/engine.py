@@ -422,6 +422,17 @@ def _maybe_secure(reading: Reading) -> None:
     if reading.resale not in GOOD_STATUSES:
         return
 
+    # Per page, not just per watcher. The Early Entry Pass is an add-on that
+    # Ticketmaster says is only valid alongside a Weekend Ticket, so holding
+    # one automatically — under his account, with a countdown running, pulling
+    # him to the laptop — would spend his attention on something he cannot use
+    # until the ticket this project exists to find has been found. It is still
+    # watched and still alerted on.
+    event = next((e for e in config.EVENTS if e.slug == reading.event_slug), None)
+    if event is not None and not event.secure:
+        print(f"[{stamp()}] {event.slug}: alerting only — this page is not secured")
+        return
+
     from . import buyer
 
     listing = next((l for l in reading.listings if l.kind == "resale"), None)

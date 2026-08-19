@@ -22,10 +22,21 @@ class Event:
                  tm_event_id: str = "", poll_seconds: int = 0,
                  poll_min_seconds: int = 0, poll_max_seconds: int = 0,
                  peak_min_seconds: int = 0, peak_max_seconds: int = 0,
-                 offpeak_min_seconds: int = 0, offpeak_max_seconds: int = 0):
+                 offpeak_min_seconds: int = 0, offpeak_max_seconds: int = 0,
+                 secure: bool = True):
         self.peak_min_seconds, self.peak_max_seconds = peak_min_seconds, peak_max_seconds
         self.offpeak_min_seconds = offpeak_min_seconds
         self.offpeak_max_seconds = offpeak_max_seconds
+        #: May the buyer open a signed-in browser and hold this one?
+        #:
+        #: Per page, because "tell me about it" and "grab it for me" are not
+        #: the same instruction. The Early Entry Pass is an add-on that
+        #: Ticketmaster says is only valid alongside a Weekend Ticket, so
+        #: automatically holding one — under his account, with a countdown
+        #: running, pulling him to the laptop — would be spending his
+        #: attention on something he cannot use until the real ticket exists.
+        #: It is still watched and still alerted on; it is just not grabbed.
+        self.secure = secure
         self.slug = slug
         self.name = name
         self.url = url
@@ -51,6 +62,16 @@ class Event:
         #: `poll_seconds` remains the MEAN of that range and is what the
         #: budget arithmetic uses, so searches_per_hour() still answers the
         #: question that actually matters: how much traffic is this sending.
+        # A page may be given an ordinary range, or only peak/off-peak ranges,
+        # or neither. Falling through to DEFAULT_EVENT_POLL_SECONDS when only
+        # the windowed ranges were supplied is a trap: gap_range() would do
+        # the right thing while poll_seconds — and therefore
+        # searches_per_hour() — reported the default. The Early Entry Pass hit
+        # exactly that on the day it was added, claiming 13.3 searches an hour
+        # for a page actually polled every half hour.
+        if not (poll_min_seconds or poll_max_seconds) and peak_min_seconds:
+            poll_min_seconds, poll_max_seconds = peak_min_seconds, peak_max_seconds
+
         if poll_min_seconds or poll_max_seconds:
             lo = poll_min_seconds or poll_max_seconds
             hi = poll_max_seconds or poll_min_seconds
@@ -169,6 +190,24 @@ STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "300"))
 STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "300"))
 STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "600"))
 
+# The Early Entry Pass, added 2026-08-19. Watched on the slowest clock of the
+# three, and the reasons are worth stating because they are not obvious:
+#
+#   * It is an ADD-ON, not a ticket. Ticketmaster's own note says "Early Entry
+#     passes are only valid with a Weekend Ticket", so it is worth nothing
+#     until the thing this whole project exists to find has been found.
+#   * It was on general sale at €39.40 when David added it, with stock showing
+#     and a four-per-order limit. A page that is selling is not a page that
+#     needs watching every three minutes; the question here is "has it sold
+#     out and come back", not "did a resale listing flash past".
+#
+# 30-60 minutes costs ~1.3 searches an hour, taking the peak from 17.0 to
+# 18.3 — still under the ~20/hour that drew a block.
+EARLY_ENTRY_PEAK_MIN_SECONDS = int(os.environ.get("EP_EARLY_PEAK_MIN", "1800"))
+EARLY_ENTRY_PEAK_MAX_SECONDS = int(os.environ.get("EP_EARLY_PEAK_MAX", "3600"))
+EARLY_ENTRY_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_EARLY_OFFPEAK_MIN", "3600"))
+EARLY_ENTRY_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_EARLY_OFFPEAK_MAX", "5400"))
+
 INSTALMENT_PEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MIN", "1200"))
 INSTALMENT_PEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MAX", "2400"))
 INSTALMENT_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MIN", "2400"))
@@ -241,6 +280,27 @@ EVENTS = [
         peak_max_seconds=INSTALMENT_PEAK_MAX_SECONDS,
         offpeak_min_seconds=INSTALMENT_OFFPEAK_MIN_SECONDS,
         offpeak_max_seconds=INSTALMENT_OFFPEAK_MAX_SECONDS,
+    ),
+    # The Early Entry Pass — campsite access from 2pm on the Thursday. A
+    # separate page with its own inventory, and NOT a ticket: Ticketmaster's
+    # own note reads "Early Entry passes are only valid with a Weekend
+    # Ticket". Watched and alerted on like the others, but never secured
+    # automatically — see Event.secure.
+    Event(
+        slug="early-entry",
+        name="Electric Picnic 2026 - Early Entry Pass",
+        url=(
+            "https://www.ticketmaster.ie"
+            "/electric-picnic-2026-early-entry-pass-co-laois-27-08-2026"
+            "/event/18006314E36BAC7B"
+        ),
+        match_words=("electric picnic", "early entry"),
+        tm_event_id="18006314E36BAC7B",
+        peak_min_seconds=EARLY_ENTRY_PEAK_MIN_SECONDS,
+        peak_max_seconds=EARLY_ENTRY_PEAK_MAX_SECONDS,
+        offpeak_min_seconds=EARLY_ENTRY_OFFPEAK_MIN_SECONDS,
+        offpeak_max_seconds=EARLY_ENTRY_OFFPEAK_MAX_SECONDS,
+        secure=False,
     ),
 ]
 

@@ -148,7 +148,17 @@ def _which_ticket(name: str) -> str:
     kind it is in its own words rather than relying on the reader spotting a
     suffix.
     """
-    if "instalment" in (name or "").lower():
+    lowered = (name or "").lower()
+    if "early entry" in lowered:
+        # The distinction that matters most of the three, because acting on
+        # this one in a hurry could mean buying something unusable. It is an
+        # add-on: Ticketmaster's own note reads "Early Entry passes are only
+        # valid with a Weekend Ticket".
+        return ("This is the EARLY ENTRY PASS — an ADD-ON for campsite access "
+                "from 2pm\non the Thursday. It is NOT a festival ticket and is "
+                "only valid alongside\na Weekend Ticket. It is worth nothing on "
+                "its own.")
+    if "instalment" in lowered:
         return ("This is the INSTALMENT PLAN page — the pay-in-stages listing, "
                 "not the standard one.")
     return ("This is the STANDARD Weekend Camping page — the pay-in-full "

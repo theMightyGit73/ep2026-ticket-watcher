@@ -55,7 +55,14 @@ inventory_api.requests = type("_R", (), {"get": staticmethod(fake_get),
                                          "RequestException": Exception})()
 config.TM_API_KEY = "test-key"
 
-standard, instalment = config.EVENTS[0], config.EVENTS[-1]
+# Selected by slug, never by position. A third page was added on 2026-08-19
+# and index-based fixtures silently started testing the wrong event.
+def _event(slug):
+    return next(e for e in config.EVENTS if e.slug == slug)
+
+
+standard = _event("weekend-camping")
+instalment = _event("weekend-camping-instalment")
 
 print("\nEach event is asked about by its own id")
 

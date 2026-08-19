@@ -172,6 +172,15 @@ for event in config.EVENTS:
                    "instalment plan" in body)
         check_true(f"[{event.slug}] and says it is not the standard one",
                    "not the standard" in body)
+    elif "early entry" in event.name.lower():
+        # The distinction that matters most: acting on this one in a hurry
+        # could mean buying something unusable. It is an add-on, valid only
+        # alongside a Weekend Ticket.
+        check_true(f"[{event.slug}] says it is an add-on", "add-on" in body)
+        check_true(f"[{event.slug}] and says it is not a ticket",
+                   "not a festival ticket" in body)
+        check_true(f"[{event.slug}] and names what it needs alongside it",
+                   "weekend ticket" in body)
     else:
         check_true(f"[{event.slug}] says it is the standard page", "standard" in body)
         check_true(f"[{event.slug}] and says it is not the instalment plan",
@@ -203,7 +212,8 @@ check_true("says the standard page could read resale",
            "Verified resale: UNAVAILABLE" in body)
 check_true("and that the instalment page could not",
            "UNKNOWN — nothing could read this market" in body)
-check_true("counts are labelled as per-page", "across 2 pages" in body)
+check_true("counts are labelled as per-page",
+           f"across {len(config.EVENTS)} pages" in body)
 check("subject does not claim to be about one page",
       first.name in sent[-1]["Subject"], False)
 check_true("subject names the watch as a whole",

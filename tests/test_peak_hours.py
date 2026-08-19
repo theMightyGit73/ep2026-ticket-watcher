@@ -107,8 +107,12 @@ check_true("which is at least as fast as the peak floor",
 print("\nSpending the same budget, not more")
 check_true("the busiest hour stays under the ~20/hour that drew a block",
            config.peak_searches_per_hour() < 20)
-check_true("a day costs no more than the flat cadence it replaced",
-           config.searches_per_day() <= 280)
+# Three pages since the Early Entry Pass was added, so the day is dearer than
+# the two-page flat cadence it replaced. The binding constraint is the
+# instantaneous rate above, not this; this exists so a fourth page cannot be
+# added without somebody noticing what it costs.
+check_true("a day stays within reach of the flat cadence it replaced",
+           config.searches_per_day() <= 300)
 check_true("peak hours are busier than off-peak",
            config.searches_per_hour_at(14) > config.searches_per_hour_at(22))
 check_true("and off-peak busier than night",
