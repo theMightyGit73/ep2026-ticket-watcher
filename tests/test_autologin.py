@@ -347,5 +347,36 @@ for text in CHALLENGES:
           any(m in text.lower() for m in autologin.REJECTED_MARKERS), False)
 
 
+
+print("\nAn account page is not a sign-in form, and must not be submitted")
+# What actually happened on 2026-08-19: ticketmaster.ie/member served an
+# ACCOUNT DETAILS page. It has an email field, so the email selector matched;
+# it has a submit button, so the submit logic pressed it; and that button is
+# labelled "Update Details". The run reported "no password field appeared"
+# having quietly submitted a change of account details instead of signing in.
+check_true("'Update Details' is never clicked", autologin._never_click("Update Details"))
+check_true("nor 'Save Changes'", autologin._never_click("Save Changes"))
+check_true("nor anything offering to delete the account",
+           autologin._never_click("Delete Account"))
+# The controls that DO move a sign-in forward must still be allowed, or the
+# guard would block the thing it is protecting.
+for label in ("Continue", "Next", "Sign In", "Log In", "Submit"):
+    check(f"but {label!r} is still allowed", autologin._never_click(label), False)
+
+print("\nThe URL loop takes the first sign-in FORM, not the first page that loads")
+# It used to break out on the first successful goto, so it never tried
+# anything past /member — and /member was the page that was wrong.
+src = (Path(__file__).resolve().parent.parent / "ep_watcher" / "autologin.py").read_text()
+loop = src[src.index("for candidate in config.SIGNIN_URLS"):src.index("email_field, used = _first_visible(page, EMAIL_SELECTORS)")]
+check("the loop no longer stops at the first page that merely loaded",
+      "result.note(f\"opened {candidate}\")\n                break" in loop, False)
+check_true("a password field is what makes a candidate a sign-in page",
+           "PASSWORD_SELECTORS" in loop)
+check_true("and account-page wording disqualifies a candidate",
+           "update details" in loop)
+check_true("more than one URL is genuinely tried",
+           len(config.SIGNIN_URLS) > 1)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

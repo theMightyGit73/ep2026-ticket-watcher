@@ -290,24 +290,45 @@ def session_evidence(profile_dir=None) -> dict:
     # So this reports the earliest lapse among real account cookies, which is
     # the first moment anything is known to change, and the callers word it as
     # that rather than as a guarantee.
-    expiries = [cookies[n] for n in expected if cookies.get(n)]
-    soonest = min(expiries) if expiries else None
+    # PRESENCE is the verdict. Expiry is information, and only information.
+    #
+    # This used to flip signed_in to False the moment the earliest-expiring
+    # recorded cookie passed its date, and at 21:00 on 2026-08-19 that
+    # declared a perfectly good session dead. The eleven cookies recorded at
+    # sign-in are not one kind of thing: `id-token` is the account and had 29
+    # days left, while SOTC, KP_UIDz-ssn and ma.paramsToken are short-lived
+    # operational cookies the site reissues on the next page load. Judging the
+    # session by the soonest of those is judging it by the part designed to
+    # churn.
+    #
+    # It failed in the dangerous direction. doctor, check-buy and the startup
+    # banner all went red, and the fix they printed was to sign in again —
+    # which for an account already signed in means putting a password through
+    # a scripted login for no reason, against the very account the
+    # two-browser design exists to keep away from attention.
+    #
+    # A cookie still IN the profile has not been dropped by Chrome. If the
+    # account cookies genuinely go, the `missing` check above catches it, and
+    # that is the check that carries meaning.
+    now = datetime.now(timezone.utc)
     out.update(signed_in=True,
                reason="the account cookies recorded at sign-in are all present")
+
+    # The next real change is the soonest expiry still in the FUTURE. A date
+    # already passed on a cookie that is nonetheless present describes one
+    # mid-reissue, not a session ending.
+    future = [cookies[n] for n in expected if cookies.get(n) and cookies[n] > now]
+    soonest = min(future) if future else None
     if soonest:
-        left = (soonest - datetime.now(timezone.utc)).total_seconds() / 86400.0
-        # Four decimals, not one. Rounding days to 1dp collapses everything
-        # under about 72 minutes to 0.0, and describe_lapse then reads 0.0 as
-        # "already" — so on 2026-08-19 both `doctor` and `check-buy` reported
-        # a cookie lapsing in 54 minutes as one that had already gone, while
-        # the line above them said the session was fine. Getting that wrong
-        # destroys exactly the warning worth having: an account cookie due to
-        # lapse within the hour is the moment to re-run login-buy, BEFORE a
-        # listing appears rather than after one is lost.
+        # Four decimals, not one: rounding days to 1dp collapsed everything
+        # under about 72 minutes to 0.0, and describe_lapse read 0.0 as
+        # "already" — reporting a cookie 54 minutes from lapsing as gone.
+        left = (soonest - now).total_seconds() / 86400.0
         out.update(expires_at=soonest.isoformat(), days_left=round(left, 4))
-        if left <= 0:
-            out.update(signed_in=False,
-                       reason="an account cookie has lapsed — sign in again")
+    else:
+        out.update(reason="the account cookies recorded at sign-in are all "
+                          "present, though every recorded expiry has passed — "
+                          "they are being reissued, which is normal")
     return out
 
 

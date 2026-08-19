@@ -161,7 +161,17 @@ with tempfile.TemporaryDirectory() as tmp:
     check_true("but with days left reported", 1 <= ev["days_left"] <= 2)
     check_true("which doctor treats as a warning", ev["days_left"] <= 3)
 
-print("\nAn expired session is signed out, whatever the cookie says")
+print("\nA passed expiry on a cookie that is STILL THERE is not signed out")
+# This check asserted the opposite until 2026-08-19, and the opposite was
+# wrong. An expiry date that has passed on a cookie Chrome is still holding
+# describes a cookie mid-reissue, not a session ending — and treating it as
+# fatal declared a live session dead at 21:00 that night, with `id-token`
+# good for another 29 days. The advice it printed was to sign in again, which
+# for an already-signed-in account means putting a password through a
+# scripted login against the account this design exists to keep quiet.
+#
+# Presence is the verdict. The signed-out case is a cookie that is GONE, and
+# it is checked immediately below.
 with tempfile.TemporaryDirectory() as tmp:
     root = make_profile(Path(tmp) / "prof", dict(ANON, **{"SESSION": FAR}))
     buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
@@ -169,9 +179,21 @@ with tempfile.TemporaryDirectory() as tmp:
     # The cookie is still named in the profile, but its expiry has passed.
     make_profile(Path(tmp) / "prof", dict(ANON, **{"SESSION": PAST}))
     ev = buyer.session_evidence(Path(tmp) / "prof")
+    check("still signed in, because the cookie is still there",
+          ev["signed_in"], True)
+    check_true("and the reason rests on presence",
+               "present" in ev["reason"])
+
+print("\nA cookie that has actually GONE is signed out")
+with tempfile.TemporaryDirectory() as tmp:
+    root = make_profile(Path(tmp) / "prof", dict(ANON, **{"SESSION": FAR}))
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    buyer.record_signed_in_fingerprint(root)
+    make_profile(Path(tmp) / "prof", dict(ANON))        # SESSION removed entirely
+    ev = buyer.session_evidence(Path(tmp) / "prof")
     check("signed_in is False", ev["signed_in"], False)
-    check_true("and says a cookie lapsed",
-               "lapsed" in ev["reason"] or "expired" in ev["reason"])
+    check_true("and it names the cookie that went",
+               "SESSION" in ev["reason"])
 
 print("\nReading cookies must work while Chrome has the file open")
 # The database is copied before being read. A check that only works when the
@@ -360,6 +382,58 @@ with tempfile.TemporaryDirectory() as tmp:
     rendered = buyer.describe_lapse(ev["days_left"])
     check("and it is not described as already gone", rendered, "in about 54 minutes")
     check("nor as zero of anything", rendered.startswith("in about 0"), False)
+
+
+
+print("\nA short-lived cookie passing its date is not the session ending")
+# The false alarm of 2026-08-19 21:00. The eleven cookies recorded at sign-in
+# are not one kind of thing: id-token is the account and had 29 days left,
+# while SOTC, KP_UIDz-ssn and ma.paramsToken are operational cookies the site
+# reissues on the next page load. Judging the session by the soonest of those
+# judged it by the part designed to churn — and it went red, telling David to
+# sign in again, which for an already-signed-in account means putting a
+# password through a scripted login against the one account the two-browser
+# design exists to protect.
+with tempfile.TemporaryDirectory() as tmp:
+    root = make_profile(Path(tmp) / "prof", {
+        "id-token": datetime.now(timezone.utc) + timedelta(days=29),
+        "SOTC": datetime.now(timezone.utc) - timedelta(minutes=5),   # date passed
+    })
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    buyer.SESSION_FILE.write_text(json.dumps(
+        {"persistent_cookies": ["id-token", "SOTC"],
+         "auth_cookies": ["id-token", "SOTC"]}))
+    ev = buyer.session_evidence(root)
+    check("the session is still signed in", ev["signed_in"], True)
+    check_true("because presence is the verdict",
+               "present" in ev["reason"])
+    check("and the reported lapse skips the churning cookie for the account one",
+          round(ev["days_left"]), 29)
+
+print("\nBut cookies genuinely GONE still mean signed out")
+# The check that carries meaning. If this ever stops working, the banner goes
+# quiet about a profile that really cannot hold anything.
+with tempfile.TemporaryDirectory() as tmp:
+    root = make_profile(Path(tmp) / "prof", dict(ANON))
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    buyer.SESSION_FILE.write_text(json.dumps(
+        {"persistent_cookies": ["id-token"], "auth_cookies": ["id-token"]}))
+    ev = buyer.session_evidence(root)
+    check("a missing account cookie is signed out", ev["signed_in"], False)
+    check_true("and says which one went", "id-token" in ev["reason"])
+
+print("\nEvery recorded expiry passed, all still present — normal, not fatal")
+with tempfile.TemporaryDirectory() as tmp:
+    root = make_profile(Path(tmp) / "prof", {
+        "id-token": datetime.now(timezone.utc) - timedelta(minutes=1),
+    })
+    buyer.SESSION_FILE = Path(tmp) / "buy-session.json"
+    buyer.SESSION_FILE.write_text(json.dumps(
+        {"persistent_cookies": ["id-token"], "auth_cookies": ["id-token"]}))
+    ev = buyer.session_evidence(root)
+    check("still signed in", ev["signed_in"], True)
+    check("with no expiry claimed", ev["days_left"], None)
+    check_true("and the wording explains why", "reissued" in ev["reason"])
 
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")

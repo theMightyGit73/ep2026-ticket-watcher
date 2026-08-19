@@ -74,7 +74,20 @@ SUBMIT_LABELS = ("continue", "next", "log in", "sign in", "submit")
 
 #: Never clicked, whatever else matches. A passkey flow cannot be completed
 #: with a stored password and only wastes the attempt.
-NEVER_CLICK = ("passkey", "sign in with", "create account", "forgot")
+#: "update" is here because of what happened on 2026-08-19. The run opened
+#: ticketmaster.ie/member, which for a partly-recognised visitor is an ACCOUNT
+#: DETAILS page rather than a sign-in form. It carries an email field, so the
+#: email selector matched; it carries a submit button, so the submit logic
+#: pressed it; and that button is labelled "Update Details". The attempt
+#: reported "no password field appeared after the email" while having actually
+#: submitted a change of account details.
+#:
+#: Nothing was damaged — the field held the address that was already there —
+#: but pressing an unknown button on an account page is the same class of
+#: mistake the buyer's payment denylist exists to prevent, and it deserves the
+#: same treatment.
+NEVER_CLICK = ("passkey", "sign in with", "create account", "forgot",
+               "update", "save changes", "delete")
 
 #: Text that means a human is needed. Checked before anything is called a
 #: failure, because "wrong password" and "prove you are human" are different
@@ -215,20 +228,66 @@ def sign_in(session, result: LoginResult = None) -> LoginResult:
     try:
         page = session.page
 
+        # Take the first URL that is a SIGN-IN FORM, not the first that loads.
+        #
+        # This used to break out of the loop on the first successful goto, so
+        # it never tried anything past ticketmaster.ie/member — and on
+        # 2026-08-19 /member served an account details page. That page has an
+        # email field and a submit button, so every later step matched
+        # something: the email was filled in, "Update Details" was pressed,
+        # and the run failed with "no password field appeared" having quietly
+        # submitted an account form instead of signing in.
+        #
+        # A password field is the only unambiguous evidence of a sign-in page,
+        # so a candidate offering one wins outright. A candidate with an email
+        # field and no account-page furniture is kept as a fallback, because
+        # Ticketmaster's identity flow asks for the email first and reveals
+        # the password field only afterwards.
+        best, best_url, fallback, fallback_url = None, "", None, ""
         for candidate in config.SIGNIN_URLS:
             try:
                 page.goto(candidate, wait_until="domcontentloaded")
-                result.note(f"opened {candidate}")
-                break
             except Exception:
                 continue
+            try:
+                session._dismiss_consent()
+            except Exception:
+                pass
 
-        # The cookie wall blocks the form underneath it, exactly as it blocks
-        # the bot check on the event page.
-        try:
-            session._dismiss_consent()
-        except Exception:
-            pass
+            password_here, _ = _first_visible(page, PASSWORD_SELECTORS, timeout_ms=1200)
+            email_here, _ = _first_visible(page, EMAIL_SELECTORS, timeout_ms=1200)
+            if password_here is not None and email_here is not None:
+                best, best_url = page, candidate
+                result.note(f"opened {candidate} — a real sign-in form (password field present)")
+                break
+            if email_here is not None and fallback is None:
+                text = _page_text(page)
+                if any(word in text for word in ("update details", "save changes",
+                                                 "my account", "account details")):
+                    result.note(f"{candidate} looks like an account page, not a "
+                                f"sign-in form — not using it")
+                    continue
+                fallback, fallback_url = page, candidate
+                result.note(f"opened {candidate} — email field only, keeping as a fallback")
+
+        if best is None and fallback is not None:
+            # Nothing offered a password field. Go back to the best candidate
+            # seen, which is the two-step form asking for the email first.
+            try:
+                page.goto(fallback_url, wait_until="domcontentloaded")
+                session._dismiss_consent()
+            except Exception:
+                pass
+            result.note(f"using {fallback_url}")
+        elif best is None:
+            result.outcome = "no-form"
+            result.reason = (
+                "none of the sign-in URLs presented a sign-in form — they "
+                "loaded, but carried no usable email field, or looked like "
+                "account pages rather than logins"
+            )
+            result.note(result.reason)
+            return result
 
         email_field, used = _first_visible(page, EMAIL_SELECTORS)
         if email_field is None:
