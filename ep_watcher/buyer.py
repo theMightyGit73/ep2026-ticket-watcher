@@ -33,12 +33,188 @@ what it expects records why and returns `secured=False`, and the ordinary
 alert still goes out. Treat the first real find as the test.
 """
 
+import json
+import os
+import shutil
+import sqlite3
+import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from . import config
 from .state import stamp
+
+# ── Knowing whether the buying profile is signed in ──────────────────────────
+#
+# This was originally `"sign out" in page_text or "my account" in page_text`,
+# copied from the watcher's own login command. On 2026-08-19 that was checked
+# against every page capture the watcher has ever taken and found to be
+# useless in both directions: not one of the nine recordings contains "sign
+# out", "my account" OR "sign in". Ticketmaster does not put the account
+# control anywhere that Playwright's flattened `inner_text` can see it, so
+# the test would have answered "not signed in" for a perfectly good session —
+# and the buyer would have refused to act on the first real listing after
+# David had signed in correctly.
+#
+# Cookies are the honest signal, but presence alone is not enough either: the
+# signed-OUT watcher profile already carries 33 ticketmaster.ie cookies, all
+# of them analytics and consent. What distinguishes a signed-in profile is
+# WHICH names are present, and the only moment anybody can know that for
+# certain is the moment a human says "I have just signed in".
+#
+# So `login-buy` records the names it sees at that moment, and everything
+# afterwards compares against that recording. A guess made once, by a human,
+# beats a guess hard-coded by someone who has never seen the page.
+
+#: Cookie names present on a signed-OUT ticketmaster.ie profile, read from the
+#: watcher's own profile on 2026-08-19. Anything in this set proves nothing.
+KNOWN_ANONYMOUS_COOKIES = {
+    "mt.v", "_ga", "BID", "_scid", "_scid_r", "cto_bundle", "__gads", "__gpi",
+    "LANGUAGE", "_au_1d", "OptanonConsent", "OptanonGroups", "__spdt",
+    "eupubconsent-v2", "_gcl_au", "_fbp", "_uetvid", "_uetsid",
+}
+
+#: Where the fingerprint taken at sign-in time is kept. Beside the profile
+#: rather than inside it, so a Chrome profile reset cannot silently take the
+#: evidence with it.
+SESSION_FILE = config.BUY_PROFILE_DIR.parent / "buy-session.json"
+
+
+def _chrome_time(microseconds: int) -> Optional[datetime]:
+    """Chrome stores times as microseconds since 1601-01-01 UTC."""
+    if not microseconds:
+        return None
+    try:
+        return datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(
+            microseconds=microseconds
+        )
+    except (OverflowError, ValueError):
+        return None
+
+
+def profile_cookies(profile_dir=None) -> dict:
+    """{cookie_name: expiry_or_None} for ticketmaster.ie, read offline.
+
+    Copies the database before reading it. Chrome holds a lock on the live
+    file, and this has to work while a browser is open — the alternative is a
+    check that only works when the thing being checked is shut, which is no
+    check at all.
+    """
+    profile_dir = profile_dir or config.BUY_PROFILE_DIR
+    db = profile_dir / "Default" / "Cookies"
+    if not db.exists():
+        return {}
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        shutil.copy(str(db), tmp)
+        conn = sqlite3.connect(tmp)
+        rows = conn.execute(
+            "SELECT name, expires_utc FROM cookies WHERE host_key LIKE ?",
+            ("%ticketmaster%",),
+        ).fetchall()
+        conn.close()
+        return {name: _chrome_time(exp) for name, exp in rows}
+    except (sqlite3.Error, OSError):
+        return {}
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def record_signed_in_fingerprint(profile_dir=None) -> dict:
+    """Remember what this profile looked like at the moment of signing in.
+
+    Called by `login-buy` once David confirms he is signed in. The cookies
+    that are present now but were not on a signed-out profile are, by
+    construction, the ones the account is carried in. Nobody has to guess
+    their names.
+    """
+    cookies = profile_cookies(profile_dir)
+    auth = sorted(set(cookies) - KNOWN_ANONYMOUS_COOKIES)
+    record = {
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "auth_cookies": auth,
+        "cookie_count": len(cookies),
+    }
+    try:
+        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SESSION_FILE.write_text(json.dumps(record, indent=2))
+    except OSError:
+        pass
+    return record
+
+
+def session_evidence(profile_dir=None) -> dict:
+    """What can be said about the buying session without opening a browser.
+
+    Returns {signed_in, reason, expires_at, days_left}. `signed_in` is None —
+    not False — when there is genuinely no way to tell, because "we cannot
+    say" and "definitely signed out" call for different words and different
+    actions.
+    """
+    profile_dir = profile_dir or config.BUY_PROFILE_DIR
+    out = {"signed_in": None, "reason": "", "expires_at": None, "days_left": None}
+
+    if not profile_dir.exists():
+        out.update(signed_in=False, reason="no buying profile — login-buy has never run")
+        return out
+
+    cookies = profile_cookies(profile_dir)
+    if not cookies:
+        out.update(signed_in=False, reason="the profile holds no ticketmaster cookies")
+        return out
+
+    try:
+        recorded = json.loads(SESSION_FILE.read_text())
+    except (OSError, ValueError):
+        # A profile that predates the fingerprint, or one whose record was
+        # lost. Fall back to the shipped anonymous set, and say that the
+        # answer is weaker than it would otherwise be.
+        extra = sorted(set(cookies) - KNOWN_ANONYMOUS_COOKIES)
+        if extra:
+            out.update(
+                signed_in=True,
+                reason=f"{len(extra)} cookie(s) beyond the anonymous set "
+                       f"(no sign-in fingerprint recorded — re-run login-buy "
+                       f"to make this check exact)",
+            )
+        else:
+            out.update(signed_in=False,
+                       reason="only anonymous cookies present — not signed in")
+        return out
+
+    expected = set(recorded.get("auth_cookies") or [])
+    if not expected:
+        out.update(reason="the recorded sign-in found no account cookies to watch")
+        return out
+
+    missing = sorted(expected - set(cookies))
+    if missing:
+        out.update(
+            signed_in=False,
+            reason=f"the session cookie(s) recorded at sign-in are gone "
+                   f"({', '.join(missing[:3])}) — it has been signed out",
+        )
+        return out
+
+    # Still present. How long have they got?
+    expiries = [cookies[n] for n in expected if cookies.get(n)]
+    soonest = min(expiries) if expiries else None
+    out.update(signed_in=True, reason="the cookies recorded at sign-in are all present")
+    if soonest:
+        left = (soonest - datetime.now(timezone.utc)).total_seconds() / 86400.0
+        out.update(expires_at=soonest.isoformat(), days_left=round(left, 1))
+        if left <= 0:
+            out.update(signed_in=False,
+                       reason="the session cookies have expired — sign in again")
+    return out
 
 
 @dataclass
@@ -161,13 +337,26 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         page.goto(event.url, wait_until="domcontentloaded")
         result.note(f"opened {event.slug} in the buying browser")
 
-        if not session.signed_in():
-            result.reason = (
-                "the buying browser is not signed in — run "
-                "`python -m ep_watcher login-buy`"
-            )
-            result.note(result.reason)
-            return result
+        # Note it, do not refuse on it.
+        #
+        # This used to return here when the session did not look signed in.
+        # That gate was removed on 2026-08-19 once the detection behind it was
+        # shown to be unreliable in the dangerous direction: Ticketmaster
+        # renders no account text that Playwright's flattened inner_text can
+        # read, so a perfectly good session reads as signed out. Refusing on
+        # it would have thrown away the first real listing after David signed
+        # in correctly.
+        #
+        # Trying anyway costs nothing that matters. A signed-out attempt
+        # bounces off a login wall, holds nothing, and reports honestly — the
+        # same outcome as refusing, minus the chance of being wrong about it.
+        # The availability alert has already gone out either way.
+        evidence = session_evidence()
+        if evidence["signed_in"] is False:
+            result.note(f"the buying session looks signed out ({evidence['reason']}) "
+                        f"— trying anyway, since that reading can be wrong")
+        elif evidence["signed_in"] is None:
+            result.note("cannot tell whether the buying session is signed in — trying")
 
         # Same quantity discipline as the watcher: the page defaults to 2 and
         # resale results are filtered by quantity, so asking for the wrong

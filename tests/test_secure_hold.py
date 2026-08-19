@@ -167,33 +167,45 @@ engine._maybe_secure(stray)
 check("an unrecognised event is refused", calls, [])
 
 
-print("\nThe signed-in check must happen on a loaded page, not on about:blank")
-# A freshly started BrowserSession sits on about:blank, which contains neither
-# "sign out" nor "my account". Asking whether we are signed in before
-# navigating therefore always answered "no", which made the entire feature a
-# no-op that would have blamed a login problem on the first real listing.
+print("\nA doubtful sign-in must not stop the attempt")
+# Two bugs lived here in one day, and the second was caused by fixing the
+# first badly.
+#
+# The original code asked "are we signed in?" before navigating, so it read
+# about:blank and always answered no — the whole feature was a no-op. The fix
+# was to navigate first. But on 2026-08-19 the check ITSELF was shown to be
+# worthless: none of the nine real page captures contains "sign out", "my
+# account" or even "sign in", because Ticketmaster renders no account text
+# that Playwright's flattened inner_text can see. Navigating first simply
+# meant reading a real page and still getting the wrong answer.
+#
+# So secure() no longer consults the page about this at all, and no longer
+# refuses on it. A signed-out attempt bounces off a login wall, holds
+# nothing, and says so — the same outcome as refusing, without the chance of
+# being wrong. The availability alert has already gone out either way.
 
 
 class RecordingPage:
     def __init__(self):
         self.order = []
-        self.body = ""
 
     def goto(self, url, wait_until=None):
         self.order.append("goto")
-        self.body = "Electric Picnic  Sign Out  My Account"
 
     def inner_text(self, _sel):
-        return self.body
+        self.order.append("read_text")
+        return "Electric Picnic 2026 - Weekend Camping"   # no account text, as in life
 
     def get_by_role(self, *a, **k):
-        raise RuntimeError("stop here — ordering is what this test is about")
+        self.order.append("interact")
+        raise RuntimeError("stop here — what happens before this is the point")
 
     def get_by_text(self, *a, **k):
+        self.order.append("interact")
         raise RuntimeError("stop here")
 
 
-class OrderProbeSession:
+class ProbeSession:
     def __init__(self):
         self._page = RecordingPage()
 
@@ -201,19 +213,20 @@ class OrderProbeSession:
     def page(self):
         return self._page
 
-    def signed_in(self):
-        self._page.order.append("signed_in")
-        return "sign out" in self._page.body.lower()
-
     def set_quantity(self, qty, result):
         pass
 
 
-probe = OrderProbeSession()
+probe = ProbeSession()
 outcome = buyer.secure(probe, config.EVENTS[0], resale_reading().listings[0])
-check("navigates before checking the session", probe.page.order[:2], ["goto", "signed_in"])
-check_true("and does not wrongly report being signed out",
-           "not signed in" not in outcome.reason)
+
+check("it navigates first", probe.page.order[0], "goto")
+check_true("and goes on to interact with the page", "interact" in probe.page.order)
+# The failure it reports must be about the page, never about the login — a
+# session it cannot verify is not a session it may assume is broken.
+check_true("it does not blame a login it cannot actually check",
+           "not signed in" not in (outcome.reason or ""))
+check("and no hold is claimed", outcome.secured, False)
 
 
 print("\nA failed hold must still tell him, and must not claim a hold")

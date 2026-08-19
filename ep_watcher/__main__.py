@@ -58,33 +58,32 @@ def cmd_check_buy(_args) -> int:
         print("\n  Fix:  python -m ep_watcher login-buy\n")
         return 1
 
-    event = config.EVENTS[0]
-    session = buyer.BuySession(headless=False)
-    try:
-        session.start()
-        session.page.goto(event.url, wait_until="domcontentloaded")
-        # The bot check can eat the first load, exactly as it does for the
-        # watcher — so a single "not signed in" reading is not conclusive.
-        signed = session.signed_in()
-        if not signed:
-            print("  first load inconclusive — reloading past the bot check")
-            session.page.reload(wait_until="domcontentloaded")
-            time.sleep(3)
-            signed = session.signed_in()
-    except Exception as exc:
-        print(f"  [FAIL]  could not open the page: {type(exc).__name__}: {exc}")
-        return 1
-    finally:
-        session.close()
+    # Answered from the cookie database, not by opening a browser. Reading
+    # the page cannot answer it: Ticketmaster renders no account text that
+    # Playwright can see, which was checked against every capture the watcher
+    # has taken. Cookies are also cheaper, need no network, and cannot get
+    # this profile challenged for asking.
+    ev = buyer.session_evidence(config.BUY_PROFILE_DIR)
 
-    if signed:
-        print("  [ OK ]  signed in — securing can hold a listing")
-        print(f"\n  Profile: {config.BUY_PROFILE_DIR}")
-        print("  Re-run this now and then; the session does expire.\n")
+    if ev["signed_in"] is True:
+        print(f"  [ OK ]  signed in — {ev['reason']}")
+        if ev["days_left"] is not None:
+            days = ev["days_left"]
+            word = "[ OK ]" if days > 3 else "[WARN]"
+            print(f"  {word}  session valid for another {days:g} day(s) "
+                  f"(until {ev['expires_at'][:16]})")
+            if days <= 3:
+                print("          Re-run login-buy before it lapses.")
+        print(f"\n  Profile: {config.BUY_PROFILE_DIR}\n")
         return 0
 
-    print("  [FAIL]  the buying profile is NOT signed in")
-    print("\n  Fix:  python -m ep_watcher login-buy\n")
+    if ev["signed_in"] is False:
+        print(f"  [FAIL]  not signed in — {ev['reason']}")
+        print("\n  Fix:  python -m ep_watcher login-buy\n")
+        return 1
+
+    print(f"  [ -- ]  cannot tell — {ev['reason']}")
+    print("\n  Re-run login-buy to record what a signed-in session looks like.\n")
     return 1
 
 
@@ -151,13 +150,32 @@ def cmd_login_buy(_args) -> int:
         except (EOFError, KeyboardInterrupt):
             print("\n  Cancelled.")
             return 1
-        text = session.visible_text().lower()
+    # Take the fingerprint AFTER the browser has closed, so Chrome has
+    # flushed its cookie database to disk. Reading it while the window is
+    # still open can miss the very cookies the sign-in just created.
+    from . import buyer
 
-    if "sign out" in text or "my account" in text:
+    record = buyer.record_signed_in_fingerprint(config.BUY_PROFILE_DIR)
+    auth = record.get("auth_cookies") or []
+    if auth:
+        # This is the only moment anyone can know for certain what a
+        # signed-in profile looks like, because a human has just said so.
+        # Every later check compares against what is recorded here rather
+        # than against a guess — see buyer.session_evidence().
         print(f"\n  Signed in. Buying session saved to {config.BUY_PROFILE_DIR}")
-        print("  Turn the feature on with EP_SECURE_ON_FIND=1 when you want it.\n")
+        print(f"  Recorded {len(auth)} account cookie(s) so the session can be")
+        print(f"  checked later without opening a browser:")
+        for name in auth[:6]:
+            print(f"    · {name}")
+        if len(auth) > 6:
+            print(f"    · ...and {len(auth) - 6} more")
+        print("\n  Check it any time with:  python -m ep_watcher check-buy\n")
         return 0
-    print("\n  Could not confirm a signed-in session — run `login-buy` again.\n")
+
+    print("\n  Could not confirm a signed-in session — the profile holds only")
+    print("  the cookies an anonymous visitor gets. If you did sign in, the")
+    print("  window may have been closed before Chrome saved them; try again")
+    print("  and give it a moment before pressing Enter.\n")
     return 1
 
 
@@ -806,16 +824,24 @@ def cmd_doctor(_args) -> int:
     #     at all. Whether the session inside it is still valid needs a browser,
     #     which is what `check-buy` is for.
     if config.SECURE_ON_FIND:
-        cookies = config.BUY_PROFILE_DIR / "Default" / "Cookies"
+        from . import buyer
+
         login_fix = f"{config.REPO_DIR}/run_watcher.sh login-buy"
-        if not config.BUY_PROFILE_DIR.exists():
-            bad("Securing", "armed, but no buying profile exists — it cannot hold anything",
-                login_fix)
-        elif not cookies.exists():
-            bad("Securing", "buying profile has no cookies — it is not signed in", login_fix)
+        ev = buyer.session_evidence(config.BUY_PROFILE_DIR)
+        if ev["signed_in"] is False:
+            bad("Securing", f"armed, but {ev['reason']}", login_fix)
+        elif ev["signed_in"] is None:
+            warn("Securing", f"armed, but {ev['reason']}")
         else:
-            ok("Securing", "armed, buying profile present")
-            print(f"  [ -- ]  Buying session  — run `check-buy` to confirm it is still signed in")
+            ok("Securing", f"armed and signed in — {ev['reason']}")
+            # The session expiring is the failure this is really watching
+            # for: it is silent, and its first symptom would be a listing
+            # appearing and not being held.
+            days = ev["days_left"]
+            if days is not None and days <= 3:
+                warn("Buying session", f"expires in {days:g} day(s) — re-run login-buy")
+            elif days is not None:
+                ok("Buying session", f"valid for another {days:g} day(s)")
     else:
         print("  [ -- ]  Securing  — off; the watcher only notifies")
 

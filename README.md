@@ -242,10 +242,43 @@ held:
 python -m ep_watcher check-buy
 ```
 
-Read-only. It opens the page, reads whether the account is present, and
-closes. It types nothing and baskets nothing, so it cannot itself trip
-anything. `doctor` runs the cheap half of this check (does the profile exist,
-does it hold cookies) on every run.
+It answers from the profile's cookie database and never opens a browser — so
+it needs no network, costs nothing, and cannot get the buying profile
+challenged for asking. `doctor` runs the same check on every run and warns
+when the session has three days or less left.
+
+**Why cookies rather than reading the page.** The obvious check is "does the
+page say Sign Out". On 2026-08-19 that was tested against every page capture
+the watcher has ever taken — nine of them — and **not one contains "sign
+out", "my account", or even "sign in"**. Ticketmaster puts the account control
+somewhere Playwright's flattened `inner_text` cannot reach. The check would
+have answered "not signed in" for a perfectly good session, and the buyer
+would have refused to act on the first real listing after you had signed in
+correctly.
+
+Cookie *presence* is not the answer either: the signed-out watcher profile
+already carries 33 ticketmaster.ie cookies, every one analytics or consent.
+What distinguishes a signed-in profile is **which** names are there — and the
+only moment anyone can know that for certain is the moment a human says "I
+have just signed in". So `login-buy` records the names it finds at that
+moment, and every later check compares against that recording:
+
+```text
+  Signed in. Buying session saved to ~/.ep2026-watcher/chrome-profile-buy
+  Recorded 2 account cookie(s) so the session can be
+  checked later without opening a browser:
+    · SESSION
+    · identity.session
+```
+
+A guess made once, by a human looking at the real thing, beats a guess
+hard-coded by someone who has never seen the page.
+
+**And securing no longer refuses on it.** Since the sign-in state cannot
+always be known, `secure()` notes what it thinks and tries anyway. A
+signed-out attempt bounces off a login wall, holds nothing, and reports
+honestly — the same outcome as refusing, without the chance of being wrong
+about it. The availability alert has already gone out either way.
 
 ### What happens when a listing appears
 
