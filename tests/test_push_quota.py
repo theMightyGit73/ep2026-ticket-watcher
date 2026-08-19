@@ -140,5 +140,93 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         config.STATE_FILE = was_state
 
+
+print("\nLosing the push channel must be reported — over the channel that works")
+# The gap David asked to close. On 2026-08-19 the allowance went at 16:55 and
+# nothing said anything: the first word he had was a FALSE "your Mac watcher
+# has gone quiet" from GitHub at 21:42, five hours later. Email worked
+# perfectly throughout and never mentioned it. So the outage now announces
+# itself by email, which is the one path still open by definition.
+import smtplib  # noqa: E402
+
+from ep_watcher import notify  # noqa: E402
+
+posted = []
+
+
+class CapturingSMTP:
+    def __init__(self, *a, **kw): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def login(self, *a): pass
+    def send_message(self, msg): posted.append(msg)
+
+
+def subjects():
+    return [m["Subject"] for m in posted]
+
+
+def body_of(msg):
+    return msg.get_payload()[0].get_payload(decode=True).decode("utf-8")
+
+
+smtplib.SMTP_SSL = CapturingSMTP
+notify.requests = type("_NoPush", (), {"post": staticmethod(lambda *a, **kw: None)})()
+config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
+config.GMAIL_APP_PASSWORD = "x"
+
+with tempfile.TemporaryDirectory() as tmp2:
+    was_state = config.STATE_FILE
+    config.STATE_FILE = Path(tmp2) / "state.json"
+    try:
+        posted.clear()
+        pushquota.note_exhausted()
+        check("running out of messages sends exactly one email", len(posted), 1)
+        body = body_of(posted[0])
+        check_true("it says push has stopped", "push" in subjects()[0].lower())
+        check_true("and that email still works — the thing he needs to know",
+                   "EMAIL" in body)
+        check_true("it warns the GitHub 'gone quiet' alerts will be false",
+                   "FALSE" in body)
+        check_true("says securing is unaffected", "Securing is unaffected" in body)
+        check_true("and names the permanent fix", "ntfy.sh" in body)
+
+        # It must not become the next thing that floods the inbox.
+        pushquota.note_exhausted()
+        pushquota.note_exhausted()
+        check("further refusals the same day stay quiet", len(posted), 1)
+
+        print("\nAnd coming back is reported too")
+        # Only a message that succeeds can prove a rate limit has lifted, so
+        # recovery is noticed at the send, not on a timer.
+        pushquota.note_sent()
+        check("the first successful send reports recovery", len(posted), 2)
+        check_true("saying push works again",
+                   "working again" in subjects()[1].lower())
+        check_true("and that the quiet-Mac emails in between were false",
+                   "false" in body_of(posted[1]).lower())
+        pushquota.note_sent()
+        check("and it does not repeat", len(posted), 2)
+
+        print("\nRecovery survives the day rolling over, because that is when it happens")
+        # The allowance resets at a day boundary, so recovery almost always
+        # falls on the following day. A flag cleared at midnight could never
+        # report it.
+        posted.clear()
+        pushquota.note_exhausted()
+        check("an outage is recorded", len(posted), 1)
+        quota_file = Path(tmp2) / "push-quota.json"
+        import json as _json
+        data = _json.loads(quota_file.read_text())
+        data["day"] = "2000-01-01"          # pretend a day has passed
+        quota_file.write_text(_json.dumps(data))
+        check("the new day starts with a clean count", pushquota.used(), 0)
+        pushquota.note_sent()
+        check("and recovery is still reported the next day", len(posted), 2)
+        check_true("naming when it started", "working again" in subjects()[-1].lower())
+    finally:
+        config.STATE_FILE = was_state
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

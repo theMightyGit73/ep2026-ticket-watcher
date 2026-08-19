@@ -70,6 +70,20 @@ def fake_post(*a, **kw):
 
 smtplib.SMTP_SSL = FakeSMTP
 notify.requests = type("_R", (), {"post": staticmethod(fake_post)})()
+# The liveness beacon has to be stubbed too, and this file was the only one in
+# the suite that missed it. engine.handle() publishes a heartbeat on every
+# call, so with a topic configured and the real `requests` still in place,
+# every run of these tests made live POSTs to ntfy.sh.
+#
+# That is not merely impolite. ntfy.sh allows an anonymous sender a fixed
+# number of messages a day per IP, and on 2026-08-19 the watcher ran out of
+# them — with repeated runs of this suite contributing to the total. The
+# suite then failed, because a real 429 came back and the watcher correctly
+# emailed to say push had stopped, which this file counted as an unexpected
+# alert. A test that spends the production budget can also break itself.
+from ep_watcher import liveness  # noqa: E402
+
+liveness.requests = type("_R", (), {"post": staticmethod(fake_post)})()
 config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
 config.GMAIL_APP_PASSWORD = "test-password"
 config.NTFY_TOPIC = "test-topic"
