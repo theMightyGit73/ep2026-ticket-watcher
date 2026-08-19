@@ -522,65 +522,6 @@ def secure_in_thread(event, listing, timeout_s: int = None) -> HoldResult:
     return box["result"]
 
 
-def secure_in_thread(event, listing, timeout_s: int = None) -> HoldResult:
-    """Open the buying browser and hold `listing`, from its own thread.
-
-    The thread is not an optimisation, it is the only way this works.
-    Playwright's sync API refuses to start a second instance in a thread that
-    already has an asyncio loop running, and the watcher's own browser has one
-    running for the whole life of the process. Every securing attempt on
-    2026-08-19 therefore died before it opened anything:
-
-        Error: It looks like you are using Playwright Sync API inside the
-        asyncio loop. Please use the Async API instead.
-
-    Three real listings were found that afternoon — two Early Entry passes at
-    €46.50 and a Weekend Camping at €366.39 — and all three produced a
-    perfect availability alert followed by that message. The watcher was never
-    going to hold anything, and no offline test could have caught it, because
-    the fault only exists when a second Playwright starts inside a live one.
-
-    A fresh thread has no event loop of its own, so sync_playwright() starts
-    cleanly there. The thread is given a hard deadline and is left to die on
-    its own if it overruns: a hung browser must not wedge the poll loop, which
-    is the one thing that must keep running whatever else breaks.
-    """
-    import threading
-
-    budget = timeout_s or (config.SECURE_TIMEOUT_SECONDS + 60)
-    box = {"result": HoldResult()}
-
-    def run():
-        session, hold = None, HoldResult()
-        try:
-            session = BuySession().start()
-            hold = secure(session, event, listing, hold)
-        except Exception as exc:
-            hold.reason = f"{type(exc).__name__}: {exc}"
-            hold.note(f"secure attempt failed to start: {hold.reason}")
-        finally:
-            # Left OPEN on success: closing the browser is what drops the
-            # basket, and the whole point is that David walks to this window
-            # and pays in it. Closed on failure, because a signed-in Chrome
-            # nobody is going to use is just an idle session to fingerprint.
-            if session is not None and not hold.secured:
-                try:
-                    session.close()
-                except Exception:
-                    pass
-            box["result"] = hold
-
-    worker = threading.Thread(target=run, name="ep-secure", daemon=True)
-    worker.start()
-    worker.join(timeout=budget)
-    if worker.is_alive():
-        box["result"].reason = (
-            f"the securing browser was still working after {budget}s and was "
-            f"abandoned — the poll loop must not wait on it"
-        )
-    return box["result"]
-
-
 def secure(session: BuySession, event, listing, result: HoldResult = None) -> HoldResult:
     """Put `listing` in a basket. Returns without paying, always.
 
