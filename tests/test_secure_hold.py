@@ -68,16 +68,38 @@ print("\nA fake page must not be able to trick it into paying")
 
 
 class FakeButton:
-    def __init__(self, label, visible=True):
-        self.label = label
+    """A button labelled the way real ones are — which is not only by text.
+
+    Rendered text is one of several places a control's name can live. This
+    models the others (aria-label, title, value) because Playwright matches
+    `get_by_role(name=...)` against the ACCESSIBLE name, which any of them can
+    supply. A button carrying one of those and no inner text is precisely the
+    case that used to walk straight through the payment guard: it matched the
+    allowlist on its accessible name and then presented an empty string to the
+    forbidden check.
+    """
+
+    def __init__(self, text="", visible=True, **attrs):
+        self.text = text
+        # aria_label= is nicer to type than **{"aria-label": ...}
+        self.attrs = {k.replace("_", "-"): v for k, v in attrs.items()}
         self.visible = visible
         self.clicked = False
+
+    @property
+    def accessible_name(self) -> str:
+        """Roughly what Playwright would compute and match `name=` against."""
+        return (self.attrs.get("aria-label") or self.text
+                or self.attrs.get("title") or self.attrs.get("value") or "")
 
     def is_visible(self, timeout=None):
         return self.visible
 
     def inner_text(self, timeout=None):
-        return self.label
+        return self.text
+
+    def get_attribute(self, name, timeout=None):
+        return self.attrs.get(name)
 
     def click(self, timeout=None):
         self.clicked = True
@@ -91,9 +113,11 @@ class FakePage:
         self.body = body
 
     def get_by_role(self, role, name=None, exact=False):
+        # Matched on the accessible name, not the rendered text — the whole
+        # point of the distinction being tested below.
         wanted = (name or "").lower()
         for b in self.buttons:
-            if wanted in b.label.lower():
+            if wanted in b.accessible_name.lower():
                 return _First(b)
         return _First(FakeButton("", visible=False))
 
@@ -122,6 +146,67 @@ ok = FakeButton("Continue")
 result = buyer.HoldResult()
 check("presses a safe button", buyer._press_one_safe_button(FakePage([ok]), result), True)
 check("and actually clicked it", ok.clicked, True)
+
+
+print("\nA label the guard cannot see is a label it must not trust")
+# The same trap, wearing the disguise that actually worked. Its accessible
+# name is "Continue to payment" — which is what the allowlist matched on — but
+# it renders no text of its own, so vetting inner_text() alone saw "" and
+# found nothing to object to. Every label source has to be checked, not just
+# the visible one.
+hidden = FakeButton("", aria_label="Continue to payment")
+result = buyer.HoldResult()
+pressed = buyer._press_one_safe_button(FakePage([hidden]), result)
+check("does not press an aria-labelled payment button", hidden.clicked, False)
+check("and reports that it pressed nothing", pressed, False)
+check_true("and names the label it refused",
+           any("continue to payment" in n for n in result.notes))
+
+# The same again through `title` and through an <input type=submit>'s `value`,
+# because "the label is not the inner text" has more than one spelling.
+for attribute, kwargs in (("title", {"title": "Pay now"}),
+                          ("value", {"value": "Place order"})):
+    trapped = FakeButton("", **kwargs)
+    result = buyer.HoldResult()
+    buyer._press_one_safe_button(FakePage([trapped]), result)
+    check(f"does not press a payment button labelled by {attribute}",
+          trapped.clicked, False)
+
+# A button with no readable label anywhere is refused rather than pressed.
+# The allowlist matched it on something, so something names it; if none of
+# that reaches us, the honest answer is to leave it alone.
+mystery = FakeButton("")
+result = buyer.HoldResult()
+
+
+class _NamelessPage(FakePage):
+    """A page whose button matches the allowlist but reads back as blank."""
+
+    def get_by_role(self, role, name=None, exact=False):
+        return _First(self.buttons[0]) if name == "continue" else _First(
+            FakeButton("", visible=False))
+
+
+pressed = buyer._press_one_safe_button(_NamelessPage([mystery]), result)
+check("does not press an unlabelled button", mystery.clicked, False)
+check("and reports that it pressed nothing", pressed, False)
+check_true("and says it could not read the label",
+           any("nothing readable" in n for n in result.notes))
+
+# And a safe button labelled ONLY by aria-label is still pressed — the fix
+# must not have turned the guard into a blanket refusal.
+aria_ok = FakeButton("", aria_label="Continue")
+result = buyer.HoldResult()
+check("presses a safe button labelled by aria-label",
+      buyer._press_one_safe_button(FakePage([aria_ok]), result), True)
+check("and actually clicked it", aria_ok.clicked, True)
+
+# The label collector itself: every source, best first, no blanks, no repeats.
+labelled = FakeButton("Continue", aria_label="Continue", title="Go on")
+check("collects each distinct label once, inner text first",
+      buyer.button_labels(labelled), ["continue", "go on"])
+check("a button with nothing readable yields nothing",
+      buyer.button_labels(FakeButton("")), [])
 
 
 print("\nBasket detection is positive-only")

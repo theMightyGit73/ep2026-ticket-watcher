@@ -9,8 +9,8 @@ is actually buyable. Three pages, not one:
   — the same weekend, paid in stages
 - [Early Entry Pass](https://www.ticketmaster.ie/electric-picnic-2026-early-entry-pass-co-laois-27-08-2026/event/18006314E36BAC7B)
   — campsite access from 2pm Thursday. An **add-on**, not a ticket: only
-  valid alongside a Weekend Ticket, so it is watched and alerted on but never
-  secured automatically
+  valid alongside a Weekend Ticket. Watched, alerted on, and secured — but it
+  gives way to a weekend ticket, which always wins the one buying browser
 
 They are separate products with separate inventory and separate resale panels.
 A ticket can appear on one and not the other, so both are watched and every
@@ -22,6 +22,60 @@ panel that the search reveals.
 
 ---
 
+## What is in here
+
+Long, because everything in it was measured rather than assumed. If you
+are here for one thing, it is most likely
+[Keeping it running](#keeping-it-running) or
+[When something looks wrong](#when-something-looks-wrong).
+
+- [Why the old one never worked](#why-the-old-one-never-worked)
+- [What actually works, and how it was established](#what-actually-works-and-how-it-was-established)
+- [What it has actually caught](#what-it-has-actually-caught)
+- [Two pages, watched separately](#two-pages-watched-separately)
+- [Securing a ticket automatically (opt-in, off by default)](#securing-a-ticket-automatically-opt-in-off-by-default)
+  - [How it runs](#how-it-runs)
+  - [What happens when a listing appears](#what-happens-when-a-listing-appears)
+  - [The weekend ticket always wins the browser](#the-weekend-ticket-always-wins-the-browser)
+  - [Nothing may restart the watcher while a ticket is held](#nothing-may-restart-the-watcher-while-a-ticket-is-held)
+  - [The hold probably cannot travel — but the email offers the link anyway](#the-hold-probably-cannot-travel--but-the-email-offers-the-link-anyway)
+  - [What is proven and what is not](#what-is-proven-and-what-is-not)
+- [Setup](#setup)
+  - [Run it continuously](#run-it-continuously)
+- [Running is not the same as seeing](#running-is-not-the-same-as-seeing)
+  - [When the page will not ask, ask the endpoint yourself](#when-the-page-will-not-ask-ask-the-endpoint-yourself)
+  - [Watching the response is not watching the panel](#watching-the-response-is-not-watching-the-panel)
+- [Keeping it running](#keeping-it-running)
+  - [The logs rotate themselves, by copying rather than renaming](#the-logs-rotate-themselves-by-copying-rather-than-renaming)
+  - [What is backed up, and what a backup cannot do](#what-is-backed-up-and-what-a-backup-cannot-do)
+  - [Three states that look identical from outside](#three-states-that-look-identical-from-outside)
+  - [When something looks wrong](#when-something-looks-wrong)
+- [Commands](#commands)
+- [Configuration](#configuration)
+  - [When the alert itself cannot get out](#when-the-alert-itself-cannot-get-out)
+  - [Any number of connections, not two](#any-number-of-connections-not-two)
+  - [Two faults that get named in their own words](#two-faults-that-get-named-in-their-own-words)
+  - [The browser identity is rebuilt before it is refused](#the-browser-identity-is-rebuilt-before-it-is-refused)
+  - [Why quantity matters](#why-quantity-matters)
+- [The emails](#the-emails)
+  - [The availability alert leads with a link, not a recipe](#the-availability-alert-leads-with-a-link-not-a-recipe)
+  - [Session summaries, at each change of settings](#session-summaries-at-each-change-of-settings)
+  - [Alternating home Wi-Fi and the phone hotspot](#alternating-home-wi-fi-and-the-phone-hotspot)
+  - [Ask only for the IPv4 address](#ask-only-for-the-ipv4-address)
+  - [Testing the emails](#testing-the-emails)
+- [The Inventory Status API (worth doing, not yet available)](#the-inventory-status-api-worth-doing-not-yet-available)
+- [Running it somewhere other than the MacBook](#running-it-somewhere-other-than-the-macbook)
+  - [Cloud providers: two hard requirements](#cloud-providers-two-hard-requirements)
+  - [Setting one up](#setting-one-up)
+  - [Keeping the MacBook going instead](#keeping-the-macbook-going-instead)
+  - [The free GitHub Actions fallback](#the-free-github-actions-fallback)
+  - [Run both at once — they fail differently](#run-both-at-once--they-fail-differently)
+- [Rate limiting — read this before speeding it up](#rate-limiting--read-this-before-speeding-it-up)
+- [It stops itself on 28 August](#it-stops-itself-on-28-august)
+- [Honest limits](#honest-limits)
+- [Superseded](#superseded)
+
+---
 ## Why the old one never worked
 
 The previous `ticket_checker.py` fetched the page with `cloudscraper` and
@@ -175,10 +229,16 @@ sale at €39.40 when it was added, with stock showing. A page that is selling
 does not need watching every three minutes, and the question here is "has it
 sold out and come back", not "did a resale listing flash past".
 
-It is also never secured automatically. Holding one under David's account,
-with a countdown running, would pull him to the laptop for something he cannot
-use until the ticket this project exists to find has been found. Per-page, via
-`Event.secure`. Its alert says so in its own words:
+It **is** secured, but it never wins a contest. The original reasoning was
+that holding one under David's account, with a countdown running, would pull
+him to the laptop for something he cannot use until the ticket this project
+exists to find has been found. He overruled that on 2026-08-19 — he wants it
+treated as importantly as the ticket — so it is secured whenever the buying
+browser is free, and dropped the moment a weekend listing wants it. That is
+`Event.secure_priority` rather than `Event.secure`; see
+[The weekend ticket always wins the browser](#the-weekend-ticket-always-wins-the-browser).
+
+Its alert still says what it is, in its own words:
 
 ```text
 This is the EARLY ENTRY PASS — an ADD-ON for campsite access from 2pm
@@ -329,12 +389,41 @@ about it. The availability alert has already gone out either way.
    listing.
 3. It presses only buttons on an allowlist — Continue, Next, Get tickets,
    Select — and refuses anything matching pay, buy, purchase, checkout,
-   confirm order, or place order.
+   confirm order, or place order. The refusal checks **every** place a label
+   can live, not just the visible text: see below.
 4. It gives up after 45 seconds.
 5. **If a basket appears**: a second, louder alert, and the window is left
    open and frontmost on the checkout page. You have roughly four minutes.
 6. **If not**: an email that says plainly there is *no* hold, and names the
    step that failed.
+
+#### A label is not always the text you can see
+
+The denylist in front of the allowlist exists for one specific scenario: a
+page labelling its payment control "Continue to payment", which the allowlist
+would otherwise wave through on the strength of "continue".
+
+Until 2026-08-20 that guard had a hole big enough to drive the scenario
+through. Playwright matches `get_by_role(name=...)` against the **accessible
+name**, and the check ran against `inner_text()` — which are different
+strings. A button labelled only by `aria-label`, or `title`, or an
+`<input type="submit">`'s `value`, has an accessible name and renders no text
+at all. It matched the allowlist on its accessible name, arrived at the
+forbidden check as the empty string, was forbidden by nothing, and got
+clicked. The one guard between this code and a completed purchase could be
+walked past by a button with no text in it.
+
+It now collects every label a control carries — inner text, `aria-label`,
+`title`, `value` — and refuses if **any** of them is a payment word. A button
+whose label cannot be read from any source is refused too, on the grounds that
+the allowlist matched it on *something*, and if we cannot see what, that is a
+reason to stop rather than to proceed. Skipping a real "Continue" costs a hold
+you could still make by hand; pressing an unread control is how software
+spends your money.
+
+There is one choke point for this in the whole module — `secure()` makes
+exactly three clicks: the search button, the listing row, and this guard —
+which is what makes the property checkable at all.
 
 ### The weekend ticket always wins the browser
 
@@ -637,6 +726,59 @@ watcher writes `last_check_at` on every poll, and a second LaunchAgent runs
 stays silent when things are fine, and won't "repair" a watcher that is merely
 starting up or has correctly stopped after the event.
 
+### The logs rotate themselves, by copying rather than renaming
+
+Nothing was ever going to stop `watcher.log` growing. launchd appends to
+`StandardOutPath` for the whole life of the job, macOS's `newsyslog` does not
+manage files under `~/`, and the watcher only prints. It reached 2 MB in the
+first eight days. That log is the first thing you open when something has gone
+quiet, so an unbounded one is a diagnostic problem well before it is a disk
+problem.
+
+The watchdog now rotates anything in the log directory over 5 MB
+(`EP_LOG_MAX_BYTES`), keeping one previous generation as `.1`.
+
+It **copies and truncates**; it never renames. This matters more than it
+sounds. launchd holds an open descriptor on the log's inode, so `mv
+watcher.log watcher.log.1` takes the live log away with it: every line the
+watcher prints afterwards lands in a file nobody is tailing, while
+`watcher.log` sits at zero bytes looking exactly like a watcher that has died.
+Truncating in place keeps the inode, so the open descriptor carries on writing
+and only the history moves. [tests/test_log_rotation.py](tests/test_log_rotation.py)
+holds a descriptor open across a rotation and checks the next line lands in
+the file you are reading.
+
+### What is backed up, and what a backup cannot do
+
+Four things the watcher needs are deliberately outside git, and were therefore
+in exactly one place each:
+
+| | Losing it costs |
+| --- | --- |
+| `~/.ep2026-watcher/env` | The Gmail app password. The watcher refuses to start without it |
+| `chrome-profile-buy/` | The signed-in session — a human at a keyboard doing `login-buy` |
+| `state.json` | What has been alerted on, block history per connection, any live hold |
+| `buy-session.json` | The sign-in fingerprint that makes "still signed in?" exact rather than a guess |
+
+`python -m ep_watcher backup` copies all four into a timestamped, `chmod 700`
+snapshot under `~/.ep2026-watcher-backups/` — deliberately *outside* the
+directory it protects, because the likeliest way to lose the originals is a
+command aimed at that directory. The watch loop takes one a day by itself, in
+the sleep window between polls, so it happens whether or not anyone remembers.
+Seven snapshots are kept (`EP_BACKUP_KEEP`).
+
+Only the session-carrying parts of the Chrome profile are copied — `Cookies`,
+`Local State`, `Local Storage`, `Preferences`. The profile on disk is 161 MB
+and essentially all of that is `Cache` and `Code Cache`, which Chrome rebuilds
+on demand; the snapshot is about 130 KB.
+
+**The limitation, stated plainly, because a backup you trust wrongly is worse
+than none:** on macOS Chrome keeps the key that decrypts its cookies in the
+login Keychain, not in the profile. These snapshots restore on *this* Mac,
+under *this* user, and nowhere else. That covers a bad profile reset, a
+mistaken `rm`, or a corrupted state file — which is what it is for. It is not
+a way to move the buying session to another machine.
+
 ### Three states that look identical from outside
 
 A still `last_check_at` has three quite different causes, and telling them
@@ -729,6 +871,7 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 | `networks` | List every connection the watcher has seen, with blocks against each |
 | `status` | Print config and health, including the peak request rate |
 | `budget` | What this cadence actually spends, hour by hour, against the rate that drew a block. Non-zero exit if over |
+| `backup` | Copy the four things that live outside git and cannot be recreated |
 | `resolve-id` | Look up the Discovery event id for the API source |
 
 ---
@@ -740,6 +883,17 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 > did. If the email and the push both fail — which is exactly what happens when
 > the fault is your network — the watcher keeps trying on the next poll instead
 > of going quiet for six hours. See "When the alert itself cannot get out".
+
+> **Armed but signed out is reported hourly, not just at startup.** The
+> startup banner says whether the buying profile is signed in, which is no
+> help on day nine of a fortnight — cookies lapse, and the banner that would
+> have mentioned it scrolled off the log a week earlier. The hourly report now
+> asks the same question of the same evidence, and takes over the subject line
+> when the answer is no, because a securing feature that cannot work otherwise
+> announces itself at the single worst moment: with a real listing on screen
+> and ninety seconds to act. It speaks only on a **definite** signed-out
+> reading; "cannot tell" stays quiet, because a warning in every email is one
+> that stops being read.
 
 Environment variables, all optional:
 

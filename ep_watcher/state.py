@@ -114,6 +114,10 @@ def _defaults():
         # the cadence actually in force — which changes overnight — instead
         # of a fixed threshold that only ever matched the daytime one.
         "next_poll_due": None,            # ISO8601
+        # When the runtime directory was last copied. Daily rather than on
+        # every poll: the things worth saving change slowly, and the browser
+        # session being copied is several megabytes.
+        "last_backup_at": None,           # ISO8601
     }
 
 
@@ -334,11 +338,19 @@ def due_events(state: dict, events) -> list:
     than twice its longest gap overdue is searched regardless, so a clock
     jumping forward or a corrupted timestamp cannot park a page for ever.
     """
-    due = [e for e in events if event_due(state, e)]
+    # A page past its own stop date is not due, and cannot be rescued by the
+    # stall guard either — "overdue" is meaningless for something nobody
+    # should be asking about any more. Filtered first so both paths below
+    # inherit it. See Event.stop_after: the Early Entry Pass is worthless from
+    # the 28th while the weekend tickets still matter, and searching for it
+    # spends real requests against a rate limit that has already blocked this
+    # connection nineteen times.
+    live = [e for e in events if not e.expired()]
+    due = [e for e in live if event_due(state, e)]
     if due:
         return due
     stalled = [
-        e for e in events
+        e for e in live
         if (minutes_since_event_poll(state, e.slug) or 0.0) * 60.0
         > max(e.poll_max_seconds, e.poll_seconds) * 2
     ]
@@ -815,6 +827,17 @@ def note_next_poll(state: dict, seconds: float) -> None:
 def note_profile_reset(state: dict) -> None:
     """Record that the browser identity was rebuilt just now."""
     state["profile_reset_at"] = utc_now().isoformat()
+
+
+def backup_is_due(state: dict, every_hours: float = 24.0) -> bool:
+    """Has it been long enough since the last snapshot? True on the first ever."""
+    hours = _hours_since(state.get("last_backup_at"))
+    return hours is None or hours >= every_hours
+
+
+def note_backup(state: dict) -> None:
+    """Record that a snapshot was taken just now."""
+    state["last_backup_at"] = utc_now().isoformat()
 
 
 def profile_age_minutes(state: dict) -> Optional[float]:

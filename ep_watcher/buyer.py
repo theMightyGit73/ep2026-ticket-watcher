@@ -45,7 +45,6 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from . import config
-from .state import stamp
 
 # ── Knowing whether the buying profile is signed in ──────────────────────────
 #
@@ -676,7 +675,7 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
-    from .sources.browser import BASKET_MARKERS, SEARCH_BUTTONS, _is_listing_row
+    from .sources.browser import BASKET_MARKERS, SEARCH_BUTTONS
 
     result = result or HoldResult()
     deadline = time.monotonic() + config.SECURE_TIMEOUT_SECONDS
@@ -967,6 +966,51 @@ LISTING_GONE_MARKERS = (
 )
 
 
+#: Where a button's label can hide. Read in this order, most human-meaningful
+#: first, and every one of them is vetted before anything is pressed.
+_LABEL_ATTRIBUTES = ("aria-label", "title", "value")
+
+
+def button_labels(button) -> list:
+    """Every string that might be this button's label, lowercased, no blanks.
+
+    This exists because Playwright matches `get_by_role(name=...)` against the
+    ACCESSIBLE name, and the accessible name is not always the rendered text.
+    A control labelled only by `aria-label` — or by `title`, or by the `value`
+    of an `<input type="submit">` — has an accessible name and no inner text
+    at all.
+
+    The guard below used to vet `inner_text()` alone. Such a button therefore
+    reached is_forbidden() as the empty string, which is forbidden by nothing,
+    and would have been clicked. That is not a hypothetical: it is precisely
+    the hole FORBIDDEN_BUTTONS was written to close. A control whose
+    accessible name is "Continue to payment" matches the allowlist entry
+    "continue", renders no text of its own, and sailed through the one check
+    standing between this module and David's card.
+
+    So collect every candidate and check them all. Each source is read
+    separately, because one of them raising must not cost us the others — an
+    aria-label we can read is worth more than an inner_text we cannot.
+    """
+    labels = []
+
+    def add(value) -> None:
+        text = (value or "").strip().lower()
+        if text and text not in labels:
+            labels.append(text)
+
+    try:
+        add(button.inner_text(timeout=1_500))
+    except Exception:
+        pass
+    for attribute in _LABEL_ATTRIBUTES:
+        try:
+            add(button.get_attribute(attribute, timeout=1_500))
+        except Exception:
+            pass
+    return labels
+
+
 def _press_one_safe_button(page, result: HoldResult) -> bool:
     """Press the first permitted button visible. True if one was pressed."""
     from playwright.sync_api import Error as PlaywrightError
@@ -977,12 +1021,29 @@ def _press_one_safe_button(page, result: HoldResult) -> bool:
             button = page.get_by_role("button", name=name, exact=False).first
             if not button.is_visible(timeout=1_500):
                 continue
-            label = (button.inner_text(timeout=1_500) or "").strip().lower()
-            if is_forbidden(label):
-                result.note(f"refusing to press {label!r} — that is a payment control")
+            labels = button_labels(button)
+            # Nothing readable at all, from any source. Refuse.
+            #
+            # An unidentifiable button is not a safe one, and the two mistakes
+            # do not cost the same: skipping a real "Continue" loses a hold
+            # David could still have made by hand, while pressing a control
+            # nobody could read is how this module spends his money. The
+            # allowlist matched the accessible name, so SOMETHING labels this
+            # button — if we cannot see what, that is a reason to stop.
+            if not labels:
+                result.note(
+                    f"refusing to press an unlabelled button matching {name!r} "
+                    f"— nothing readable to check it against"
+                )
+                continue
+            forbidden = next((l for l in labels if is_forbidden(l)), None)
+            if forbidden is not None:
+                result.note(
+                    f"refusing to press {forbidden!r} — that is a payment control"
+                )
                 continue
             button.click(timeout=5_000)
-            result.note(f"pressed {label!r}")
+            result.note(f"pressed {labels[0]!r}")
             return True
         except (PlaywrightTimeout, PlaywrightError):
             continue

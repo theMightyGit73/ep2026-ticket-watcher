@@ -321,9 +321,6 @@ def _print_reading(reading) -> int:
     for listing in reading.listings:
         print(f"  → {listing.kind}: {listing.describe()}")
     print("─" * 68)
-
-    if reading.needs_login:
-        print("\n  Session needs attention:  python -m ep_watcher login\n")
     return 1 if reading.failed else 0
 
 
@@ -549,6 +546,10 @@ def cmd_watch(args) -> int:
             # the first attempt, so the identity — not the address — is what
             # ages out. Doing it here spends the sleep window, not a poll.
             _refresh_profile_if_stale(session)
+            # Same reasoning, same window: the daily copy of the env file, the
+            # state and the signed-in session costs a second or two and must
+            # never come out of the time budget for a search.
+            _maybe_backup()
             time.sleep(sleeping)
     except KeyboardInterrupt:
         print(f"\n[{stamp()}] Stopped.")
@@ -738,6 +739,61 @@ def _watch_apis_only(interval: int) -> int:
     except KeyboardInterrupt:
         print(f"\n[{stamp()}] Stopped.")
         return 0
+
+
+def cmd_backup(_args) -> int:
+    """Copy the files that live outside the repo and cannot be recreated."""
+    from . import backup as backup_mod
+
+    _banner("Backing up the runtime directory")
+    result = backup_mod.run()
+    print(backup_mod.describe(result))
+    if result["error"]:
+        return 1
+    # Stamp the same clock the watch loop reads. A snapshot is a snapshot
+    # whoever asked for it, and without this a backup taken by hand is
+    # followed by an automatic one minutes later — which is what happened the
+    # first time this ran.
+    st = state_mod.load()
+    state_mod.note_backup(st)
+    state_mod.save(st)
+    print(
+        "\n  These restore on THIS Mac, under this user, only: macOS keeps the\n"
+        "  key that decrypts Chrome's cookies in the login Keychain rather than\n"
+        "  in the profile. That covers a bad profile reset or a mistaken rm,\n"
+        "  which is what this is for — it is not a way to move the session to\n"
+        "  another machine.\n"
+    )
+    return 0
+
+
+def _maybe_backup() -> None:
+    """Take a daily snapshot from inside the watch loop.
+
+    Here rather than in a separate scheduled job because the watcher is the
+    thing that is definitely running: another LaunchAgent is another thing to
+    install, another thing to notice has been unloaded, and another thing that
+    is silently not happening. This one cannot be forgotten while the watcher
+    itself is alive.
+
+    Every failure is swallowed. Nothing in a backup is worth costing a poll.
+    """
+    try:
+        from . import backup as backup_mod
+
+        st = state_mod.load()
+        if not state_mod.backup_is_due(st):
+            return
+        result = backup_mod.run()
+        print(backup_mod.describe(result))
+        # Stamped even on failure, so a permanently broken backup cannot turn
+        # into a retry on every poll — it says so once a day instead, which is
+        # loud enough to notice and quiet enough to ignore while a ticket is
+        # the priority.
+        state_mod.note_backup(st)
+        state_mod.save(st)
+    except Exception as exc:
+        print(f"[{stamp()}] backup skipped ({type(exc).__name__}: {exc})")
 
 
 def cmd_test(_args) -> int:
@@ -1423,6 +1479,7 @@ COMMANDS = {
     "networks": cmd_networks,
     "status": cmd_status,
     "budget": cmd_budget,
+    "backup": cmd_backup,
 }
 
 

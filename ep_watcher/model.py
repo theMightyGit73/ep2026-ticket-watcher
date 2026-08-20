@@ -97,8 +97,6 @@ class Reading:
     #: The other half of that pair — who did answer. Kept so an alert can say
     #: which sources the reading actually rests on.
     answering_sources: List[str] = field(default_factory=list)
-    #: Set when the session needs a human: logged out, or challenged.
-    needs_login: bool = False
     #: Set on an HTTP 403 — this client is rate-limited rather than merely
     #: challenged. The watch loop backs off hard on this rather than carrying
     #: on at its normal cadence, which would deepen the block.

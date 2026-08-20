@@ -1,6 +1,6 @@
 """Orchestration: run the sources, merge their answers, decide who to wake up."""
 
-from typing import List, Optional
+from typing import List
 
 from . import config, liveness, network, notify, state as state_mod
 from .model import GOOD_STATUSES, Reading, better_status
@@ -27,7 +27,6 @@ def merge(readings: List[Reading]) -> Reading:
 
     if not real:
         merged.failed = True
-        merged.needs_login = any(r.needs_login for r in readings)
         for r in readings:
             merged.notes.extend(f"[{r.source}] {n}" for n in r.notes)
         return merged
@@ -38,7 +37,6 @@ def merge(readings: List[Reading]) -> Reading:
         merged.listings.extend(r.listings)
     for r in readings:
         merged.notes.extend(f"[{r.source}] {n}" for n in r.notes)
-    merged.needs_login = any(r.needs_login for r in real)
     return merged
 
 
@@ -351,8 +349,6 @@ def failure_headline(reading: Reading) -> str:
         return "the Ticketmaster event page could not be found"
     if reading.blocked:
         return "Ticketmaster was rate-limiting this client (HTTP 403)"
-    if reading.needs_login:
-        return "the Ticketmaster session needed a human"
     return "Ticketmaster could not be read"
 
 
@@ -389,8 +385,6 @@ def watchdog_reason(reading: Reading) -> str:
             "usually clears within a few hours. If it persists for a day, lower "
             "the polling rate with EP_POLL_SECONDS."
         )
-    elif reading.needs_login:
-        cause = "The Ticketmaster session needs a human — it is logged out or challenged."
     elif reading.failed:
         cause = "Could not get a usable reading from Ticketmaster."
     else:
@@ -555,6 +549,41 @@ def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
         )
 
 
+def securing_warning() -> str:
+    """Is securing armed but unable to work? One sentence, or "" if it is fine.
+
+    Only ever speaks up on a DEFINITE signed-out reading. session_evidence()
+    answers True, False or None, and the None is load-bearing: "cannot tell"
+    and "signed out" are different facts, and this project has already been
+    bitten by treating the first as the second. A cry-wolf line in every
+    hourly email would be read once and skimmed thereafter, which would cost
+    exactly the warning this exists to give.
+
+    Read from the cookie database on disk, so it costs no request, no browser
+    and no network — and it works while the buying browser is open, which
+    matters because the one time it must not throw an error is while a ticket
+    is being held in that very profile.
+
+    Checked hourly rather than only at startup because a run lasts a
+    fortnight. The account cookies can lapse at any point in it, and the
+    startup banner cannot say anything about an hour that began nine days
+    later.
+    """
+    if not config.SECURE_ON_FIND:
+        return ""
+    from . import buyer
+
+    evidence = buyer.session_evidence(config.BUY_PROFILE_DIR)
+    if evidence["signed_in"] is not False:
+        return ""
+    return (
+        "SECURING IS ARMED BUT THE BUYING PROFILE IS SIGNED OUT\n"
+        f"({evidence['reason']}).\n"
+        "A listing found right now would be alerted on, but not held. Fix it "
+        "with:\n    python -m ep_watcher login-buy"
+    )
+
+
 def _maybe_heartbeat(reading: Reading, st: dict) -> None:
     if not state_mod.should_send_heartbeat(st):
         return
@@ -588,6 +617,9 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
         # trip the clock. Which page a status belongs to is the whole question
         # when two are being watched.
         events=state_mod.event_summaries(st),
+        # Armed but signed out is a fault that otherwise stays silent until a
+        # real listing is on screen. See securing_warning().
+        securing=securing_warning(),
     )
     if not delivered:
         # The hour is only "reported" once the mail lands. Leaving the clock

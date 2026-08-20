@@ -1,3 +1,16 @@
+# NOTIFY-ONLY BY DESIGN — this image does not secure tickets.
+#
+# Nothing in deploy/ knows about EP_SECURE_ON_FIND, BUY_PROFILE_DIR or
+# login-buy, and that is not an oversight waiting to be corrected. Securing
+# needs a signed-in Chrome profile created by a human at a keyboard, left
+# open afterwards so David can walk to it and pay; none of that survives a
+# container, and a datacentre IP is walled by Ticketmaster in any case.
+#
+# The daily backup and the log rotation are likewise Mac-side: both are
+# driven by launchd agents that do not exist here.
+#
+# So this is the watching half only. The MacBook is the real deployment.
+#
 # Full-capability watcher (real Chrome) on a Linux host.
 #
 # The key detail: this runs Chrome *headed*, under Xvfb — a virtual display —
