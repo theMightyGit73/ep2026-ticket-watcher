@@ -79,6 +79,38 @@ KNOWN_ANONYMOUS_COOKIES = {
     "eupubconsent-v2", "_gcl_au", "_fbp", "_uetvid", "_uetsid",
 }
 
+#: Recorded at sign-in, but worthless as evidence of one.
+#:
+#: These appear on a signed-in profile and not on the signed-out baseline, so
+#: record_signed_in_fingerprint collects them as "account cookies" — and then
+#: their absence is read as having been signed out. They are nothing of the
+#: kind:
+#:
+#:   * KP_UIDz / KP_UIDz-ssn are Kasada's bot-detection tokens. They are
+#:     reissued constantly and are cleared outright whenever the browser
+#:     identity is refreshed, which this watcher does every 90 minutes on
+#:     purpose.
+#:   * ma.paramsToken and SOTC are short operational cookies the site reissues
+#:     on the next page load. SOTC was observed carrying a two-hour expiry.
+#:   * ma.LANGUAGE is a language preference.
+#:
+#: Measured on 2026-08-20, when doctor reported the buying profile signed out
+#: while nine of its eleven recorded cookies were present and healthy —
+#: including id-token with a month left. The two missing ones were the Kasada
+#: pair. `login-auto` then went to sign in and found Ticketmaster serving an
+#: ACCOUNT page rather than a sign-in form, which settled it: the session was
+#: fine and the check was wrong.
+#:
+#: This is the second time this exact lesson has been learned. Commit 4938c25
+#: stopped the session being judged by the EXPIRY of a cookie designed to
+#: churn; it left the PRESENCE test judging by the same cookies. Both halves
+#: are needed, and the cost of getting it wrong is not a failed hold — securing
+#: attempts anyway — but a warning that cries wolf in every hourly email, which
+#: is how a real signed-out warning ends up skimmed past.
+CHURNING_COOKIES = frozenset({
+    "KP_UIDz", "KP_UIDz-ssn", "ma.paramsToken", "SOTC", "ma.LANGUAGE",
+})
+
 #: Prefixes of cookies that are analytics whatever else is true of them.
 #:
 #: The signed-out baseline catches most of these, but not all: Google
@@ -189,8 +221,13 @@ def record_signed_in_fingerprint(profile_dir=None) -> dict:
     # Both baselines: the hardcoded list and the live signed-out profile. The
     # second is what stops fifteen ordinary anonymous cookies being recorded
     # as the account's, which would make every later check meaningless.
+    # CHURNING_COOKIES are excluded here as well as at comparison time. Older
+    # records already contain them — the one written on 2026-08-19 has five —
+    # so the comparison has to filter regardless, but there is no reason to
+    # keep writing them into new ones. See CHURNING_COOKIES for what they are
+    # and why their absence means nothing.
     auth = sorted(n for n in (set(cookies) - KNOWN_ANONYMOUS_COOKIES
-                              - anonymous_baseline())
+                              - anonymous_baseline() - CHURNING_COOKIES)
                   if not _is_analytics(n))
 
     # Split by whether they survive the browser closing.
@@ -278,7 +315,27 @@ def session_evidence(profile_dir=None) -> dict:
                           "to watch — re-run the sign-in")
         return out
 
-    missing = sorted(expected - set(cookies))
+    # Judge on the cookies that MEAN something, not on the ones that churn.
+    #
+    # See CHURNING_COOKIES. The recorded fingerprint contains bot-detection
+    # tokens and preferences alongside the account, because at sign-in they
+    # were simply "present here and not on a signed-out profile". Requiring
+    # all of them to survive means a browser-identity refresh — which this
+    # watcher performs every 90 minutes by design — reports the account as
+    # signed out.
+    stable = expected - CHURNING_COOKIES
+    if not stable:
+        # Everything recorded was a churner. Nothing here can answer the
+        # question, and None is the honest verdict: "cannot tell" and
+        # "signed out" call for different words and different actions.
+        out.update(
+            reason="the sign-in fingerprint holds only short-lived cookies, "
+                   "which cannot say whether the account is still signed in — "
+                   "re-run the sign-in to record a better one",
+        )
+        return out
+
+    missing = sorted(stable - set(cookies))
     if missing:
         out.update(
             signed_in=False,
@@ -320,13 +377,25 @@ def session_evidence(profile_dir=None) -> dict:
     # account cookies genuinely go, the `missing` check above catches it, and
     # that is the check that carries meaning.
     now = datetime.now(timezone.utc)
-    out.update(signed_in=True,
-               reason="the account cookies recorded at sign-in are all present")
+    churned = sorted((expected & CHURNING_COOKIES) - set(cookies))
+    if churned:
+        # Worth saying, and worth saying as normal. Somebody comparing this
+        # output against the recorded fingerprint by hand will notice the
+        # difference and should not have to wonder whether it matters.
+        out.update(
+            signed_in=True,
+            reason=f"the account cookies are present; "
+                   f"{', '.join(churned[:3])} rotated away, which is what "
+                   f"those do and says nothing about the account",
+        )
+    else:
+        out.update(signed_in=True,
+                   reason="the account cookies recorded at sign-in are all present")
 
     # The next real change is the soonest expiry still in the FUTURE. A date
     # already passed on a cookie that is nonetheless present describes one
     # mid-reissue, not a session ending.
-    future = [cookies[n] for n in expected if cookies.get(n) and cookies[n] > now]
+    future = [cookies[n] for n in stable if cookies.get(n) and cookies[n] > now]
     soonest = min(future) if future else None
     if soonest:
         # Four decimals, not one: rounding days to 1dp collapsed everything

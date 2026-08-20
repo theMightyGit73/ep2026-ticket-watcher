@@ -349,9 +349,15 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     # Last, and only for the real thing. A ringing phone is the one channel
     # that works when the others do not — asleep, in a pocket, in a cinema —
     # and it is the only one that costs money and wakes people, so it is fired
-    # for a ticket and for nothing else. Never for a heartbeat, a watchdog or
-    # a test.
-    _safe("call", ring_phone, f"{_headline(pick)} on {name}")
+    # for a ticket and for nothing else. Never for a heartbeat or a watchdog.
+    #
+    # And never for `python -m ep_watcher test`, which sends five sample
+    # alerts including this one. Being rung by a test is how somebody learns
+    # that a call from this number can be ignored — the precise habit that
+    # would cost the ticket. `python -m ep_watcher ring` is the command for
+    # proving the phone works, and it rings for real.
+    if not TEST_MODE:
+        _safe("call", ring_phone, f"{_headline(pick)} on {name}")
 
 
 #: Whether the phone rang for this find already, keyed by nothing — a single

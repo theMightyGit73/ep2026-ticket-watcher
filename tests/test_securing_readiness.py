@@ -228,5 +228,95 @@ with tempfile.TemporaryDirectory() as tmp:
     check_true("a profile that was never created does warn",
                "SIGNED OUT" in warning(True, tmp / "never-made", session_file))
 
+print("\nA rotating bot-detection token is not the account leaving")
+
+# The bug this pins, found on 2026-08-20. doctor and check-buy both reported
+# the buying profile SIGNED OUT while nine of its eleven recorded cookies were
+# present and healthy — id-token among them, with a month to run. The two that
+# had gone were KP_UIDz and KP_UIDz-ssn, Kasada's bot-detection tokens, which
+# are reissued constantly and are cleared outright every time the browser
+# identity is refreshed. The watcher does that every 90 minutes on purpose.
+#
+# It was settled independently: login-auto went to sign in and found
+# Ticketmaster serving an ACCOUNT page rather than a sign-in form.
+#
+# Nothing was losing tickets — securing attempts whatever this says — but the
+# hourly email carried "SECURING IS ARMED BUT THE BUYING PROFILE IS SIGNED
+# OUT" every hour, and a warning that cries wolf is how a real one gets
+# skimmed past.
+
+
+def evidence(profile_cookies, recorded):
+    """session_evidence() against a throwaway profile and fingerprint."""
+    root = Path(tempfile.mkdtemp())
+    make_profile(root / "profile", profile_cookies)
+    session_file = root / "buy-session.json"
+    session_file.write_text(json.dumps({
+        "recorded_at": "2026-08-19T17:21:39+00:00",
+        "auth_cookies": recorded,
+        "persistent_cookies": recorded,
+    }))
+    was_session, was_watcher = buyer.SESSION_FILE, config.PROFILE_DIR
+    try:
+        buyer.SESSION_FILE = session_file
+        config.PROFILE_DIR = root / "no-such-watcher-profile"
+        return buyer.session_evidence(root / "profile")
+    finally:
+        buyer.SESSION_FILE, config.PROFILE_DIR = was_session, was_watcher
+
+
+# Exactly the live fingerprint of 2026-08-19, and exactly the live profile of
+# 2026-08-20 — the Kasada pair and ma.paramsToken gone, everything else there.
+RECORDED = ["KP_UIDz", "KP_UIDz-ssn", "SORTC", "SOTC", "id-token", "ma.BID",
+            "ma.GSID", "ma.LANGUAGE", "ma.did", "ma.paramsToken", "ndcd"]
+LIVE = {n: FAR for n in RECORDED
+        if n not in ("KP_UIDz", "KP_UIDz-ssn", "ma.paramsToken")}
+
+out = evidence(LIVE, RECORDED)
+check("a rotated Kasada token does not mean signed out", out["signed_in"], True)
+check_true("and the reason says the tokens rotated",
+           "rotated away" in out["reason"])
+check_true("naming them, so a hand comparison is not a mystery",
+           "KP_UIDz" in out["reason"])
+
+# The verdict that must still work: a real sign-out takes the account cookies.
+gone = {n: FAR for n in ("KP_UIDz", "SOTC", "ma.LANGUAGE")}
+out = evidence(gone, RECORDED)
+check("losing the real account cookies IS signed out", out["signed_in"], False)
+check_true("and it names one of them rather than a churner",
+           any(n in out["reason"] for n in ("id-token", "ma.did", "ndcd",
+                                            "ma.BID", "ma.GSID", "SORTC")))
+
+# Every churner missing but the account intact is still signed in.
+account_only = {n: FAR for n in RECORDED if n not in buyer.CHURNING_COOKIES}
+check("all churners gone, account intact, still signed in",
+      evidence(account_only, RECORDED)["signed_in"], True)
+
+# A fingerprint made only of churners cannot answer, and must say so rather
+# than guessing in either direction.
+out = evidence({"id-token": FAR}, ["KP_UIDz", "SOTC", "ma.LANGUAGE"])
+check("a fingerprint of only churners cannot tell", out["signed_in"], None)
+check_true("and says the fingerprint is the problem",
+           "short-lived" in out["reason"])
+
+# New fingerprints must not record churners at all.
+check_true("churners are excluded when recording",
+           not (buyer.CHURNING_COOKIES & set(
+               buyer.record_signed_in_fingerprint(
+                   make_profile(Path(tempfile.mkdtemp()) / "p",
+                                {n: FAR for n in RECORDED})
+               )["auth_cookies"])))
+
+# The expiry reported must come from a real account cookie, not a churner —
+# SOTC was observed carrying two hours, which as a headline reads like a
+# session about to die.
+soon = datetime.now(timezone.utc) + timedelta(hours=2)
+mixed = {n: FAR for n in RECORDED if n not in buyer.CHURNING_COOKIES}
+mixed["SOTC"] = soon
+out = evidence(mixed, RECORDED)
+check_true("the reported lapse ignores the two-hour churner",
+           out["days_left"] is None or out["days_left"] > 1.0)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

@@ -1211,7 +1211,13 @@ def cmd_doctor(_args) -> int:
     # 2026-08-16: gaps reached 36 minutes against a 30-minute threshold.
     interval, night = config.poll_interval_now()
     stale_after = max(interval * 2, 900) / 3600.0
-    cadence = f"{interval // 60} min cadence{' overnight' if night else ''}"
+    # Seconds when it is under a minute. Integer-dividing by 60 reported the
+    # 45-second loop tick as "0 min cadence", which reads like a fault in the
+    # one line that is supposed to say the watcher is healthy. It became
+    # reachable on 2026-08-20, when the tick dropped below a minute so that a
+    # page on a 3-minute floor could actually be polled on time.
+    cadence = (f"{interval // 60} min" if interval >= 60 else f"{interval}s")
+    cadence += f" cadence{' overnight' if night else ''}"
 
     age = state_mod.hours_since_check(st)
     resting = state_mod.backoff_remaining(st)

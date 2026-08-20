@@ -56,6 +56,39 @@ LISTING = Listing("Verified Resale — Section STNDN1", "€366.39", "resale",
                   listing_id="lmnlh641", section="STNDN1")
 EVENT = config.EVENTS[0]
 
+# Nothing in this file may send anything. available() is exercised below to
+# prove the phone stays silent in test mode, and it would otherwise reach for
+# SMTP and ntfy on the way past.
+import smtplib  # noqa: E402
+
+
+class _NoSMTP:
+    def __init__(self, *a, **kw): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def login(self, *a): pass
+    def send_message(self, msg): pass
+
+
+smtplib.SMTP_SSL = _NoSMTP
+notify.requests = type("_NoPush", (), {"post": staticmethod(lambda *a, **kw: None)})()
+config.GMAIL_ADDRESS = "davidcoyne73@gmail.com"
+config.GMAIL_APP_PASSWORD = "test-password"
+config.NTFY_TOPIC = None
+
+
+def _sample_reading():
+    from ep_watcher.model import AVAILABLE, UNAVAILABLE, Reading
+
+    r = Reading(source="browser")
+    r.event_slug = EVENT.slug
+    r.event_name = EVENT.name
+    r.event_url = EVENT.url
+    r.primary = UNAVAILABLE
+    r.resale = AVAILABLE
+    r.listings.append(LISTING)
+    return r
+
 
 class FakePage:
     def __init__(self, url="https://www.ticketmaster.ie/dead-end"):
@@ -184,6 +217,24 @@ for missing in ("TWILIO_SID", "TWILIO_TOKEN", "TWILIO_FROM", "ALERT_PHONE"):
     finally:
         for n, v in was.items():
             setattr(config, n, v)
+
+print("\nA test run must never ring the phone")
+
+# `python -m ep_watcher test` sends five sample alerts, one of which is the
+# availability alert the call hangs off. Being rung by a test is how somebody
+# learns that a call from this number can be ignored, which is the precise
+# habit that would cost the ticket. `ring` is the command for proving the
+# phone works, and it rings for real.
+rang = []
+_real_ring, _real_mode = notify.ring_phone, notify.TEST_MODE
+try:
+    notify.ring_phone = lambda what: rang.append(what) or True
+    notify.TEST_MODE = True
+    notify.available(_sample_reading(), "TEST", [])
+    check("no call is placed in test mode", rang, [])
+finally:
+    notify.ring_phone, notify.TEST_MODE = _real_ring, _real_mode
+
 
 print("\nA number that cannot be dialled is caught before it matters")
 

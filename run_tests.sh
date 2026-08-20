@@ -32,6 +32,27 @@ export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::Warning}"
 # but "most" is not a guarantee worth betting the running watcher on.
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+
+# Start from the configuration the code ships with, not from whatever this
+# shell happens to carry.
+#
+# The path sandboxing below stops a test WRITING somewhere real. It does
+# nothing about the settings that change what the code DOES, and those live in
+# the same env file — so a suite run from a shell that has sourced
+# ~/.ep2026-watcher/env picks up EP_SECURE_ON_FIND, TM_DISCOVERY_KEY,
+# EP_EARLY_ENTRY and the rest, and tests that assert the shipped defaults fail.
+#
+# That happened on 2026-08-20 and cost real time: two files failed, passed
+# when re-run alone in a clean shell, and the difference was invisible in
+# either output. A test suite whose result depends on the shell it was started
+# from cannot be used to decide whether a change is safe.
+#
+# Unset rather than pinned, because "unset" IS the shipped configuration —
+# every one of these is read with a default in config.py. Anything a test
+# genuinely needs, it sets for itself.
+while IFS= read -r var; do
+    unset "$var"
+done < <(env | grep -oE '^(EP_|TM_|TWILIO_|ALERT_|GMAIL_|NTFY_)[A-Z0-9_]*' || true)
 export EP_STATE_FILE="$SANDBOX/state.json"
 export EP_DIAG_DIR="$SANDBOX/diagnostics"
 export EP_LOG_DIR="$SANDBOX/logs"
