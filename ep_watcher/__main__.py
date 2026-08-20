@@ -464,6 +464,12 @@ def cmd_watch(args) -> int:
     backoff = 0
     tried_profile_reset = False
     was_night = config.is_night()
+    # Lives across the whole run, so its per-event clocks and its refusal
+    # count survive between cycles. See engine.ResaleSweep.
+    sweep = engine.ResaleSweep()
+    if config.RESALE_SWEEP:
+        print(f"  Resale sweep: every ~{config.RESALE_SWEEP_SECONDS}s between "
+              f"searches (resale only, one XHR per page)")
     try:
         while True:
             if _stop_if_past_date():
@@ -550,12 +556,55 @@ def cmd_watch(args) -> int:
             # state and the signed-in session costs a second or two and must
             # never come out of the time budget for a search.
             _maybe_backup()
-            time.sleep(sleeping)
+            _sleep_and_sweep(session, sweep, sleeping)
     except KeyboardInterrupt:
         print(f"\n[{stamp()}] Stopped.")
         return 0
     finally:
         session.close()
+
+
+def _sleep_and_sweep(session, sweep, seconds: float) -> None:
+    """Sleep, but ask the resale endpoint every so often on the way through.
+
+    The sleep between searches is the watcher's blind window, and on
+    2026-08-20 it was measured as the thing actually costing the tickets: a
+    listing had been live ~3.25 minutes on average before a search found it,
+    and every securing attempt that reached Ticketmaster found it gone. This
+    turns a dead wait into a cheap watch.
+
+    Chunked rather than one long sleep so the loop still wakes on time — the
+    remainder is slept exactly, so the search cadence the budget was
+    calculated from is unchanged. The sweep adds calls; it does not shorten
+    the gap between searches.
+
+    A find inside the sweep ends the sleep early. The alert has already gone
+    out by then and a hold may be live, so there is no reason to lie in bed
+    for the rest of a window whose purpose has just been served.
+    """
+    if not config.RESALE_SWEEP or sweep is None or sweep.stopped:
+        time.sleep(seconds)
+        return
+
+    deadline = time.monotonic() + seconds
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(5.0, left))
+        # Asked from memory before the state file is touched at all: this loop
+        # wakes every few seconds and the sweep is due every ninety, so all but
+        # one wake in eighteen has nothing to do.
+        if not sweep.any_due(time.monotonic()):
+            continue
+        try:
+            st = state_mod.load()
+            if sweep.run(session, st) is not None:
+                state_mod.save(st)
+                return
+        except Exception as exc:
+            # Never let the cheap extra look cost the expensive scheduled one.
+            print(f"[{stamp()}] resale sweep skipped: {type(exc).__name__}: {exc}")
 
 
 def _pause_for_checkout() -> None:
@@ -1390,6 +1439,27 @@ def budget_report() -> tuple:
     lines.append(f"    Whole day      : {sum(hourly):5.0f} searches")
     lines.append(f"    Loop tick      : every {config.POLL_INTERVAL_SECONDS}s "
                  f"— wakes to ask if a page is due; costs no requests")
+    # The sweep is not a search and must not be added to the search rate — the
+    # limit above was derived from searches, and quietly folding a different
+    # kind of request into it would make both numbers meaningless. But it IS
+    # request volume, and a budget report that omits a source of requests is
+    # the kind of reassuring number this project exists to distrust.
+    if config.RESALE_SWEEP:
+        live = [e for e in config.EVENTS if not e.expired()]
+        per_hour = 3600.0 / config.RESALE_SWEEP_SECONDS * len(live)
+        lines.append(
+            f"    Resale sweep   : {per_hour:5.1f} calls/hour  "
+            f"(every {config.RESALE_SWEEP_SECONDS}s x {len(live)} pages)")
+        lines.append(
+            "                     one same-origin XHR each, from the page already")
+        lines.append(
+            "                     open — not a search, and not counted above.")
+        lines.append(
+            "                     The endpoint's own cache-control says max-age=15,")
+        lines.append(
+            "                     so it expects to be asked far more often than this.")
+    else:
+        lines.append("    Resale sweep   : off (EP_RESALE_SWEEP=0)")
     if peak_hours:
         span = f"{peak_hours[0]:02d}:00-{peak_hours[-1]:02d}:59 local"
         lines.append(f"    Busiest window : {span}")

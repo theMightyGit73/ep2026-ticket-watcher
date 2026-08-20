@@ -414,8 +414,25 @@ EVENTS = [
         peak_max_seconds=EARLY_ENTRY_PEAK_MAX_SECONDS,
         offpeak_min_seconds=EARLY_ENTRY_OFFPEAK_MIN_SECONDS,
         offpeak_max_seconds=EARLY_ENTRY_OFFPEAK_MAX_SECONDS,
-        secure=True,
-        # Watched and secured, but it gives way. See Event.secure_priority.
+        # ALERT ONLY. David's call on 2026-08-20, and the third position this
+        # setting has held — the reasoning has changed each time, so it is
+        # written out rather than left to be re-litigated.
+        #
+        #   * Originally False: holding an add-on would pull him to a checkout
+        #     for something useless without a weekend ticket.
+        #   * True on 2026-08-19: "treat it as importantly as the ticket",
+        #     with priority rather than exclusion keeping it safe.
+        #   * False again on 2026-08-20, for a reason neither of the first two
+        #     had. Early Entry passes at €46.50 turned out to appear several
+        #     times a day — five of the eight finds recorded — and each one
+        #     spends a buying-browser cold start and its requests. Priority
+        #     stops it BLOCKING a weekend ticket; it does not stop it spending
+        #     the budget and the attention. The alert still fires every time.
+        #
+        # secure_priority is kept, and is not vestigial: flipping this back to
+        # True must restore the give-way behaviour, not a pass that outranks a
+        # weekend ticket.
+        secure=False,
         secure_priority=SECURE_PRIORITY_ADDON,
         # Entry is from 2pm on the Thursday, so the 27th is the last day this
         # is worth anything at all. The weekend pages keep running to the
@@ -1175,6 +1192,38 @@ HOME_NETWORK_IP = os.environ.get("EP_HOME_IP")
 # 90 minutes sits under the shortest daytime gap observed between blocks (64
 # minutes is the floor; the common cluster is around two hours), so it lands
 # ahead of most of them. Set EP_PROFILE_MAX_AGE=0 to go back to waiting.
+#: How often to ask the resale endpoint directly, between full searches.
+#:
+#: The whole reason this exists, measured on 2026-08-20. Weekend Camping was
+#: searched 30 times that day at a mean gap of 6.5 minutes, so a listing had
+#: already been live for ~3.25 minutes on average before the watcher saw it.
+#: Every completed securing attempt — five of five — arrived to find the
+#: listing gone, and the one at 11:48 went from detection to clicking the row
+#: in under sixty seconds. The race is not being lost after we see a listing.
+#: It is being lost before we see one.
+#:
+#: A full search is a page load, a quantity set, a button press and a wait for
+#: the panel to paint. This is one same-origin XHR from the page that is
+#: already open — the exact call the page makes for itself, whose own response
+#: carries `cache-control: max-age=15`. Ticketmaster expects that endpoint to
+#: be asked roughly every fifteen seconds; ninety is four times politer than
+#: the page's own behaviour while cutting detection lag from minutes to under
+#: a minute.
+#:
+#: It sees resale ONLY. Primary stock still needs the search, which keeps
+#: running underneath on its own slower cadence — and resale is where all
+#: eight finds to date have come from.
+RESALE_SWEEP_SECONDS = int(os.environ.get("EP_RESALE_SWEEP_SECONDS", "90"))
+
+#: Off switch, because a new source of requests against a rate limit that has
+#: already blocked this connection twenty times deserves one.
+RESALE_SWEEP = os.environ.get("EP_RESALE_SWEEP", "1").lower() in ("1", "true", "yes")
+
+#: How many consecutive refusals stop the sweep for the rest of the session.
+#: A sweep that is being refused is not finding tickets, it is only adding
+#: evidence that this client is asking too often — the opposite of the job.
+RESALE_SWEEP_MAX_REFUSALS = int(os.environ.get("EP_RESALE_SWEEP_MAX_REFUSALS", "3"))
+
 PROFILE_MAX_AGE_MINUTES = float(os.environ.get("EP_PROFILE_MAX_AGE", "90"))
 
 # Hard floor on the interval, regardless of what EP_POLL_SECONDS says.

@@ -67,7 +67,22 @@ config.NTFY_TOPIC = None
 
 WEEKEND = next(e for e in config.EVENTS if e.slug == "weekend-camping")
 INSTALMENT = next(e for e in config.EVENTS if e.slug == "weekend-camping-instalment")
-EARLY = next(e for e in config.EVENTS if e.slug == "early-entry")
+# A stand-in for "a securable page that ranks below a weekend ticket".
+#
+# This used to be the live Early Entry event, which broke the moment that page
+# was set to alert-only on 2026-08-20 — the third time that setting has moved.
+# What is under test here is the PRECEDENCE MACHINERY, which is independent of
+# which pages happen to be securable this week, so the fixture is built rather
+# than borrowed. If an add-on is ever made securable again it inherits exactly
+# these rules, and this file will still be checking them.
+EARLY = config.Event(
+    slug="early-entry-fixture",
+    name="Electric Picnic 2026 - Early Entry Pass",
+    url=config.EVENTS[-1].url,
+    secure=True,
+    secure_priority=config.SECURE_PRIORITY_ADDON,
+)
+LIVE_EARLY = next(e for e in config.EVENTS if e.slug == "early-entry")
 
 
 print("\nThe ranking itself")
@@ -75,13 +90,18 @@ check_true("a weekend ticket outranks the Early Entry pass",
            WEEKEND.secure_priority > EARLY.secure_priority)
 check("both weekend pages rank equally — either is the real ticket",
       WEEKEND.secure_priority, INSTALMENT.secure_priority)
-check_true("and the pass is still securable, not merely watched", EARLY.secure)
+# The live pass is alert-only as of 2026-08-20 — it appears several times a
+# day and each attempt spends a buying-browser cold start. Asserted here so
+# that flipping it back is a deliberate act with a failing test behind it.
+check("the live pass is watched, not secured", LIVE_EARLY.secure, False)
+check_true("but it keeps its precedence, so re-enabling restores give-way",
+           LIVE_EARLY.secure_priority < WEEKEND.secure_priority)
 
 
 print("\nThe cycle spends its attention on the weekend page first")
 # A cycle can end early — a 403 stops it dead — and whichever page went last
 # is the one skipped. It must never be the weekend ticket.
-ordered = sorted(config.EVENTS, key=lambda e: -e.secure_priority)
+ordered = sorted(list(config.EVENTS) + [EARLY], key=lambda e: -e.secure_priority)
 check("the Early Entry pass is last in precedence", ordered[-1].slug, EARLY.slug)
 check_true("and a weekend page is first", ordered[0].secure_priority == WEEKEND.secure_priority)
 
@@ -127,12 +147,20 @@ def attempt(event, state, hold_to_return):
     ev_state["last_availability_alert"] = None
 
     was_flag, was_secure = config.SECURE_ON_FIND, buyer.secure_in_thread
+    was_events = config.EVENTS
     try:
         config.SECURE_ON_FIND = True
         buyer.secure_in_thread = fake_secure
+        # _maybe_secure resolves the reading's slug against config.EVENTS and
+        # declines anything it cannot find, so a fixture page has to be
+        # visible there for the duration. Registered rather than substituted,
+        # so the real pages keep their real precedence alongside it.
+        if event not in config.EVENTS:
+            config.EVENTS = list(config.EVENTS) + [event]
         engine.handle(a_find(event), state)
     finally:
         config.SECURE_ON_FIND, buyer.secure_in_thread = was_flag, was_secure
+        config.EVENTS = was_events
     return seen
 
 

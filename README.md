@@ -9,8 +9,8 @@ is actually buyable. Three pages, not one:
   — the same weekend, paid in stages
 - [Early Entry Pass](https://www.ticketmaster.ie/electric-picnic-2026-early-entry-pass-co-laois-27-08-2026/event/18006314E36BAC7B)
   — campsite access from 2pm Thursday. An **add-on**, not a ticket: only
-  valid alongside a Weekend Ticket. Watched, alerted on, and secured — but it
-  gives way to a weekend ticket, which always wins the one buying browser
+  valid alongside a Weekend Ticket. Watched and alerted on, but **not secured**
+  — it appears several times a day and each attempt spends the buying browser
 
 They are separate products with separate inventory and separate resale panels.
 A ticket can appear on one and not the other, so both are watched and every
@@ -229,16 +229,18 @@ sale at €39.40 when it was added, with stock showing. A page that is selling
 does not need watching every three minutes, and the question here is "has it
 sold out and come back", not "did a resale listing flash past".
 
-It **is** secured, but it never wins a contest. The original reasoning was
-that holding one under David's account, with a countdown running, would pull
-him to the laptop for something he cannot use until the ticket this project
-exists to find has been found. He overruled that on 2026-08-19 — he wants it
-treated as importantly as the ticket — so it is secured whenever the buying
-browser is free, and dropped the moment a weekend listing wants it. That is
-`Event.secure_priority` rather than `Event.secure`; see
-[The weekend ticket always wins the browser](#the-weekend-ticket-always-wins-the-browser).
+It is **alerted on but not secured**, and that setting has now held three
+positions. It began False — holding an add-on pulls David to a checkout for
+something useless on its own. It went True on 2026-08-19, when he asked for it
+to be treated as importantly as the ticket, with priority rather than
+exclusion keeping a weekend listing safe. It went back to False on 2026-08-20
+for a reason neither of the first two had: these passes turn out to appear
+several times a day — five of the first eight finds — and each attempt spends
+a buying-browser cold start and its share of the request budget. Priority
+stops a pass *blocking* a weekend ticket; it does not stop it spending the
+budget and the attention.
 
-Its alert still says what it is, in its own words:
+The alert fires exactly as before, and still says what it is:
 
 ```text
 This is the EARLY ENTRY PASS — an ADD-ON for campsite access from 2pm

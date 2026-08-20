@@ -143,8 +143,12 @@ check("the same peak window as the standard page",
 check("and the same off-peak window",
       EARLY.gap_range(at(22)), STANDARD.gap_range(at(22)))
 check("and the same nominal rate", EARLY.searches_per_hour, STANDARD.searches_per_hour)
-check_true("it is secured like the others", EARLY.secure)
-check_true("as are all the pages", all(e.secure for e in config.EVENTS))
+# Alert-only since 2026-08-20: the passes appear several times a day and each
+# attempt spends a buying-browser cold start. Watching it is still worth the
+# requests — an alert costs nothing beyond the search already being made.
+check("the pass is watched but not secured", EARLY.secure, False)
+check_true("while both weekend pages are secured",
+           all(e.secure for e in config.EVENTS if e.slug != "early-entry"))
 
 # Every page must be reachable by the loop, or one is watched in name only.
 for event in config.EVENTS:

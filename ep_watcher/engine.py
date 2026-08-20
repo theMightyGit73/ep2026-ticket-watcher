@@ -1,6 +1,7 @@
 """Orchestration: run the sources, merge their answers, decide who to wake up."""
 
-from typing import List
+import time
+from typing import List, Optional
 
 from . import config, liveness, network, notify, state as state_mod
 from .model import GOOD_STATUSES, Reading, better_status
@@ -633,6 +634,143 @@ def _maybe_heartbeat(reading: Reading, st: dict) -> None:
         # or not he acts on it. Repeating it hourly trains him to skim past it.
         state_mod.mark_rotation_asked(st)
     state_mod.reset_heartbeat(st)
+
+
+class ResaleSweep:
+    """Ask the resale endpoint directly between full searches.
+
+    A full search is expensive and slow: a page load, a quantity set, a button
+    press, and a wait for a panel that arrives in three stages. That cost is
+    what forces the gap between searches out to minutes — and the gap is where
+    the tickets are being lost. Measured on 2026-08-20: Weekend Camping was
+    searched 30 times at a mean gap of 6.5 minutes, and every completed
+    securing attempt arrived to find the listing already gone, including one
+    that went from detection to clicking the row in under sixty seconds.
+
+    This asks the one question that matters, as cheaply as it can be asked.
+    `fetch_resale_json` runs the fetch inside the live page via
+    `page.evaluate`, so it carries that page's cookies, TLS fingerprint and
+    origin — Ticketmaster sees the call it already accepts from that tab
+    rather than a new client to wall. The endpoint's own response says
+    `cache-control: max-age=15`, so being asked every ninety seconds is four
+    times politer than the page's own behaviour.
+
+    Deliberately does NOTHING unless it finds something. No counters, no state
+    writes, no liveness beacon, no heartbeat arithmetic on an empty sweep —
+    those all belong to a real poll, and inflating them every ninety seconds
+    would make every health number in the system mean something different. The
+    empty case costs exactly one HTTP call and one comparison.
+
+    When it does find a listing it hands off to handle(), so the find is
+    alerted, secured, recorded and re-nagged by exactly the same machinery as
+    a search-driven find. There is no second alerting path to keep in step.
+    """
+
+    def __init__(self):
+        #: slug -> monotonic deadline. In memory rather than in state.json on
+        #: purpose: a restart SHOULD sweep immediately, and writing the state
+        #: file every ninety seconds to remember something this cheap would be
+        #: churn against the one file a crash must not corrupt.
+        self._next = {}
+        self._refusals = 0
+        self.stopped = False
+
+    def due(self, event, now: float) -> bool:
+        return now >= self._next.get(event.slug, 0.0)
+
+    def any_due(self, now: float) -> bool:
+        """Cheap pre-check for the sleep loop.
+
+        The caller wakes every few seconds; without this it would read and
+        parse state.json on every one of those wakes just to discover that
+        nothing is due yet. This answers the same question from memory.
+        """
+        if not config.RESALE_SWEEP or self.stopped:
+            return False
+        return any(not e.expired() and self.due(e, now) for e in config.EVENTS)
+
+    def _schedule(self, event, now: float) -> None:
+        self._next[event.slug] = now + config.RESALE_SWEEP_SECONDS
+
+    def _refused(self, status) -> bool:
+        """Did Ticketmaster refuse this call, as opposed to answering it?"""
+        return status in (401, 403, 429)
+
+    def run(self, session, st: dict) -> Optional[Reading]:
+        """One pass over the due events. Returns the find, or None.
+
+        Never raises. This runs inside the watch loop's sleep window, and
+        nothing here is worth costing a poll.
+        """
+        if not config.RESALE_SWEEP or self.stopped or session is None:
+            return None
+        # Resting out a 403, or holding a ticket. In the first case the whole
+        # point is to stop asking; in the second the watcher has deliberately
+        # paused and the buying browser owns the moment.
+        if state_mod.backoff_remaining(st) > 0 or state_mod.hold_remaining(st) > 0:
+            return None
+
+        now = time.monotonic()
+        for event in config.EVENTS:
+            if event.expired() or not self.due(event, now):
+                continue
+            self._schedule(event, now)
+            try:
+                record = session.fetch_resale_json(event, config.WANTED_QUANTITY)
+            except Exception as exc:
+                print(f"[{stamp()}] resale sweep: {type(exc).__name__}: {exc}")
+                continue
+            if record is None:
+                continue
+
+            status = record.get("status")
+            if self._refused(status):
+                self._refusals += 1
+                print(f"[{stamp()}] resale sweep refused (HTTP {status}) "
+                      f"— {self._refusals}/{config.RESALE_SWEEP_MAX_REFUSALS}")
+                if self._refusals >= config.RESALE_SWEEP_MAX_REFUSALS:
+                    # Stop for the session. A sweep being refused is not
+                    # finding tickets, it is only adding evidence that this
+                    # client asks too often — the opposite of its job. The
+                    # searches underneath are unaffected and keep running.
+                    self.stopped = True
+                    print(f"[{stamp()}] resale sweep DISABLED for this session "
+                          f"— the searches continue on their own cadence")
+                return None
+            if record.get("data") is None:
+                continue
+            self._refusals = 0
+
+            reading = Reading(
+                source="resale-sweep",
+                event_slug=event.slug,
+                event_name=event.name,
+                event_url=event.url,
+            )
+            from .sources.browser import _parse_resale_json
+
+            if not _parse_resale_json(record, reading):
+                continue
+            if reading.resale not in GOOD_STATUSES:
+                # The overwhelmingly common case, and it ends here: nothing is
+                # counted, nothing is written, nothing is sent.
+                continue
+
+            # Carry the last known primary forward rather than letting this
+            # reading's UNKNOWN overwrite it. record_success() stores whatever
+            # the reading holds, and a sweep has no opinion about the box
+            # office — reporting one would make the hourly email say the
+            # primary status had gone unknown every time a listing appeared.
+            reading.primary = state_mod.event_state(st, event.slug).get(
+                "last_primary", reading.primary)
+            reading.note(
+                f"seen by the resale sweep rather than a search — up to "
+                f"{config.RESALE_SWEEP_SECONDS}s old, not up to a full search gap"
+            )
+            print(f"[{stamp()}] resale sweep found something on {event.slug}")
+            handle(reading, st)
+            return reading
+        return None
 
 
 def session_settings(to_mode: str) -> list:
