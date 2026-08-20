@@ -263,10 +263,32 @@ class Event:
 PEAK_START_HOUR = int(os.environ.get("EP_PEAK_START_HOUR", "10"))
 PEAK_END_HOUR = int(os.environ.get("EP_PEAK_END_HOUR", "20"))
 
-STANDARD_PEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MIN", "300"))
-STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "540"))
-STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "600"))
-STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "900"))
+# 3-6 minutes at peak, restored on 2026-08-20 when the Early Entry Pass was
+# switched off and gave its requests back.
+#
+# This page was on 3-6 until 2026-08-19, when Early Entry parity forced it out
+# to 5-9 — three pages could not all be searched every few minutes under the
+# ~20/hour ceiling, and the standard page paid for the pass. With the pass off
+# there is nothing to pay, and leaving the page slow would mean the switch had
+# bought nothing.
+#
+# Landed at 14.7 searches/hour rather than at the ceiling, deliberately. The
+# watcher ran at 18.5/hour on the 19th and 20th and drew six blocks in two
+# days; 20/hour is the documented line but the evidence says the high teens
+# are already too warm. Every one of those blocks cleared on the first fresh
+# profile — the identity ages out, not the address — so a block costs a poll
+# cycle rather than the connection, which is why this is worth doing at all.
+#
+# What it buys: on a listing that has been live ~3.25 minutes on average
+# before a search finds it, halving the mean gap from 7 minutes to 4.5 roughly
+# halves that delay. Every securing attempt so far has arrived to find the
+# listing gone, so the minutes before detection are the whole game.
+#
+# To undo: EP_STANDARD_PEAK_MIN=300 / EP_STANDARD_PEAK_MAX=540 puts it back.
+STANDARD_PEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MIN", "180"))
+STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "360"))
+STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "480"))
+STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "840"))
 
 # The nominal range. Kept equal to the peak range by default so that
 # poll_seconds — and therefore searches_per_hour() — describes the cadence
@@ -278,34 +300,39 @@ STANDARD_POLL_MIN_SECONDS = int(
 STANDARD_POLL_MAX_SECONDS = int(
     os.environ.get("EP_STANDARD_POLL_MAX", str(STANDARD_PEAK_MAX_SECONDS)))
 
-# The Early Entry Pass, added 2026-08-19.
+# The Early Entry Pass — the cadence it will use WHEN IT IS SWITCHED BACK ON.
+# Dormant today; see WATCH_EARLY_ENTRY.
 #
-# Started on the slowest clock of the three, on the reasoning that it is an
-# add-on rather than a ticket and was on general sale when it was added.
-# David overruled that the same day: he considers it as important as the
-# weekend ticket and wants it searched as hard. It is his festival, so it gets
-# the same range as the standard page — the two constants are set from the
-# same numbers deliberately, so they cannot drift apart.
+# 15-30 minutes at peak, decoupled from the standard page on 2026-08-20. It
+# was pinned to the standard page's range on the 19th, when David said the
+# pass mattered as much as the weekend ticket. That instruction has been
+# superseded: he switched the pass off entirely on the 20th because the
+# weekend ticket is the critical thing and he does not have one, and the
+# condition he set for turning it back on is having one.
 #
-# That parity has a price and it is paid by the standard page. Three pages
-# cannot all be searched every three minutes: two pages at a 240s mean plus
-# the instalment plan is 32 searches an hour, against the ~20 that got the
-# home connection blocked in development. The arithmetic only closes at a
-# ~420s mean for both, so the standard page slows from 3-5 minutes to 5-9.
+# So the pass returns as what it will be on that day — a secondary page, for
+# a thing he wants but has already got the important half of — and it returns
+# on a secondary page's clock. This is not a demotion by opinion. It is what
+# makes the switch safe to flip: if the pass still inherited the standard
+# page's range, turning it on would add 13.3 searches an hour and take peak
+# load to 28, well through the ~20/hour ceiling. The one switch he has been
+# promised he can throw in a hurry must not be a switch that gets him blocked.
 #
-# Concretely, on a ~4.6 minute listing lifetime, that is roughly a 56%
-# chance of catching one falling to about 45%. The honest summary is that
-# watching two pages equally hard costs about a fifth of the catch rate on
-# the page where eight of nine sightings actually happened. Raise
-# EP_STANDARD_PEAK_* again to undo it, and accept the request rate.
+# The pass can afford it. These appear several times a day — five of the first
+# eight finds recorded — and he needs exactly one, so a 15-30 minute clock
+# still meets several a day. That is the opposite of the weekend ticket, where
+# sightings are rare and the gap between looks is the whole game.
+#
+# On: 13.3 + 1.3 + 2.7 = 17.3/hour. Off: 14.7/hour. Both under the line, and
+# tests/test_early_entry_switch.py asserts the first of those on every run.
 EARLY_ENTRY_PEAK_MIN_SECONDS = int(
-    os.environ.get("EP_EARLY_PEAK_MIN", str(STANDARD_PEAK_MIN_SECONDS)))
+    os.environ.get("EP_EARLY_PEAK_MIN", "900"))
 EARLY_ENTRY_PEAK_MAX_SECONDS = int(
-    os.environ.get("EP_EARLY_PEAK_MAX", str(STANDARD_PEAK_MAX_SECONDS)))
+    os.environ.get("EP_EARLY_PEAK_MAX", "1800"))
 EARLY_ENTRY_OFFPEAK_MIN_SECONDS = int(
-    os.environ.get("EP_EARLY_OFFPEAK_MIN", str(STANDARD_OFFPEAK_MIN_SECONDS)))
+    os.environ.get("EP_EARLY_OFFPEAK_MIN", "1800"))
 EARLY_ENTRY_OFFPEAK_MAX_SECONDS = int(
-    os.environ.get("EP_EARLY_OFFPEAK_MAX", str(STANDARD_OFFPEAK_MAX_SECONDS)))
+    os.environ.get("EP_EARLY_OFFPEAK_MAX", "3600"))
 
 INSTALMENT_PEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MIN", "1800"))
 INSTALMENT_PEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MAX", "3600"))
@@ -893,7 +920,14 @@ _POLL_PER_EVENT_SECONDS = int(os.environ.get("EP_POLL_SECONDS", "300"))
 #: often it asks Ticketmaster anything. Finer means the drawn gaps are
 #: honoured more precisely; it does not mean more requests, because a tick
 #: with nothing due returns without opening a page.
-LOOP_TICK_CEILING_SECONDS = int(os.environ.get("EP_LOOP_TICK_SECONDS", "60"))
+#:
+#: Lowered from 60 to 45 on 2026-08-20, when the standard page went back to a
+#: 3-minute floor. The tick has to stay well under the shortest gap any page
+#: can draw or it quantises the cadence upward: a page due at 180s is not
+#: noticed until the next wake, so a 60s tick turns a configured 3-6 minutes
+#: into an effective 4-7 and makes searches_per_hour() an overstatement. The
+#: only cost of a finer tick is an idle pass through run_once().
+LOOP_TICK_CEILING_SECONDS = int(os.environ.get("EP_LOOP_TICK_SECONDS", "45"))
 
 
 def poll_interval() -> int:
@@ -1355,12 +1389,25 @@ RESALE_SWEEP_MAX_REFUSALS = int(os.environ.get("EP_RESALE_SWEEP_MAX_REFUSALS", "
 
 PROFILE_MAX_AGE_MINUTES = float(os.environ.get("EP_PROFILE_MAX_AGE", "90"))
 
-# Hard floor on the interval, regardless of what EP_POLL_SECONDS says.
+# Hard floor on how often any single PAGE may be searched in press mode.
 #
 # There is a real tension here and it is worth stating rather than hiding. A
 # resale listing observed during testing lived about five minutes, so a slow
 # cadence genuinely misses tickets. But a fast cadence gets the client
 # rate-limited, and a blocked watcher misses every ticket, not some of them.
 # Two minutes is the floor because sustained polling faster than that is what
-# produced the 403s; the default sits well above it.
+# produced the 403s; every page's range sits well above it.
+#
+# It measures the PAGE's gap, not the loop's tick, and the distinction became
+# load-bearing on 2026-08-20. This floor was written when a tick WAS a search:
+# the loop searched every page on every pass, so raising the tick genuinely
+# slowed the requests. That stopped being true when pages got their own
+# intervals — a tick now only searches pages that are due, and one with
+# nothing due sends nothing at all. Applying the floor to the tick therefore
+# stopped throttling requests and started coarsening the clock instead,
+# stretching a configured 3-6 minutes to an effective 4-7 while the budget
+# report went on quoting the configured figure.
+#
+# So it is checked against each page's shortest possible draw, which is the
+# thing it was always meant to bound.
 PRESS_MIN_INTERVAL_SECONDS = int(os.environ.get("EP_PRESS_MIN_SECONDS", "120"))

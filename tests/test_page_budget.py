@@ -87,7 +87,7 @@ print("\nThe budget is weighted, and it is the same budget")
 # peak_searches_per_hour() and searches_per_day(), checked in
 # test_peak_hours.py.
 check("total nominal volume across the pages being searched",
-      round(config.searches_per_hour()), 10)
+      round(config.searches_per_hour()), 15)
 
 # The budget must FALL when a page is switched off, and by that page's share.
 # This is the point of the switch rather than a side effect of it: David
@@ -103,7 +103,7 @@ try:
     os.environ["EP_EARLY_ENTRY"] = "1"
     with_pass = importlib.reload(config)
     check("with the pass switched back on, all three are counted",
-          round(with_pass.searches_per_hour()), 18)
+          round(with_pass.searches_per_hour()), 17)
     check_true("and the busiest hour is still under the block line",
                with_pass.peak_searches_per_hour() < with_pass.BLOCK_RATE_PER_HOUR)
 finally:

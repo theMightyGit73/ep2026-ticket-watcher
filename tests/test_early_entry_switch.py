@@ -138,9 +138,16 @@ try:
     # quietly reset them, turning it back on would look right and behave
     # differently — the pass would come back on some default clock rather than
     # the one that was chosen for it.
-    check("its peak cadence is intact",
+    # Its own range, not the standard page's. The pass was pinned to the
+    # ticket's clock while David considered the two equally important; it
+    # comes back as the secondary page it will be on the day he flips this,
+    # and inheriting the ticket's new 3-6 minutes would put peak load at
+    # 28/hour the moment the switch was thrown.
+    check("its dormant cadence is intact",
           (early.peak_min_seconds, early.peak_max_seconds),
-          (on.STANDARD_PEAK_MIN_SECONDS, on.STANDARD_PEAK_MAX_SECONDS))
+          (on.EARLY_ENTRY_PEAK_MIN_SECONDS, on.EARLY_ENTRY_PEAK_MAX_SECONDS))
+    check_true("and is slower than the weekend ticket's",
+               early.peak_min_seconds > weekend_of(on).peak_min_seconds)
     check("and its own stop date is intact", early.stop_after, "2026-08-27")
 
     # The reason the whole arrangement is safe to flip in a hurry.

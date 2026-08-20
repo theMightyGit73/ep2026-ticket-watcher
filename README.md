@@ -199,11 +199,11 @@ searching both equally spent half the budget for an eighth of the return.
 
 | Page | Peak (10:00–20:00) | Off-peak | Secured? |
 | --- | --- | --- | --- |
-| Weekend Camping | 5–9 min | 10–15 min | yes |
+| Weekend Camping | 3–6 min | 8–14 min | yes |
 | Weekend Camping Instalment Plan | 30–60 min | 60–90 min | yes |
 | Early Entry Pass | **not searched** | — | no |
 
-Peak load is 9.9 searches/hour and a day costs about 159, against a ceiling of
+Peak load is 14.7 searches/hour and a day costs about 211, against a ceiling of
 ~20/hour. Run `python -m ep_watcher budget` for what is actually in force —
 the numbers here are prose and the command computes.
 
@@ -233,8 +233,14 @@ cadence, its priority, its stop date and its history are all still in
 `config.py` waiting. `tests/test_early_entry_switch.py` exercises the ON path
 on every test run, so it stays known-good while it is unused.
 
-Turning it on costs 8.6 searches/hour and takes peak load to 18.5 — still
-under the line, and the test suite asserts that it stays there.
+Turning it on costs 2.7 searches/hour and takes peak load to 17.3 — still
+under the line, and the test suite asserts that it stays there. The pass comes
+back on a **15–30 minute** clock rather than the ticket's, because on the day
+that switch is thrown he already has the important half. It was pinned to the
+standard page's range while he considered the two equally important; leaving it
+pinned would now add 13.3 searches/hour and take peak load to 28, so the one
+switch he has been promised he can throw in a hurry would be the one that gets
+him blocked.
 
 #### What that parity cost while it was on
 
@@ -252,9 +258,17 @@ all be searched every three minutes:
 The ~20/hour ceiling is not arbitrary — it is what got the home connection
 flagged during development. So the standard page slowed from a 4-minute mean
 to 7, which on a ~4.6 minute listing lifetime takes the chance of catching one
-from roughly 56% to about 45%. With the pass off, that headroom is available
-again: raise `EP_STANDARD_PEAK_MIN` / `_MAX` to spend it on the page that
-might actually carry a weekend ticket.
+from roughly 56% to about 45%.
+
+**That slowdown was reversed on 2026-08-20**, when the pass was switched off
+and gave the requests back. The standard page is on 3–6 minutes again.
+It deliberately did not go to the ceiling: the watcher ran at 18.5/hour on the
+19th and 20th and drew six blocks in two days, so the high teens are already
+too warm whatever the documented line says. Every one of those blocks cleared
+on the first fresh profile — the identity ages out, not the address — which is
+why a block costs a poll cycle rather than the connection, and why spending
+the headroom is worth doing at all. `EP_STANDARD_PEAK_MIN=300` and
+`EP_STANDARD_PEAK_MAX=540` put it back to 5–9 if that proves too warm.
 
 #### How this setting has moved
 
@@ -936,17 +950,17 @@ Environment variables, all optional:
 | `WANTED_QUANTITIES` | `1` | Quantities to search per poll |
 | `EP_PEAK_START_HOUR` | `10` | Start of the window listings actually appear in, local time |
 | `EP_PEAK_END_HOUR` | `20` | End of it. Outside this the same budget is spent more slowly |
-| `EP_STANDARD_PEAK_MIN` | `300` | Shortest gap between peak searches of the standard page. The gap is drawn fresh from the range after each search, so the traffic is not a metronome |
-| `EP_STANDARD_PEAK_MAX` | `540` | Longest |
-| `EP_STANDARD_OFFPEAK_MIN` | `600` | The same, outside the peak window |
-| `EP_STANDARD_OFFPEAK_MAX` | `900` | |
+| `EP_STANDARD_PEAK_MIN` | `180` | Shortest gap between peak searches of the standard page. The gap is drawn fresh from the range after each search, so the traffic is not a metronome |
+| `EP_STANDARD_PEAK_MAX` | `360` | Longest |
+| `EP_STANDARD_OFFPEAK_MIN` | `480` | The same, outside the peak window |
+| `EP_STANDARD_OFFPEAK_MAX` | `840` | |
 | `EP_EARLY_ENTRY` | `0` | **The Early Entry Pass switch.** `1` searches the page again *and* holds a pass found on it. Off since 2026-08-20 so the whole budget goes to the weekend ticket — turn it on once there is a real ticket for a pass to sit beside |
-| `EP_EARLY_PEAK_MIN` / `_MAX` | `300` / `540` | The Early Entry Pass's cadence when `EP_EARLY_ENTRY=1`. Same as the standard page |
-| `EP_EARLY_OFFPEAK_MIN` / `_MAX` | `600` / `900` | |
+| `EP_EARLY_PEAK_MIN` / `_MAX` | `900` / `1800` | The Early Entry Pass's cadence when `EP_EARLY_ENTRY=1`. Slower than the ticket's on purpose — see above |
+| `EP_EARLY_OFFPEAK_MIN` / `_MAX` | `1800` / `3600` | |
 | `EP_INSTALMENT_PEAK_MIN` / `_MAX` | `1800` / `3600` | The instalment plan. One of nine sightings was here, so it keeps a small share |
 | `EP_INSTALMENT_OFFPEAK_MIN` / `_MAX` | `3600` / `5400` | |
 | `EP_BLOCK_RATE_PER_HOUR` | `20` | The rate that drew a 403 in development. `budget` and the test suite both check against it |
-| `EP_LOOP_TICK_SECONDS` | `60` | Ceiling on how often the loop wakes to ask if a page is due. Costs no requests |
+| `EP_LOOP_TICK_SECONDS` | `45` | Ceiling on how often the loop wakes to ask if a page is due. Costs no requests. Must stay well under the shortest gap any page can draw, or it quantises the cadence upward |
 | `EP_SECURE_ON_FIND` | `0` | Set `1` to let the buying browser hold a resale listing. Needs `login-buy` first |
 | `EP_SECURE_TIMEOUT_SECONDS` | `45` | Seconds to spend trying to secure before giving up |
 | `EP_HOLD_PAUSE_EXTRA` | `10` | Minutes added to the hold window during which nothing will restart the watcher |

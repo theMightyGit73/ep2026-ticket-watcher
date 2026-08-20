@@ -385,12 +385,23 @@ def cmd_watch(args) -> int:
     headless Chrome every two minutes.
     """
     interval = args.interval or config.POLL_INTERVAL_SECONDS
-    if config.PRESS_THE_BUTTON and interval < config.PRESS_MIN_INTERVAL_SECONDS:
-        print(
-            f"[{stamp()}] press mode: raising interval {interval}s → "
-            f"{config.PRESS_MIN_INTERVAL_SECONDS}s (each poll is a real reserve attempt)"
-        )
-        interval = config.PRESS_MIN_INTERVAL_SECONDS
+    # The press-mode floor bounds how often a PAGE is searched, not how often
+    # the loop wakes. See config.PRESS_MIN_INTERVAL_SECONDS: raising the tick
+    # here used to be the same thing and has not been since pages got their
+    # own intervals — it only blunted the clock, while the requests carried on
+    # at whatever the per-page ranges said.
+    if config.PRESS_THE_BUTTON:
+        rushed = [e for e in config.EVENTS
+                  if e.searchable()
+                  and e.fastest_gap_seconds < config.PRESS_MIN_INTERVAL_SECONDS]
+        for event in rushed:
+            print(
+                f"[{stamp()}] press mode: {event.slug} can draw a gap of "
+                f"{event.fastest_gap_seconds}s, under the "
+                f"{config.PRESS_MIN_INTERVAL_SECONDS}s floor — each search is a "
+                f"real reserve attempt, and sustained polling this fast is what "
+                f"produced the 403s. Raise its EP_*_PEAK_MIN."
+            )
 
     # Refuse to run blind. A watcher that polls perfectly for two weeks and
     # cannot send mail is worse than no watcher: it looks like it is working,

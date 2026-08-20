@@ -131,24 +131,28 @@ clock = len(peak_hours) / 24.0
 check_true(f"peak carries {share:.0%} of the searches in {clock:.0%} of the day",
            share > clock * 1.4)
 
-print("\nThe Early Entry Pass is watched as hard as the ticket itself")
-# David's instruction on 2026-08-19: it matters as much as the weekend ticket,
-# so it is searched as often and secured like the others. These pin that, and
-# pin what it cost — three pages cannot all be searched every three minutes.
+print("\nThe standard page has the budget the Early Entry Pass was spending")
+# The parity of 2026-08-19 — the pass searched exactly as hard as the ticket —
+# is gone, and with it the slowdown it forced on the standard page. What is
+# pinned here is the state that replaced it: the pass off entirely, and the
+# standard page back on the 3-6 minute clock it had before it started paying
+# for the pass.
 EARLY = next(e for e in config.EVENTS if e.slug == "early-entry")
 STANDARD = next(e for e in config.EVENTS if e.slug == "weekend-camping")
 
-check("the same peak window as the standard page",
-      EARLY.gap_range(at(14)), STANDARD.gap_range(at(14)))
-check("and the same off-peak window",
-      EARLY.gap_range(at(22)), STANDARD.gap_range(at(22)))
-check("and the same nominal rate", EARLY.searches_per_hour, STANDARD.searches_per_hour)
-# Alert-only since 2026-08-20: the passes appear several times a day and each
-# attempt spends a buying-browser cold start. Watching it is still worth the
-# requests — an alert costs nothing beyond the search already being made.
-check("the pass is watched but not secured", EARLY.secure, False)
-check_true("while both weekend pages are secured",
-           all(e.secure for e in config.EVENTS if e.slug != "early-entry"))
+check("the pass is not searched at all", EARLY.searchable(), False)
+check("nor secured", EARLY.secure, False)
+check_true("while both weekend pages are searched and secured",
+           all(e.searchable() and e.secure for e in config.EVENTS
+               if e.slug != "early-entry"))
+check("the standard page is back on a 3-6 minute peak clock",
+      STANDARD.gap_range(at(14)), (180, 360))
+# The pass keeps a range for the day it is switched back on, and it is its own
+# rather than the standard page's. Inheriting the standard page's new speed
+# would put peak load at 28/hour the moment the switch was thrown — see
+# tests/test_early_entry_switch.py, which asserts the sum still fits.
+check_true("the pass's dormant clock is slower than the ticket's",
+           EARLY.gap_range(at(14))[0] > STANDARD.gap_range(at(14))[0])
 
 # Every page must be reachable by the loop, or one is watched in name only.
 for event in config.EVENTS:
@@ -159,14 +163,18 @@ for event in config.EVENTS:
     check_true(f"[{event.slug}] has an id the resale endpoint can be keyed on",
                event.tm_event_id or "/event/" in event.url)
 
-# What parity cost, stated so it cannot be forgotten: two pages at this rate
-# plus the instalment plan is the whole budget, and the standard page slowed
-# from a 240s mean to 420s to pay for it.
-check_true("two pages are now searched at the same rate",
-           STANDARD.poll_seconds == EARLY.poll_seconds)
-check_true("and the standard page is slower than it was alone",
-           STANDARD.poll_seconds > 240)
-check_true("but the ceiling still holds", config.peak_searches_per_hour() < 20)
+# What the switch bought, stated so it cannot be quietly given back: the
+# standard page had slowed to a 420s mean to pay for parity, and is now at
+# 270s again. Anything that pushes it back out is spending the ticket's
+# budget on something else and should have to say so here.
+check_true("the standard page is on the fast clock it lost to parity",
+           STANDARD.poll_seconds <= 270)
+check_true("and the ceiling still holds", config.peak_searches_per_hour() < 20)
+# The tick has to keep up with the faster page or the gain is quantised away
+# — a page due at 180s that is not noticed for another 45s is not running at
+# 3-6 minutes however the config reads.
+check_true("and the tick is fine enough to deliver it",
+           config.poll_interval() <= STANDARD.gap_range(at(14))[0] / 3.0)
 
 
 print("\nA page with no peak configured is unaffected")
