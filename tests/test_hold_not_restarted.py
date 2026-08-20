@@ -32,6 +32,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+import _sandbox  # noqa: F401,E402  (redirect writes; see tests/_sandbox.py)
+
 from ep_watcher import config, state as st  # noqa: E402
 
 failures = []

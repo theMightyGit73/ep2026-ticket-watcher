@@ -100,18 +100,41 @@ check("a state file that is not JSON", verdict("{ this is not json"), "KEEP")
 check("an empty state file", verdict(""), "KEEP")
 check("no state file on disk at all", missing_state_verdict(), "KEEP")
 
-print("\nThe dry run really is dry")
-# If this script could stop the watcher while under test, nobody would run the
-# test — which is how the untested branch got there in the first place.
+print("\nThe dry run really is dry — measured, not asserted from output")
+# The first version of this check only looked at what the script PRINTED, and
+# passed while the script was stopping the watcher. The dry-run guard sat
+# after `launchctl unload` and before `launchctl load`, so every dry run took
+# the service down and left it down — and this file runs the script eleven
+# times, meaning the test suite itself became the outage.
+#
+# So ask launchd what is loaded, before and after. Output is what the script
+# says about itself; this is what actually happened.
+def loaded():
+    out = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    return {line.split()[-1] for line in out.stdout.splitlines()
+            if "com.davidcoyne.ep2026" in line}
+
+
+before = loaded()
 env = dict(os.environ)
 env.update({"EP_RESTART_DRY_RUN": "1", "EP_STATE_FILE": "/tmp/nope.json"})
 out = subprocess.run(["bash", str(REPO / "restart.sh")],
                      capture_output=True, text=True, env=env, timeout=60)
 combined = out.stdout + out.stderr
+after = loaded()
+
 check("it exits cleanly", out.returncode, 0)
 check("and says it did nothing", "dry run" in combined, True)
+check("and launchd is in exactly the state it was", after, before)
+if before:
+    check("nothing that was loaded got unloaded", before - after, set())
+else:
+    print("  NOTE  no ep2026 agents loaded here, so the launchd check is vacuous")
+
 for danger in ("Installing LaunchAgents", "Starting", "Checking it actually came up"):
     check(f"it never got as far as {danger!r}", danger in combined, False)
+check("and it never announced stopping anything",
+      "Stopping anything already running" in combined, False)
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

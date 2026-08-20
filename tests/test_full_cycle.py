@@ -27,6 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import _sandbox  # noqa: F401,E402  (redirect writes; see tests/_sandbox.py)
+
 from ep_watcher import buyer, config, engine, notify, state as st  # noqa: E402
 from ep_watcher.model import AVAILABLE, UNAVAILABLE, Listing, Reading  # noqa: E402
 from ep_watcher.sources import discovery, inventory_api  # noqa: E402
