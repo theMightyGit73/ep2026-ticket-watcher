@@ -35,6 +35,15 @@ trap 'rm -rf "$SANDBOX"' EXIT
 export EP_STATE_FILE="$SANDBOX/state.json"
 export EP_DIAG_DIR="$SANDBOX/diagnostics"
 export EP_LOG_DIR="$SANDBOX/logs"
+# The two Chrome profiles, for the same reason and with more at stake. Every
+# test that touches them passes an explicit path today, so nothing is
+# currently wrong — but the defaults point at the live ones, and one of the
+# functions reachable from here is release_buying_browser(), which pkills the
+# browser a held ticket lives in. A test written later that calls it with no
+# argument, on an afternoon when a basket is open, would throw away the thing
+# this whole project exists to catch. Sandboxing costs two lines.
+export EP_PROFILE_DIR="$SANDBOX/chrome-profile"
+export EP_BUY_PROFILE_DIR="$SANDBOX/chrome-profile-buy"
 
 passed=0
 failed=0
