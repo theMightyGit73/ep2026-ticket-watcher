@@ -794,6 +794,71 @@ WARM_BUY_BROWSER = os.environ.get("EP_WARM_BUY_BROWSER", "1").lower() in ("1", "
 
 SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "120"))
 
+#: How long to wait for the availability alert once the hold attempt is done.
+#:
+#: The alert is sent on its own thread so the buying browser does not queue
+#: behind an SMTP handshake — see engine.handle(). This is the join at the end
+#: of that, and it exists so the old guarantee survives: handle() does not
+#: return until the alert has been attempted, so nothing about securing can
+#: cost the one message this project exists to send.
+#:
+#: Generous, because by the time it is reached the hold attempt has already
+#: run and the alert has had all of that time to finish. A send still going
+#: after this is almost certainly a hung socket rather than a slow one, and
+#: the thread is a daemon so abandoning it cannot wedge a restart.
+ALERT_JOIN_SECONDS = float(os.environ.get("EP_ALERT_JOIN_SECONDS", "30"))
+
+# ── Ringing David's phone ────────────────────────────────────────────────────
+#
+# Off unless all four are set, and off is the default. Email and push are the
+# channels this project promises; a phone call is an extra, and an extra on
+# the hottest path must never be able to break the thing that works.
+#
+# Why it is worth having: every other channel waits to be noticed, and these
+# listings do not wait. The two weekend tickets on 2026-08-20 were gone inside
+# a minute of appearing. A push seen ten minutes late is the same as no push,
+# and a phone asleep on a table at 3am is the ordinary case rather than the
+# unlucky one.
+#
+# Twilio because it rings a normal phone over the normal network: no app to
+# install, nothing for iOS to kill overnight, and it works with the handset on
+# silent — which is the state a phone is in for most of the hours this watcher
+# is running. It costs about a euro a month for the number and roughly two
+# cent a call.
+#
+# To switch on, in ~/.ep2026-watcher/env (chmod 600 — these are credentials):
+#
+#     export TWILIO_SID=AC...
+#     export TWILIO_TOKEN=...
+#     export TWILIO_FROM=+353...      # the Twilio number
+#     export ALERT_PHONE=+353...      # David's mobile
+#
+# Then check it works, without waiting for a real ticket:
+#
+#     python -m ep_watcher ring
+TWILIO_SID = os.environ.get("TWILIO_SID", "")
+TWILIO_TOKEN = os.environ.get("TWILIO_TOKEN", "")
+TWILIO_FROM = os.environ.get("TWILIO_FROM", "")
+ALERT_PHONE = os.environ.get("ALERT_PHONE", "")
+
+
+def can_ring_phone() -> bool:
+    """All four set? Asked as a function so a test can set them and reload."""
+    return bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM and ALERT_PHONE)
+
+
+#: Minutes before the phone may ring again.
+#:
+#: The availability alert re-fires every few minutes while a listing stays up
+#: (see LIVE_RENAG_MINUTES), and being rung on every one of those is how
+#: somebody learns to decline the call — which would cost exactly the ticket
+#: this exists to catch. One ring, then the emails carry it.
+RING_COOLDOWN_MINUTES = float(os.environ.get("EP_RING_COOLDOWN", "10"))
+
+#: Short on purpose. The call is placed on the alert thread, and a slow
+#: telephony API must not hold up the email and the push behind it.
+RING_TIMEOUT_SECONDS = float(os.environ.get("EP_RING_TIMEOUT", "10"))
+
 # How long David has once a ticket is held. Used only to word the alert,
 # never to decide anything.
 #

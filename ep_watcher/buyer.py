@@ -478,6 +478,47 @@ class HoldResult:
     #: The clock the next mark() measures from.
     _last_mark: float = field(default_factory=time.monotonic)
 
+    # ── Forensics for a lost race ────────────────────────────────────────────
+    #
+    # Added 2026-08-20 after two weekend listings were found and lost within
+    # half an hour, both with a complete and fast pipeline: the row was located
+    # in 0.0s and the click landed on "sold or removed from sale". The timings
+    # said the attempt took 14 and 17 seconds, which sounds like a speed
+    # problem — but nothing in the record could distinguish the two
+    # explanations, and they call for opposite responses:
+    #
+    #   * SOLD. Somebody genuinely bought it in those seconds. The answer is to
+    #     be faster, and every second is worth chasing.
+    #   * HELD, or never purchasable. The listing is in another buyer's basket,
+    #     or the feed is advertising something the offer flow will not honour.
+    #     Then being faster wins nothing at all, because there is nothing to
+    #     win — and the answer is to WAIT and re-attempt, since baskets expire.
+    #
+    # The endpoint can tell them apart, and it is one call. If the listing is
+    # still in the feed immediately after Ticketmaster has said it is gone,
+    # then "sold" is not what happened.
+    #
+    #: Was the listing still in the resale feed at the moment of failure?
+    #: True/False, or None when the endpoint could not be asked.
+    still_listed_after: Optional[bool] = None
+    #: The listing ids the feed returned at that moment, for comparison with
+    #: the id the find was reported under. These ids have been observed to
+    #: change between polls for what is plainly the same listing, so an id that
+    #: differs is evidence about the feed rather than about the ticket.
+    ids_after: List[str] = field(default_factory=list)
+    #: The id this attempt set out to secure.
+    listing_id: str = ""
+    #: Where the click actually landed. Captured on failure as well as on
+    #: success, because the URL of the dead end is the only place the direct
+    #: link to a listing has ever been visible — and a direct link is what
+    #: would let a future attempt skip the search entirely.
+    landed_url: str = ""
+    #: Seconds between the listing being SEEN and this attempt starting. The
+    #: step timings only measure the attempt; the sweep that found it may have
+    #: been up to its whole interval behind, and that latency is invisible in a
+    #: report that starts its clock when the buyer wakes up.
+    detected_age: Optional[float] = None
+
     def note(self, text: str) -> None:
         self.notes.append(text)
         print(f"    [buyer] {text}")
@@ -1026,9 +1067,28 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # have reported a login problem on the first real listing. Caught by
         # reading the flow back on 2026-08-19, before any listing tested it.
         page = session.page
-        page.goto(event.url, wait_until="domcontentloaded")
+        # Don't reload a page we are already standing on.
+        #
+        # The warm browser parks on the event page precisely so an attempt can
+        # start at the search, and it reported "already warm on this page" on
+        # both of the attempts on 2026-08-20 — and then spent a second
+        # reloading that same page anyway, because this goto was
+        # unconditional. The warm path saved the cold start and nothing else.
+        #
+        # Compared on the path alone. The parked URL can carry query
+        # parameters the event URL does not, and a string mismatch here would
+        # silently restore the reload while still reporting "warm".
+        here = ""
+        try:
+            here = (page.url or "").split("?")[0].rstrip("/")
+        except Exception:
+            here = ""
+        if here and here == event.url.split("?")[0].rstrip("/"):
+            result.note(f"already on {event.slug} — starting at the search")
+        else:
+            page.goto(event.url, wait_until="domcontentloaded")
+            result.note(f"opened {event.slug} in the buying browser")
         result.mark("navigate")
-        result.note(f"opened {event.slug} in the buying browser")
 
         # Note it, do not refuse on it.
         #
@@ -1154,12 +1214,28 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
             # this screen is "Find More Tickets", which would restart the
             # search and lose the page we are on.
             if _page_says(page, LISTING_GONE_MARKERS):
-                result.reason = (
-                    "the listing was gone by the time we clicked into it — "
-                    "Ticketmaster says it has been sold or withdrawn. This is "
-                    "the race being lost at the last step, not a fault in the "
-                    "watcher."
-                )
+                # Ask the feed before believing the page. See the forensics
+                # fields on HoldResult: "sold" and "held by somebody else"
+                # produce this identical screen and call for opposite
+                # responses, and the difference is one call away.
+                _probe_after_gone(session, event, listing, result, page)
+                if result.still_listed_after:
+                    result.reason = (
+                        "Ticketmaster showed the 'sold or removed' page, but "
+                        "the resale feed STILL lists this ticket a second "
+                        "later. That is not a race we lost by being slow — it "
+                        "is a listing that cannot be taken right now, most "
+                        "likely sitting in somebody else's basket. Those "
+                        "expire, so it is worth trying again in a few minutes."
+                    )
+                else:
+                    result.reason = (
+                        "the listing was gone by the time we clicked into it — "
+                        "Ticketmaster says it has been sold or withdrawn, and "
+                        "the resale feed agrees it is no longer there. This is "
+                        "the race being lost at the last step, not a fault in "
+                        "the watcher."
+                    )
                 result.note(result.reason)
                 return result
             if not _press_one_safe_button(page, result):
@@ -1299,6 +1375,75 @@ LISTING_GONE_MARKERS = (
     "sold or removed from sale",
     "tickets you wanted have either been sold",
 )
+
+
+def _probe_after_gone(session, event, listing, result: "HoldResult", page) -> None:
+    """Ask the resale feed whether the ticket Ticketmaster just refused is gone.
+
+    Runs the instant the dead-end screen is recognised, and never raises: this
+    is diagnosis, and a failed diagnosis must not change a failure into an
+    exception on the one path where David is already not getting a ticket.
+
+    Costs one same-origin XHR from a page that is already open, which is the
+    same call the sweep makes every ninety seconds. Worth it: this is the only
+    moment the question can be asked, and the answer decides what the whole
+    project should do next. If the ticket is still in the feed after being
+    refused, then chasing seconds is chasing nothing — the listing was never
+    takeable in that moment, and the winning move is to come back when the
+    other basket lapses.
+
+    Also captures the URL of the dead end, which is the only place a direct
+    link to a single listing has ever been observed. If that URL turns out to
+    carry the listing id, a later attempt can navigate straight to it and skip
+    the navigate-quantity-search-panel sequence that costs most of the
+    attempt.
+    """
+    try:
+        result.landed_url = page.url or ""
+        if result.landed_url:
+            result.note(f"dead end at: {result.landed_url}")
+    except Exception:
+        pass
+
+    try:
+        record = session.listings_now(event, config.WANTED_QUANTITY)
+        data = (record or {}).get("data")
+        if not isinstance(data, dict):
+            result.note("could not ask the resale feed whether it really sold")
+            return
+        # Both fields are checked for type before being believed. A `picks`
+        # that is not a list still has a len() — a string of ten characters
+        # reports ten listings — and that would answer "still listed" from
+        # nothing at all, which is the one wrong answer with a cost attached:
+        # it tells David to keep going back to a ticket that really has sold.
+        picks = data.get("picks")
+        picks = picks if isinstance(picks, list) else None
+        total = data.get("total")
+        total = total if isinstance(total, int) else None
+        if picks is None and total is None:
+            result.note(f"the resale feed answered in a shape this does not "
+                        f"know how to read: keys={sorted(data)}")
+            return
+        result.ids_after = [str(p.get("resaleListingId") or p.get("id"))
+                            for p in (picks or []) if isinstance(p, dict)
+                            and (p.get("resaleListingId") or p.get("id"))]
+        result.still_listed_after = bool(
+            total if total is not None else len(picks))
+        wanted = getattr(listing, "listing_id", "") or ""
+        result.listing_id = wanted
+        if result.still_listed_after:
+            same = wanted and wanted in result.ids_after
+            result.note(
+                f"the feed still lists {len(result.ids_after) or total} ticket(s) "
+                f"right after the refusal — id(s) {', '.join(result.ids_after) or '?'}"
+                + (" (the same one we tried)" if same else
+                   f" (we tried {wanted or '?'}, which is NOT among them)"
+                   if wanted else "")
+            )
+        else:
+            result.note("the feed agrees: nothing left. It really did go.")
+    except Exception as exc:
+        result.note(f"could not ask the resale feed: {type(exc).__name__}")
 
 
 #: Where a button's label can hide. Read in this order, most human-meaningful

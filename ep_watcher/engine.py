@@ -1,5 +1,6 @@
 """Orchestration: run the sources, merge their answers, decide who to wake up."""
 
+import threading
 import time
 from typing import List, Optional
 
@@ -11,6 +12,20 @@ from .state import stamp
 # `browser` is imported lazily, inside poll(), because it pulls in Playwright.
 # In API-only mode (EP_USE_BROWSER=0) Playwright is not installed at all, and
 # an import at module scope would kill the process before any source ran.
+
+
+def _safely(label: str, fn, *args) -> None:
+    """Run something off the critical path, and never let it raise into a thread.
+
+    An exception in a thread with nobody joining on the result disappears
+    silently apart from a traceback on stderr, which on this machine goes to a
+    log nobody reads until something is already wrong. Whatever happens to the
+    alert, the line saying so belongs in the same log as the find.
+    """
+    try:
+        fn(*args)
+    except Exception as exc:
+        print(f"[{stamp()}] {label} failed: {type(exc).__name__}: {exc}")
 
 
 def merge(readings: List[Reading]) -> Reading:
@@ -243,8 +258,36 @@ def handle(reading: Reading, st: dict) -> None:
         # optimistic extra that takes up to 45 seconds and can fail in a dozen
         # ways; letting it run before the alert would mean a browser problem
         # could delay or swallow the one message this project exists to send.
-        notify.available(reading, reason, new_listings)
+        #
+        # It goes first, but it no longer goes ALONE. Sending it inline put an
+        # SMTP handshake and an HTTPS push in front of every securing attempt,
+        # on a race whose whole margin is seconds — the attempts on 2026-08-20
+        # took 14 and 17 seconds and lost, and neither number included the mail
+        # that had to be sent before the browser was allowed to move. Nothing
+        # in the alert depends on the hold, and nothing in the hold depends on
+        # the alert, so they are started together and the alert is waited for
+        # afterwards.
+        #
+        # The guarantee is unchanged and is what the join below is for: this
+        # function does not return until the alert has been attempted, so a
+        # crash in securing still cannot cost the message. What changes is only
+        # that the browser stops queueing behind the postman.
+        alert = threading.Thread(
+            target=_safely,
+            args=("availability alert", notify.available,
+                  reading, reason, new_listings),
+            name="ep-alert",
+            daemon=True,
+        )
+        alert.start()
         hold = _maybe_secure(reading, st)
+        # Bounded, because a hung SMTP must not hold the poll loop open for
+        # ever. The thread is a daemon, so a send still running after this is
+        # abandoned rather than allowed to block a restart.
+        alert.join(timeout=config.ALERT_JOIN_SECONDS)
+        if alert.is_alive():
+            print(f"[{stamp()}] the availability alert is still sending after "
+                  f"{config.ALERT_JOIN_SECONDS}s — carrying on without it")
         if hold is not None and hold.secured:
             # The single most valuable line in this function. A basket lives
             # in the browser this process launched, so anything that restarts
@@ -539,6 +582,14 @@ def _maybe_secure(reading: Reading, st: dict = None):
         reason=hold.reason,
         timings=dict(getattr(hold, "timings", {}) or {}),
         seconds=round(sum((getattr(hold, "timings", {}) or {}).values()), 2),
+        # The forensics, so "why do we keep losing these" becomes a query
+        # rather than a re-reading of prose. See HoldResult: still_listed is
+        # the field that decides whether speed is even the right lever.
+        via="sweep" if "sweep" in reading.source else "search",
+        listing_id=getattr(hold, "listing_id", "") or "",
+        still_listed=getattr(hold, "still_listed_after", None),
+        ids_after=list(getattr(hold, "ids_after", []) or []),
+        landed_url=getattr(hold, "landed_url", "") or "",
     )
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")

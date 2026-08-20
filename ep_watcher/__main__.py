@@ -1629,6 +1629,44 @@ def cmd_budget(_args) -> int:
     return 1 if over else 0
 
 
+def cmd_ring(_args) -> int:
+    """Place a real test call, so the setup is proven before a ticket needs it.
+
+    The whole point of the phone channel is that it works at 3am when nothing
+    else does, and there is exactly one bad moment to discover a wrong number
+    or a lapsed Twilio trial. So this rings for real rather than validating
+    credentials — a call that Twilio accepts and that never reaches the
+    handset is the failure worth catching, and only an actual ring finds it.
+    """
+    _banner("Ringing your phone")
+    if not config.can_ring_phone():
+        missing = [n for n in ("TWILIO_SID", "TWILIO_TOKEN", "TWILIO_FROM",
+                               "ALERT_PHONE") if not getattr(config, n)]
+        print("  Phone calls are OFF — not configured.\n")
+        print(f"  Missing: {', '.join(missing)}\n")
+        print("  Everything else still works; this is an optional extra.")
+        print("  To switch it on, put these in ~/.ep2026-watcher/env:\n")
+        print("      export TWILIO_SID=AC...")
+        print("      export TWILIO_TOKEN=...")
+        print("      export TWILIO_FROM=+353...   # your Twilio number")
+        print("      export ALERT_PHONE=+353...   # your mobile\n")
+        print("  A Twilio number is about €1/month and a call about €0.02.")
+        print("  Then run this again.\n")
+        return 1
+
+    print(f"  Calling {config.ALERT_PHONE} from {config.TWILIO_FROM} ...\n")
+    # Bypass the cooldown: a test the user asked for must not be silently
+    # swallowed because a real alert happened to ring nine minutes ago.
+    notify._last_call_at = 0.0
+    if notify.ring_phone("This is a test of the Electric Picnic ticket watcher"):
+        print("  Placed. Your phone should ring within a few seconds.\n")
+        print("  If it does not, the number or the Twilio account is the")
+        print("  problem — check the Twilio console's call log.\n")
+        return 0
+    print("\n  The call was NOT placed. The reason is above.\n")
+    return 1
+
+
 def cmd_status(_args) -> int:
     st = state_mod.load()
     print(f"\n  State file : {config.STATE_FILE}")
@@ -1671,6 +1709,7 @@ COMMANDS = {
     "resolve-id": cmd_resolve_id,
     "networks": cmd_networks,
     "status": cmd_status,
+    "ring": cmd_ring,
     "budget": cmd_budget,
     "backup": cmd_backup,
     "events": cmd_events,

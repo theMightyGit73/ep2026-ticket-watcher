@@ -346,6 +346,95 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
         tags=["tickets", "rotating_light"],
         click=link,
     )
+    # Last, and only for the real thing. A ringing phone is the one channel
+    # that works when the others do not — asleep, in a pocket, in a cinema —
+    # and it is the only one that costs money and wakes people, so it is fired
+    # for a ticket and for nothing else. Never for a heartbeat, a watchdog or
+    # a test.
+    _safe("call", ring_phone, f"{_headline(pick)} on {name}")
+
+
+#: Whether the phone rang for this find already, keyed by nothing — a single
+#: flag, because the re-nag alert fires every few minutes while a listing
+#: stays up and David does not need to be rung every time.
+_last_call_at = 0.0
+
+
+def ring_phone(what: str) -> bool:
+    """Actually telephone David. False when not configured, which is the default.
+
+    Everything else this module sends is a notification: it arrives, and it
+    waits to be noticed. A resale ticket on this event has never survived long
+    enough to wait — the two on 2026-08-20 were gone inside a minute — so the
+    difference between a push seen now and a push seen in ten minutes is the
+    whole product. A phone call is the only channel that interrupts rather
+    than queues.
+
+    Twilio because it is the one that needs no app installed and rings a
+    normal phone through the normal network, so it works with the handset
+    face-down, on silent, or with the ntfy app killed by iOS overnight.
+
+    Deliberately inert unless three variables are set, and silent about it —
+    this is an optional extra on the hottest path in the system, and a missing
+    account must never be able to delay or break the alert that does work.
+    Set these in ~/.ep2026-watcher/env to switch it on:
+
+        TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, ALERT_PHONE
+
+    Rate limited to one call per RING_COOLDOWN_MINUTES. The availability alert
+    re-fires every few minutes while a listing stays up, and being rung on
+    each of those would train him to decline the call — which would cost
+    exactly the ticket this exists to catch.
+    """
+    global _last_call_at
+
+    if not config.can_ring_phone():
+        return False
+    now = time.time()
+    if now - _last_call_at < config.RING_COOLDOWN_MINUTES * 60:
+        print(f"[{stamp()}] not ringing again — called "
+              f"{(now - _last_call_at) / 60:.1f} min ago")
+        return False
+
+    # Spoken twice: a phone answered from a pocket loses the first sentence.
+    speech = (f"Electric Picnic ticket alert. {what}. "
+              f"Check your email now. "
+              f"Repeating. Electric Picnic ticket alert. {what}.")
+    try:
+        response = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{config.TWILIO_SID}"
+            f"/Calls.json",
+            auth=(config.TWILIO_SID, config.TWILIO_TOKEN),
+            data={
+                "To": config.ALERT_PHONE,
+                "From": config.TWILIO_FROM,
+                "Twiml": f"<Response><Say voice='alice'>{_xml_safe(speech)}"
+                         f"</Say></Response>",
+            },
+            timeout=config.RING_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        print(f"[{stamp()}] could not place the call: {type(exc).__name__}: {exc}")
+        return False
+
+    if response.status_code >= 300:
+        print(f"[{stamp()}] Twilio refused the call: HTTP "
+              f"{response.status_code} {response.text[:200]}")
+        return False
+    _last_call_at = now
+    print(f"[{stamp()}] PHONE RINGING — {config.ALERT_PHONE}")
+    return True
+
+
+def _xml_safe(text: str) -> str:
+    """Escape for TwiML. The section and price come from Ticketmaster's feed.
+
+    A stray ampersand in a listing description would otherwise produce
+    malformed XML, which Twilio rejects — turning a ticket alert into a silent
+    phone on the one occasion it was most needed.
+    """
+    return (text.replace("&", "and").replace("<", "").replace(">", "")
+                .replace('"', "").replace("'", ""))
 
 
 def _preempt_line(hold) -> str:
@@ -534,8 +623,44 @@ def secure_failed(reading: Reading, hold) -> None:
         f"There is NO hold. The separate 'TICKETS AVAILABLE' email has the\n"
         f"link — if the listing is still there it is still yours to take.\n\n"
         f"What it saw:\n{_listing_block(reading.listings)}\n\n"
+        f"{_verdict_block(hold)}"
         f"{_timing_block(hold)}"
         f"Tried at: {stamp()}\n",
+    )
+
+
+def _verdict_block(hold) -> str:
+    """Did it sell, or was it never takeable? The distinction, in the email.
+
+    "Could not hold it" has meant the same sentence all week whether the
+    ticket was bought by somebody else a second earlier or was never available
+    to anybody — and those call for opposite responses from David. If it sold,
+    refreshing is pointless and the next listing is the only hope. If it is
+    still in the feed, it is in a basket that will lapse, and trying again in
+    a few minutes is the single most useful thing he can do.
+
+    Empty when the question could not be asked, rather than guessing. A
+    confident wrong answer here sends him either to a dead page or away from a
+    live one.
+    """
+    still = getattr(hold, "still_listed_after", None)
+    if still is None:
+        return ""
+    if still:
+        ids = ", ".join(getattr(hold, "ids_after", []) or []) or "unknown"
+        return (
+            "IT MAY NOT ACTUALLY BE GONE.\n"
+            "Ticketmaster showed the 'sold or removed' page, but its own\n"
+            f"resale feed still listed a ticket a second later (id: {ids}).\n"
+            "That pattern means somebody else is holding it in a basket\n"
+            "rather than having bought it — and those baskets expire.\n"
+            "TRY THE LINK AGAIN IN A FEW MINUTES. The watcher will also\n"
+            "alert you again the moment it reappears.\n\n"
+        )
+    return (
+        "It really did go: the resale feed agreed it was no longer there\n"
+        "when asked immediately afterwards. Refreshing will not bring it\n"
+        "back — the next listing is the one to wait for.\n\n"
     )
 
 
