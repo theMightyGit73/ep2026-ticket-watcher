@@ -35,10 +35,9 @@ rather than failing silently.
 
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 from . import config
-from .state import stamp
 
 #: How the email field might be labelled. Tried in order.
 EMAIL_SELECTORS = (
