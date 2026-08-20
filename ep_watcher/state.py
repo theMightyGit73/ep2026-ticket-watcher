@@ -114,6 +114,10 @@ def _defaults():
         # the cadence actually in force — which changes overnight — instead
         # of a fixed threshold that only ever matched the daytime one.
         "next_poll_due": None,            # ISO8601
+        # When the runtime directory was last copied. Daily rather than on
+        # every poll: the things worth saving change slowly, and the browser
+        # session being copied is several megabytes.
+        "last_backup_at": None,           # ISO8601
     }
 
 
@@ -815,6 +819,17 @@ def note_next_poll(state: dict, seconds: float) -> None:
 def note_profile_reset(state: dict) -> None:
     """Record that the browser identity was rebuilt just now."""
     state["profile_reset_at"] = utc_now().isoformat()
+
+
+def backup_is_due(state: dict, every_hours: float = 24.0) -> bool:
+    """Has it been long enough since the last snapshot? True on the first ever."""
+    hours = _hours_since(state.get("last_backup_at"))
+    return hours is None or hours >= every_hours
+
+
+def note_backup(state: dict) -> None:
+    """Record that a snapshot was taken just now."""
+    state["last_backup_at"] = utc_now().isoformat()
 
 
 def profile_age_minutes(state: dict) -> Optional[float]:
