@@ -126,7 +126,8 @@ def attempt(event, state, hold_to_return):
     seen = {}
     browser_busy = st.held_priority(state) > 0
 
-    def fake_secure(ev, listing, timeout_s=None, may_preempt=False):
+    def fake_secure(ev, listing, timeout_s=None, may_preempt=False,
+                    worker=None):
         seen["slug"] = ev.slug
         seen["may_preempt"] = may_preempt
         if browser_busy and not may_preempt:

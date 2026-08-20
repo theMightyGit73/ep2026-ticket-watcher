@@ -35,10 +35,12 @@ alert still goes out. Treat the first real find as the test.
 
 import json
 import os
+import queue
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -87,6 +89,13 @@ KNOWN_ANONYMOUS_COOKIES = {
 #: That is exactly as wrong as the two hours it replaced.
 ANALYTICS_PREFIXES = ("_ga", "_gid", "_gcl", "_fbp", "_uet", "_scid", "__gads",
                       "__gpi", "cto_", "_au_", "_pn_", "permutive", "_ddl")
+
+
+def _stamp() -> str:
+    """Local shim for state.stamp(), imported lazily to avoid a cycle."""
+    from .state import stamp
+
+    return stamp()
 
 
 def _is_analytics(name: str) -> bool:
@@ -634,8 +643,246 @@ class BuySession:
     # what secure(), doctor and check-buy all already use.
 
 
+class BuyerWorker(threading.Thread):
+    """A signed-in browser kept open and warm, waiting for a listing.
+
+    Measured on 2026-08-20: two weekend listings at €366.39 were found and
+    lost, and once the detection lag was fixed the entire remaining gap was
+    this — about sixty seconds between seeing a listing and clicking its row,
+    spent almost wholly on work that could have been done in advance. A fresh
+    Chrome was launched, the event page loaded through its 401-then-reload
+    dance, and only then did the part that depends on the listing begin. These
+    listings are consumed in well under a minute.
+
+    So the browser is opened once, at startup, and parked on the event page.
+    When a listing appears the attempt begins at the search.
+
+    THE THREAD IS THE POINT, not an optimisation. Playwright's sync objects
+    belong to the thread that created them, which is why securing already ran
+    in a thread of its own — see secure_in_thread. A browser created at
+    startup and then driven from a different thread fails in exactly the
+    family of ways that made the threading necessary in the first place.
+
+    That constraint shapes the whole class: ONE thread owns the session for
+    its entire life, and every operation that touches the page — attempting,
+    re-parking, dropping a basket to make room, shutting down — is a job on a
+    queue rather than a method that reaches in from outside. The public
+    methods only ever put things on the queue and read a state string.
+
+    Everything degrades. If the worker cannot start, has died, or is busy,
+    secure_in_thread falls back to the cold-start path that has always been
+    there. A warm browser is a speed-up, never a dependency.
+    """
+
+    #: Re-load the parked page this often, so a browser left open for hours is
+    #: not asked to act on a page rendered before lunch. One page load per
+    #: interval, spent while nothing is happening rather than during a race.
+    REFRESH_MINUTES = float(os.environ.get("EP_BUY_WARM_REFRESH", "20"))
+
+    #: How long to wait at startup for the browser to come up. Generous: it
+    #: happens once, alongside the watcher's own browser starting.
+    STARTUP_TIMEOUT = float(os.environ.get("EP_BUY_WARM_STARTUP", "120"))
+
+    def __init__(self, home=None):
+        super().__init__(name="ep-buyer-warm", daemon=True)
+        #: The page to sit on while idle — the most important securable one,
+        #: so the commonest find needs no navigation at all.
+        self.home = home or next(
+            (e for e in config.EVENTS if e.secure), config.EVENTS[0])
+        self._jobs = queue.Queue()
+        self._session = None
+        self._parked_on = None
+        self._lock = threading.Lock()
+        #: "starting" -> "idle" <-> "busy" -> "holding" -> "idle" | "dead"
+        self._state = "starting"
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+
+    # ── state, safe to read from any thread ──────────────────────────────
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    def _set(self, state: str) -> None:
+        with self._lock:
+            self._state = state
+
+    @property
+    def available(self) -> bool:
+        """Idle and alive, so it can take a job now."""
+        return self.state == "idle" and self.is_alive()
+
+    @property
+    def holding(self) -> bool:
+        """Is a basket live in this browser?
+
+        This is what replaces profile_in_use() once a browser is kept warm.
+        That check greps the process table for a Chrome on the buying profile,
+        which was a fair proxy while the browser existed only during an
+        attempt — and becomes permanently true the moment one is warm, which
+        would refuse every job for ever. Asking the worker is both cheaper and
+        actually correct.
+        """
+        return self.state == "holding"
+
+    # ── the thread: the only place the page is ever touched ──────────────
+
+    def run(self) -> None:
+        try:
+            self._session = BuySession().start()
+            self._park(self.home, force=True)
+            self._set("idle")
+        except Exception as exc:
+            print(f"[{_stamp()}] warm buying browser could not start: "
+                  f"{type(exc).__name__}: {exc} — cold starts will be used")
+            self._set("dead")
+            self._ready.set()
+            return
+        finally:
+            self._ready.set()
+
+        last_refresh = time.monotonic()
+        while not self._stop.is_set():
+            try:
+                job = self._jobs.get(timeout=5.0)
+            except queue.Empty:
+                # Keep the parked page fresh, but ONLY while genuinely idle.
+                # A reload while holding is precisely what throws the basket
+                # away, which is the most expensive thing this class can do.
+                if (self.state == "idle"
+                        and time.monotonic() - last_refresh > self.REFRESH_MINUTES * 60):
+                    self._safe_park()
+                    last_refresh = time.monotonic()
+                continue
+
+            kind = job[0]
+            if kind == "stop":
+                break
+            if kind == "release":
+                # The hold is over — David paid, or it lapsed. Navigating away
+                # is what actually drops whatever is left in the basket.
+                if self.state == "holding":
+                    self._safe_park()
+                    self._set("idle")
+                continue
+            if kind == "secure":
+                self._run_job(job)
+                last_refresh = time.monotonic()
+
+        if self.state != "holding" and self._session is not None:
+            try:
+                self._session.close()
+            except Exception:
+                pass
+
+    def _park(self, event, force: bool = False) -> None:
+        if self._session is None:
+            return
+        if not force and self._parked_on == event.slug:
+            return
+        self._session.page.goto(event.url, wait_until="domcontentloaded")
+        self._parked_on = event.slug
+
+    def _safe_park(self) -> None:
+        """Re-park, swallowing anything. Used off the critical path only."""
+        was = self.state
+        try:
+            self._set("busy")
+            self._park(self.home, force=True)
+        except Exception as exc:
+            print(f"[{_stamp()}] warm browser could not re-park: {exc}")
+        finally:
+            self._set("idle" if was != "dead" else "dead")
+
+    def _run_job(self, job) -> None:
+        _, event, listing, may_preempt, box, done = job
+        result = box["result"]
+        try:
+            if self.state == "holding":
+                # Only reachable when the caller granted preemption; submit()
+                # refuses otherwise. Navigating away drops the basket, which
+                # is the whole meaning of preempting.
+                result.note("dropping the live hold to go for a more "
+                            "important ticket")
+                self._park(self.home, force=True)
+                result.preempted = True
+            self._set("busy")
+            if self._parked_on == event.slug:
+                result.note("buying browser was already warm on this page")
+                result.mark("warm")
+            else:
+                self._park(event)
+                result.mark("navigate")
+            box["result"] = secure(self._session, event, listing, result)
+        except Exception as exc:
+            result.reason = f"{type(exc).__name__}: {exc}"
+            result.note(f"warm secure attempt failed: {result.reason}")
+            box["result"] = result
+        finally:
+            if box["result"].secured:
+                # The browser IS the checkout window now. Nothing may reuse,
+                # reload or close it until the hold is done with.
+                self._set("holding")
+            else:
+                self._safe_park()
+            done.set()
+
+    # ── the API, which only ever enqueues ────────────────────────────────
+
+    def wait_until_ready(self, timeout: float = None) -> bool:
+        self._ready.wait(self.STARTUP_TIMEOUT if timeout is None else timeout)
+        return self.available
+
+    def submit(self, event, listing, result, timeout_s: float, may_preempt=False):
+        """Hand one attempt over. HoldResult, or None meaning 'not mine'.
+
+        None is an instruction to the caller: fall back to a cold start. A
+        definite refusal comes back as a HoldResult with a reason, because
+        "the browser is holding something more important" is an answer David
+        needs to read, not a reason to open a second browser on the same
+        profile while a basket is live.
+        """
+        state = self.state
+        if state in ("dead", "starting") or not self.is_alive():
+            return None
+        if state == "busy":
+            return None
+        if state == "holding" and not may_preempt:
+            result.reason = (
+                "the buying browser is already open holding something at "
+                "least as important as this, so it was left alone. Finish "
+                "or close that window and this page can be secured by hand; "
+                "nothing was touched here."
+            )
+            result.note(result.reason)
+            return result
+
+        box = {"result": result}
+        done = threading.Event()
+        self._jobs.put(("secure", event, listing, may_preempt, box, done))
+        if not done.wait(timeout_s):
+            result.reason = (
+                f"the warm buying browser was still working after "
+                f"{timeout_s:.0f}s and was abandoned — the poll loop must "
+                f"not wait on it"
+            )
+            return result
+        return box["result"]
+
+    def release(self) -> None:
+        """The hold is finished with. Ask the worker to free the browser."""
+        if self.state == "holding":
+            self._jobs.put(("release",))
+
+    def shutdown(self) -> None:
+        self._stop.set()
+        self._jobs.put(("stop",))
+
+
 def secure_in_thread(event, listing, timeout_s: int = None,
-                     may_preempt: bool = False) -> HoldResult:
+                     may_preempt: bool = False, worker=None) -> HoldResult:
     """Open the buying browser and hold `listing`, from its own thread.
 
     The thread is not an optimisation, it is the only way this works.
@@ -658,11 +905,30 @@ def secure_in_thread(event, listing, timeout_s: int = None,
     its own if it overruns: a hung browser must not wedge the poll loop, which
     is the one thing that must keep running whatever else breaks.
     """
-    import threading
-
     from .state import stamp as state_stamp
 
     budget = timeout_s or (config.SECURE_TIMEOUT_SECONDS + 60)
+
+    # The warm path, when there is one. See BuyerWorker: the browser is
+    # already open and already on the page, so the attempt starts at the
+    # search rather than at a cold Chrome launch and a 401-reload dance —
+    # which together were most of the sixty seconds these listings do not
+    # give us.
+    #
+    # A None back means "not mine, use the cold path": dead, still starting,
+    # or busy with another attempt. A HoldResult back is a real answer,
+    # including a refusal, and must be returned rather than retried cold —
+    # opening a second browser on the same profile while a basket is live is
+    # how a caught ticket gets thrown away.
+    if worker is not None:
+        warm = worker.submit(event, listing, HoldResult(), budget,
+                             may_preempt=may_preempt)
+        if warm is not None:
+            line = warm.timing_line()
+            if line:
+                print(f"[{state_stamp()}] hold timings (warm): {line}")
+            return warm
+
     box = {"result": HoldResult()}
 
     def run():

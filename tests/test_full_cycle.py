@@ -234,7 +234,8 @@ print("\nA find reaches the buyer, and the buyer's answer reaches the inbox")
 attempts = []
 
 
-def fake_secure(event, listing, timeout_s=None, may_preempt=False):
+def fake_secure(event, listing, timeout_s=None, may_preempt=False,
+                worker=None):
     attempts.append((event.slug, listing.section, may_preempt))
     hold = buyer.HoldResult(secured=True, minutes_hint=11, minutes_measured=True,
                             checkout_url="https://www.ticketmaster.ie/checkout/abc")

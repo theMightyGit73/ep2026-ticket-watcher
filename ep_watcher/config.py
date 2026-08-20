@@ -646,6 +646,21 @@ BUY_PROFILE_DIR = Path(
 # are spent by a browser that was going to fail anyway, and the availability
 # alert has already been sent. If the listing is there, this is the whole
 # game. The asymmetry says be patient.
+#: Keep the signed-in buying browser open and parked, rather than launching
+#: one when a listing appears.
+#:
+#: Measured on 2026-08-20: once detection lag was fixed, the whole remaining
+#: gap was the ~60s between seeing a listing and clicking its row, and almost
+#: all of that was a cold Chrome launch and the event page's 401-then-reload
+#: dance — work that does not depend on the listing and can be done in
+#: advance. The listings are consumed in well under a minute.
+#:
+#: The cost is a second Chrome resident all day and a signed-in session
+#: sitting idle, which is one more thing for Ticketmaster to fingerprint.
+#: That is a real trade and this switch exists so it can be reversed in one
+#: environment variable.
+WARM_BUY_BROWSER = os.environ.get("EP_WARM_BUY_BROWSER", "1").lower() in ("1", "true", "yes")
+
 SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "120"))
 
 # How long David has once a ticket is held. Used only to word the alert,

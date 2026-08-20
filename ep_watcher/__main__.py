@@ -469,6 +469,23 @@ def cmd_watch(args) -> int:
     was_night = config.is_night()
     # Lives across the whole run, so its per-event clocks and its refusal
     # count survive between cycles. See engine.ResaleSweep.
+    # The warm buying browser, started alongside the watcher's own. Opening
+    # it now is the whole point: a cold Chrome launch plus the event page's
+    # 401-reload dance was most of the sixty seconds between seeing a listing
+    # and clicking it, and these listings do not last sixty seconds.
+    #
+    # Nothing waits on it and nothing depends on it. If it never comes up,
+    # secure_in_thread falls back to the cold start it has always used.
+    buy_worker = None
+    if config.SECURE_ON_FIND and config.WARM_BUY_BROWSER:
+        from . import buyer as _buyer
+
+        buy_worker = _buyer.BuyerWorker()
+        buy_worker.start()
+        engine.set_buy_worker(buy_worker)
+        print("  Buying browser: warming in the background "
+              "(cold start used if it fails)")
+
     sweep = engine.ResaleSweep()
     if config.RESALE_SWEEP:
         print(f"  Resale sweep: every ~{config.RESALE_SWEEP_SECONDS}s between "
@@ -554,6 +571,14 @@ def cmd_watch(args) -> int:
             # blocks recorded in six days was cleared by a fresh profile on
             # the first attempt, so the identity — not the address — is what
             # ages out. Doing it here spends the sleep window, not a poll.
+            # A hold that has run out its clock frees the warm browser. Done
+            # here rather than on a timer because this is the loop that
+            # already knows the hold is over — it is the same condition the
+            # watchdog uses to decide it may restart the watcher again.
+            if buy_worker is not None and buy_worker.holding:
+                if state_mod.hold_remaining(state_mod.load()) <= 0:
+                    print(f"[{stamp()}] hold window over — releasing the buying browser")
+                    buy_worker.release()
             _refresh_profile_if_stale(session)
             # Same reasoning, same window: the daily copy of the env file, the
             # state and the signed-in session costs a second or two and must
@@ -565,6 +590,12 @@ def cmd_watch(args) -> int:
         return 0
     finally:
         session.close()
+        if buy_worker is not None:
+            engine.set_buy_worker(None)
+            # Shutdown deliberately does NOT close a browser that is holding
+            # something. If David is mid-checkout when this process stops, the
+            # basket is his and the window stays.
+            buy_worker.shutdown()
 
 
 def _sleep_and_sweep(session, sweep, seconds: float) -> None:

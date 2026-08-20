@@ -521,7 +521,8 @@ def _maybe_secure(reading: Reading, st: dict = None):
               f"{st.get('hold_event_slug')} — that hold will be dropped for this")
 
     print(f"[{stamp()}] listing found — opening the signed-in browser to hold it")
-    hold = buyer.secure_in_thread(event, listing, may_preempt=may_preempt)
+    hold = buyer.secure_in_thread(event, listing, may_preempt=may_preempt,
+                                  worker=buy_worker())
 
     # A dropped hold is news whether or not the swap paid off, and if it did
     # not pay off the record must not keep claiming a ticket is held.
@@ -587,6 +588,28 @@ def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
             f"[{stamp()}] could not deliver the watchdog alert — leaving the "
             f"clock unset so the next poll tries again"
         )
+
+
+#: The warm buying browser, when the watch loop has started one.
+#:
+#: A module-level holder rather than a key in the state dict, and that is not
+#: a style preference. state.json is written with json.dump on every cycle, so
+#: putting a thread in it would make every save raise TypeError — which
+#: state.save() catches and warns about, meaning state would silently stop
+#: persisting from the moment the worker was created. The one file the
+#: watchdog reads to decide whether a checkout is live is not a place to keep
+#: unserialisable objects.
+_BUY_WORKER = None
+
+
+def set_buy_worker(worker) -> None:
+    """Tell the engine which warm browser to hand finds to. None disables it."""
+    global _BUY_WORKER
+    _BUY_WORKER = worker
+
+
+def buy_worker():
+    return _BUY_WORKER
 
 
 def securing_warning() -> str:
