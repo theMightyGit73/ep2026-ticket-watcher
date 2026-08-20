@@ -29,6 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import _sandbox  # noqa: F401,E402  (redirect writes; see tests/_sandbox.py)
+
 from ep_watcher import config, liveness, notify, pushquota  # noqa: E402
 
 
