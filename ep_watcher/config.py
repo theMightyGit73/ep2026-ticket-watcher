@@ -338,8 +338,19 @@ EVENTS = [
     # The Early Entry Pass — campsite access from 2pm on the Thursday. A
     # separate page with its own inventory, and NOT a ticket: Ticketmaster's
     # own note reads "Early Entry passes are only valid with a Weekend
-    # Ticket". Watched and alerted on like the others, but never secured
-    # automatically — see Event.secure.
+    # Ticket".
+    #
+    # It IS secured, and this comment used to say the opposite. It was
+    # excluded when the feature was built, on the reasoning that holding an
+    # add-on would pull David to a checkout for something useless on its own;
+    # he overruled that on 2026-08-19 and asked for it to be treated as
+    # importantly as the ticket. The switch below was changed and this
+    # sentence was not, so the file argued with itself for a day — in a
+    # codebase where the comments ARE the documentation, that is the
+    # expensive kind of stale.
+    #
+    # What makes it safe is priority, not exclusion: it gives way to a
+    # weekend ticket rather than being refused. See Event.secure_priority.
     Event(
         slug="early-entry",
         name="Electric Picnic 2026 - Early Entry Pass",
