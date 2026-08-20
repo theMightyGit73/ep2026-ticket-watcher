@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, engine, notify, state as state_mod
+from . import config, engine, events, notify, state as state_mod
 from .sources import discovery, inventory_api
 from .state import stamp
 
@@ -450,6 +450,9 @@ def cmd_watch(args) -> int:
         )
         time.sleep(offset)
 
+    events.emit("start", interval=interval,
+                securing=config.SECURE_ON_FIND, sweep=config.RESALE_SWEEP,
+                night=config.is_night())
     session = _start_session()
     # Start the identity clock if nothing has ever set it, so the pre-emptive
     # refresh has an age to measure against. Stamping now rather than assuming
@@ -788,6 +791,68 @@ def _watch_apis_only(interval: int) -> int:
     except KeyboardInterrupt:
         print(f"\n[{stamp()}] Stopped.")
         return 0
+
+
+def cmd_events(_args) -> int:
+    """Answer the questions the prose log cannot.
+
+    Written after an afternoon of grepping watcher.log with throwaway parsers,
+    one of which reported nearly every poll as a find because
+    `"AVAILABLE" in "UNAVAILABLE"` is true. The answer was wrong and looked
+    entirely plausible, which is the argument for having data rather than
+    prose to query.
+    """
+    from . import events as ev
+
+    records = ev.read()
+    if not records:
+        print(f"\n  No events recorded yet — {ev.path()}\n")
+        return 0
+
+    _banner(f"{len(records)} events at {ev.path()}")
+    counts = ev.summarise(records)
+    print("  What is in the log:")
+    for kind, n in counts.items():
+        print(f"    {kind:10} {n:6}")
+
+    finds = [r for r in records if r.get("kind") == "find"]
+    holds = [r for r in records if r.get("kind") == "hold"]
+    polls = [r for r in records if r.get("kind") == "poll"]
+
+    if polls:
+        blind = sum(1 for r in polls if r.get("resale") == "UNKNOWN")
+        print(f"\n  Polls: {len(polls)}, resale unreadable on {blind} "
+              f"({blind / len(polls) * 100:.1f}%)")
+
+    if finds:
+        print(f"\n  Finds ({len(finds)}):")
+        for r in finds:
+            via = r.get("via", "?")
+            for listing in (r.get("listings") or ["?"]):
+                print(f"    {r.get('ts','')[:16]}  {r.get('event',''):28} "
+                      f"via {via:7} {listing}")
+        # The question that settled whether these were sold or merely held in
+        # someone else's basket: does any listing id ever come back?
+        ids = [i for r in finds for i in (r.get("listing_ids") or [])]
+        repeats = {i for i in ids if ids.count(i) > 1}
+        print(f"    ids seen: {len(ids)}, ever seen twice: "
+              f"{len(repeats)}{'  <- a listing came back' if repeats else ''}")
+
+    if holds:
+        won = sum(1 for r in holds if r.get("secured"))
+        print(f"\n  Hold attempts: {len(holds)}, secured {won}")
+        for r in holds[-8:]:
+            secs = r.get("seconds")
+            timings = r.get("timings") or {}
+            worst = max(timings.items(), key=lambda kv: kv[1]) if timings else None
+            print(f"    {r.get('ts','')[:16]}  {r.get('event',''):28} "
+                  f"{'HELD' if r.get('secured') else 'lost'}"
+                  f"{f'  {secs}s' if secs else ''}"
+                  f"{f'  slowest {worst[0]} {worst[1]:.1f}s' if worst else ''}")
+            if not r.get("secured") and r.get("reason"):
+                print(f"        {str(r['reason'])[:90]}")
+    print()
+    return 0
 
 
 def cmd_backup(_args) -> int:
@@ -1550,6 +1615,7 @@ COMMANDS = {
     "status": cmd_status,
     "budget": cmd_budget,
     "backup": cmd_backup,
+    "events": cmd_events,
 }
 
 

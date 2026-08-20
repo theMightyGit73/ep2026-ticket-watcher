@@ -495,6 +495,24 @@ def secured_hold(reading: Reading, hold) -> None:
     )
 
 
+def _timing_block(hold) -> str:
+    """Where the seconds went, for an email about a race that was lost.
+
+    These listings are consumed in well under a minute, so "it was gone when
+    we got there" is only half an answer — the other half is how long getting
+    there took, and which step ate it. Without this the only available reply
+    to "why did we lose" is an estimate read off minute-resolution log lines,
+    which is what was being done until 2026-08-20.
+
+    Silent when nothing was measured, so an attempt that failed before it
+    started does not print a heading over an empty list.
+    """
+    line = getattr(hold, "timing_line", lambda: "")()
+    if not line:
+        return ""
+    return f"Where the time went:\n  {line}\n\n"
+
+
 def secure_failed(reading: Reading, hold) -> None:
     """We tried to hold it and could not. Say so plainly, and why.
 
@@ -516,6 +534,7 @@ def secure_failed(reading: Reading, hold) -> None:
         f"There is NO hold. The separate 'TICKETS AVAILABLE' email has the\n"
         f"link — if the listing is still there it is still yours to take.\n\n"
         f"What it saw:\n{_listing_block(reading.listings)}\n\n"
+        f"{_timing_block(hold)}"
         f"Tried at: {stamp()}\n",
     )
 

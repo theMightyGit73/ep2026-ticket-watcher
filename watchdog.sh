@@ -89,7 +89,11 @@ rotate_log() {
     fi
 }
 
-for logfile in "$LOG_DIR"/*.log; do
+# Both the prose log and the JSONL event log. The second was added on
+# 2026-08-20 and would otherwise have grown unbounded behind a rotation that
+# only knew about *.log — which is the same omission this block exists to fix,
+# repeated one file later. Rotated copies gain a .1 and so match neither glob.
+for logfile in "$LOG_DIR"/*.log "$LOG_DIR"/*.jsonl; do
     [ -e "$logfile" ] || continue     # nothing there yet; the glob is literal
     rotate_log "$logfile"
 done

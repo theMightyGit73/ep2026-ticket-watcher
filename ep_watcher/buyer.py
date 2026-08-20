@@ -40,6 +40,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -450,9 +451,60 @@ class HoldResult:
     #: comes from one observation of an entirely different event.
     minutes_measured: bool = False
 
+    #: Seconds spent on each step, in the order they happened.
+    #:
+    #: Added 2026-08-20, because the race was being tuned on inference. Two
+    #: weekend listings at €366.39 were found and lost that day, and the best
+    #: anyone could say about why was "roughly sixty seconds, probably" —
+    #: derived from minute-resolution log lines. That is not a measurement,
+    #: and you cannot optimise against it.
+    #:
+    #: Now every failed hold says exactly where its seconds went, which turns
+    #: the next lost ticket from a shrug into a number. It also settles
+    #: whether keeping the buying browser warm was worth it, rather than
+    #: leaving that as an opinion.
+    timings: "OrderedDict[str, float]" = field(default_factory=OrderedDict)
+    #: When the attempt began, for total elapsed.
+    started_at: float = field(default_factory=time.monotonic)
+    #: The clock the next mark() measures from.
+    _last_mark: float = field(default_factory=time.monotonic)
+
     def note(self, text: str) -> None:
         self.notes.append(text)
         print(f"    [buyer] {text}")
+
+    def mark(self, step: str) -> float:
+        """Record the seconds spent since the previous mark. Returns them.
+
+        Deliberately measures the GAP rather than the total, so the steps sum
+        to the elapsed time and the slow one is obvious at a glance. Repeated
+        step names accumulate rather than overwrite — a retry is still time
+        spent on that step, and hiding it would flatter exactly the step that
+        needs looking at.
+        """
+        now = time.monotonic()
+        spent = now - self._last_mark
+        self._last_mark = now
+        self.timings[step] = self.timings.get(step, 0.0) + spent
+        return spent
+
+    @property
+    def elapsed(self) -> float:
+        """Total seconds from the start of the attempt to now."""
+        return time.monotonic() - self.started_at
+
+    def timing_line(self) -> str:
+        """One line for the log and the email, slowest step called out.
+
+        Empty when nothing was measured, so callers can drop it rather than
+        print a heading over nothing.
+        """
+        if not self.timings:
+            return ""
+        parts = " ".join(f"{k} {v:.1f}s" for k, v in self.timings.items())
+        slowest = max(self.timings.items(), key=lambda kv: kv[1])
+        return (f"{parts} | total {sum(self.timings.values()):.1f}s "
+                f"| slowest: {slowest[0]} at {slowest[1]:.1f}s")
 
 
 class BuySession:
@@ -608,6 +660,8 @@ def secure_in_thread(event, listing, timeout_s: int = None,
     """
     import threading
 
+    from .state import stamp as state_stamp
+
     budget = timeout_s or (config.SECURE_TIMEOUT_SECONDS + 60)
     box = {"result": HoldResult()}
 
@@ -637,6 +691,7 @@ def secure_in_thread(event, listing, timeout_s: int = None,
                 hold.note("the earlier hold has been dropped")
         try:
             session = BuySession().start()
+            hold.mark("launch")
             hold = secure(session, event, listing, hold)
         except Exception as exc:
             hold.reason = f"{type(exc).__name__}: {exc}"
@@ -651,6 +706,13 @@ def secure_in_thread(event, listing, timeout_s: int = None,
                     session.close()
                 except Exception:
                     pass
+            # Where the seconds went, win or lose. On a loss this is the whole
+            # diagnosis: these listings are consumed in well under a minute,
+            # so whichever step ate the most of it is the only thing worth
+            # arguing about afterwards.
+            line = hold.timing_line()
+            if line:
+                print(f"[{state_stamp()}] hold timings: {line}")
             box["result"] = hold
 
     worker = threading.Thread(target=run, name="ep-secure", daemon=True)
@@ -699,6 +761,7 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # reading the flow back on 2026-08-19, before any listing tested it.
         page = session.page
         page.goto(event.url, wait_until="domcontentloaded")
+        result.mark("navigate")
         result.note(f"opened {event.slug} in the buying browser")
 
         # Note it, do not refuse on it.
@@ -726,8 +789,10 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # resale results are filtered by quantity, so asking for the wrong
         # number manufactures a refusal against a listing that is really there.
         session.set_quantity(config.WANTED_QUANTITY, result)
+        result.mark("quantity")
         try:
             page.get_by_role("button", name=SEARCH_BUTTONS).first.click(timeout=15_000)
+            result.mark("search")
             result.note(f"searched for {config.WANTED_QUANTITY}")
         except (PlaywrightTimeout, PlaywrightError) as exc:
             result.reason = f"could not press search in the buying browser: {exc}"
@@ -742,6 +807,7 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # the panel has to paint. Skipping this is why the first three real
         # attempts all reported the listing as gone. See await_listings().
         session.await_listings(result, budget_s=max(5.0, deadline - time.monotonic()))
+        result.mark("panel")
 
         if out_of_time():
             return result
@@ -751,6 +817,7 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # in the rendered page — and section plus price is what distinguishes
         # one row from another when several are live.
         row = _find_listing_row(page, listing, result)
+        result.mark("find_row")
         if row is None:
             # Do not guess at why. "Gone" and "not drawn" call for opposite
             # responses — one means the race was lost and nothing can be done,
@@ -790,6 +857,7 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
 
         try:
             row.click(timeout=10_000)
+            result.mark("click")
             result.note("clicked into the listing")
         except (PlaywrightTimeout, PlaywrightError) as exc:
             result.reason = f"could not click the listing: {exc}"
@@ -864,6 +932,7 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
             # laptop, which is exactly what he would have done without it.
             # Withholding it costs the ticket on every occasion he is out and
             # it would have worked.
+            result.mark("basket")
             try:
                 result.checkout_url = page.url
                 result.note(f"checkout URL captured: {result.checkout_url}")

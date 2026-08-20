@@ -3,7 +3,7 @@
 import time
 from typing import List, Optional
 
-from . import config, liveness, network, notify, state as state_mod
+from . import config, events, liveness, network, notify, state as state_mod
 from .model import GOOD_STATUSES, Reading, better_status
 from .sources import discovery, inventory_api
 from .state import stamp
@@ -108,6 +108,19 @@ def handle(reading: Reading, st: dict) -> None:
     state_mod.note_session_poll(st, reading)
     st["checks_total"] = st.get("checks_total", 0) + 1
     st["last_check_at"] = state_mod.utc_now().isoformat()
+    # One line per poll, queryable. The prose above is for reading; this is
+    # for answering "what was the gap before each find" without a parser.
+    events.emit(
+        "poll",
+        event=reading.event_slug,
+        primary=reading.primary,
+        resale=reading.resale,
+        source=reading.source,
+        failed=reading.failed,
+        degraded=reading.degraded,
+        blocked=reading.blocked,
+        listings=len(reading.listings),
+    )
 
     # Which connection did this go out through? Detected rather than declared,
     # so switching the MacBook's network is all David has to do — the watcher
@@ -125,6 +138,8 @@ def handle(reading: Reading, st: dict) -> None:
 
     if reading.blocked:
         state_mod.record_block(st)
+        events.emit("block", event=reading.event_slug,
+                    ip=st.get("current_ip"), net=st.get("current_net"))
 
     # Tell the outside world the Mac is still alive. Every local safeguard
     # assumes the laptop is on; this is the only signal that survives it
@@ -247,6 +262,19 @@ def handle(reading: Reading, st: dict) -> None:
             )
             print(f"[{stamp()}] hold recorded — nothing will restart the "
                   f"watcher for {minutes:.0f} min")
+    # The find itself, with everything needed to reconstruct the race later:
+    # which page, how it was seen, what it was, and its Ticketmaster id. Eight
+    # finds had to be reassembled from prose on 2026-08-20 to establish that
+    # no listing id ever repeats — which is the fact that settled whether
+    # these were being sold or merely held in someone else's basket.
+    events.emit(
+        "find",
+        event=reading.event_slug,
+        via="sweep" if "sweep" in reading.source else "search",
+        reason=reason,
+        listings=[l.describe() for l in reading.listings],
+        listing_ids=[l.listing_id for l in reading.listings if l.listing_id],
+    )
     # Keep what it was, not just that there was one. By the time the session
     # summary goes out the listing has almost certainly sold, and the count
     # alone cannot tell you what these actually go for.
@@ -500,6 +528,17 @@ def _maybe_secure(reading: Reading, st: dict = None):
     if hold.preempted and st is not None and not hold.secured:
         state_mod.clear_hold(st)
 
+    # The whole attempt, with its timings. This is the record that makes
+    # "did keeping the browser warm help?" a query rather than an argument.
+    events.emit(
+        "hold",
+        event=reading.event_slug,
+        secured=hold.secured,
+        preempted=hold.preempted,
+        reason=hold.reason,
+        timings=dict(getattr(hold, "timings", {}) or {}),
+        seconds=round(sum((getattr(hold, "timings", {}) or {}).values()), 2),
+    )
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")
         notify.secured_hold(reading, hold)
@@ -694,6 +733,8 @@ class ResaleSweep:
         if self.calls and self.calls % self.REPORT_EVERY == 0:
             print(f"[{stamp()}] resale sweep: {self.answers}/{self.calls} calls "
                   f"answered, nothing found on {self.unavailable}")
+            events.emit("sweep", calls=self.calls, answers=self.answers,
+                        empty=self.unavailable, stopped=self.stopped)
 
     def due(self, event, now: float) -> bool:
         return now >= self._next.get(event.slug, 0.0)
