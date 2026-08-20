@@ -964,15 +964,28 @@ class BrowserSession:
 
         A find needs a real listing present while the watcher happens to be
         looking — it cannot be rehearsed, and by the next poll it is usually
-        gone. So the whole state is written down at that instant: the API
-        response with a populated `picks` (whose shape has never been seen,
-        and which the parser currently guesses at), the rendered page, and a
-        screenshot.
+        gone. So the API response and the rendered page text are written down
+        at that instant.
 
-        Answering "what exactly did a real listing look like?" afterwards is
-        otherwise impossible, and the answer decides how precisely alerts can
-        describe the next one — possibly including whether there is an id to
-        link straight to.
+        NO SCREENSHOT, and that changed on 2026-08-20 rather than never having
+        been there. It was added when the resale response shape had never been
+        seen and the parser was guessing at it, and a picture was the only way
+        to check the guess. Seventeen finds later the shape is known and fully
+        recorded — id, section, price, offerIds, sellerBusinessType and the
+        rest all sit in the JSON below — so the question the screenshot existed
+        to answer is answered, permanently, by a file that is two kilobytes
+        instead of seven hundred.
+
+        Meanwhile it had stopped working and started costing. It succeeded on
+        6 of those 17 finds; the JSON and the text succeeded on all of them.
+        And it sits on the critical path: a find is the one moment where
+        seconds decide whether a ticket is caught, and full-page rendering of a
+        heavy search result is not something to be doing then. Bounding it to
+        three seconds made it survivable. Removing it makes it free.
+
+        `calibrate` still takes one — see diagnose(). That is a human asking
+        for a picture with no clock running, which is when a screenshot is
+        worth taking.
         """
         import json
 
@@ -1011,25 +1024,6 @@ class BrowserSession:
             base.with_suffix(".json").write_text(json.dumps(payload, indent=2, default=str))
             base.with_suffix(".txt").write_text(self.visible_text())
 
-            # The screenshot is a nice-to-have and it is on the critical path,
-            # so it gets a short leash rather than the 45-second page default.
-            #
-            # On 2026-08-20 at 09:44 a real Early Entry listing appeared and
-            # this line spent the full 45 seconds before timing out —
-            # `full_page=True` on a heavy search result. Those 45 seconds came
-            # out of the one poll where speed is the entire point: the alert
-            # waited for them, and so did the securing attempt, which then
-            # found the listing had sold. A record of a ticket that got away
-            # is a poor trade for the ticket.
-            #
-            # Viewport rather than full page, and three seconds rather than
-            # forty-five. If it does not make it, the two files above already
-            # answer "what did a real listing look like?".
-            try:
-                self.page.screenshot(path=str(base.with_suffix(".png")),
-                                     timeout=3_000)
-            except Exception as shot:
-                reading.note(f"find recorded, but the screenshot timed out ({shot.__class__.__name__})")
             print(f"[{stamp()}] find recorded: {base.with_suffix('.json')}")
         except Exception as exc:
             # Never let record-keeping cost the alert it is recording.
