@@ -338,11 +338,19 @@ def due_events(state: dict, events) -> list:
     than twice its longest gap overdue is searched regardless, so a clock
     jumping forward or a corrupted timestamp cannot park a page for ever.
     """
-    due = [e for e in events if event_due(state, e)]
+    # A page past its own stop date is not due, and cannot be rescued by the
+    # stall guard either — "overdue" is meaningless for something nobody
+    # should be asking about any more. Filtered first so both paths below
+    # inherit it. See Event.stop_after: the Early Entry Pass is worthless from
+    # the 28th while the weekend tickets still matter, and searching for it
+    # spends real requests against a rate limit that has already blocked this
+    # connection nineteen times.
+    live = [e for e in events if not e.expired()]
+    due = [e for e in live if event_due(state, e)]
     if due:
         return due
     stalled = [
-        e for e in events
+        e for e in live
         if (minutes_since_event_poll(state, e.slug) or 0.0) * 60.0
         > max(e.poll_max_seconds, e.poll_seconds) * 2
     ]

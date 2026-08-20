@@ -27,11 +27,36 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    # Both interpreters, and 3.9 is the one that matters.
+    #
+    # This job ran only 3.12 until 2026-08-20, while the watcher runs on
+    # 3.9.6 — the macOS system Python, which is also what watchdog.sh shells
+    # out to for its state-file arithmetic. Three versions of drift between
+    # what CI proves and what runs at 3am.
+    #
+    # The gap is not theoretical: a match statement, or an `X | Y` type union
+    # in an annotation, is valid 3.10+ syntax that parses green here and then
+    # fails to IMPORT on the Mac — taking the whole watcher down at the next
+    # launchd restart, silently, for as long as it takes somebody to look.
+    # Running the suite locally is what has been covering that, which means
+    # the cover disappears the moment a change is pushed without doing so.
+    #
+    # 3.12 stays because it is worth knowing the code is not accruing things
+    # that will break on the next macOS Python, and because it costs two
+    # minutes.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.12']
+
+    name: test (py${{ matrix.python-version }})
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
 
       # The playwright PACKAGE, not its browsers. Eight test files import
       # ep_watcher.sources.browser, which imports playwright at module scope,

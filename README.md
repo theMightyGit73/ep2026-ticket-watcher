@@ -22,6 +22,60 @@ panel that the search reveals.
 
 ---
 
+## What is in here
+
+Long, because everything in it was measured rather than assumed. If you
+are here for one thing, it is most likely
+[Keeping it running](#keeping-it-running) or
+[When something looks wrong](#when-something-looks-wrong).
+
+- [Why the old one never worked](#why-the-old-one-never-worked)
+- [What actually works, and how it was established](#what-actually-works-and-how-it-was-established)
+- [What it has actually caught](#what-it-has-actually-caught)
+- [Two pages, watched separately](#two-pages-watched-separately)
+- [Securing a ticket automatically (opt-in, off by default)](#securing-a-ticket-automatically-opt-in-off-by-default)
+  - [How it runs](#how-it-runs)
+  - [What happens when a listing appears](#what-happens-when-a-listing-appears)
+  - [The weekend ticket always wins the browser](#the-weekend-ticket-always-wins-the-browser)
+  - [Nothing may restart the watcher while a ticket is held](#nothing-may-restart-the-watcher-while-a-ticket-is-held)
+  - [The hold probably cannot travel — but the email offers the link anyway](#the-hold-probably-cannot-travel--but-the-email-offers-the-link-anyway)
+  - [What is proven and what is not](#what-is-proven-and-what-is-not)
+- [Setup](#setup)
+  - [Run it continuously](#run-it-continuously)
+- [Running is not the same as seeing](#running-is-not-the-same-as-seeing)
+  - [When the page will not ask, ask the endpoint yourself](#when-the-page-will-not-ask-ask-the-endpoint-yourself)
+  - [Watching the response is not watching the panel](#watching-the-response-is-not-watching-the-panel)
+- [Keeping it running](#keeping-it-running)
+  - [The logs rotate themselves, by copying rather than renaming](#the-logs-rotate-themselves-by-copying-rather-than-renaming)
+  - [What is backed up, and what a backup cannot do](#what-is-backed-up-and-what-a-backup-cannot-do)
+  - [Three states that look identical from outside](#three-states-that-look-identical-from-outside)
+  - [When something looks wrong](#when-something-looks-wrong)
+- [Commands](#commands)
+- [Configuration](#configuration)
+  - [When the alert itself cannot get out](#when-the-alert-itself-cannot-get-out)
+  - [Any number of connections, not two](#any-number-of-connections-not-two)
+  - [Two faults that get named in their own words](#two-faults-that-get-named-in-their-own-words)
+  - [The browser identity is rebuilt before it is refused](#the-browser-identity-is-rebuilt-before-it-is-refused)
+  - [Why quantity matters](#why-quantity-matters)
+- [The emails](#the-emails)
+  - [The availability alert leads with a link, not a recipe](#the-availability-alert-leads-with-a-link-not-a-recipe)
+  - [Session summaries, at each change of settings](#session-summaries-at-each-change-of-settings)
+  - [Alternating home Wi-Fi and the phone hotspot](#alternating-home-wi-fi-and-the-phone-hotspot)
+  - [Ask only for the IPv4 address](#ask-only-for-the-ipv4-address)
+  - [Testing the emails](#testing-the-emails)
+- [The Inventory Status API (worth doing, not yet available)](#the-inventory-status-api-worth-doing-not-yet-available)
+- [Running it somewhere other than the MacBook](#running-it-somewhere-other-than-the-macbook)
+  - [Cloud providers: two hard requirements](#cloud-providers-two-hard-requirements)
+  - [Setting one up](#setting-one-up)
+  - [Keeping the MacBook going instead](#keeping-the-macbook-going-instead)
+  - [The free GitHub Actions fallback](#the-free-github-actions-fallback)
+  - [Run both at once — they fail differently](#run-both-at-once--they-fail-differently)
+- [Rate limiting — read this before speeding it up](#rate-limiting--read-this-before-speeding-it-up)
+- [It stops itself on 28 August](#it-stops-itself-on-28-august)
+- [Honest limits](#honest-limits)
+- [Superseded](#superseded)
+
+---
 ## Why the old one never worked
 
 The previous `ticket_checker.py` fetched the page with `cloudscraper` and

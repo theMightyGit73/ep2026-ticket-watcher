@@ -23,7 +23,8 @@ class Event:
                  poll_min_seconds: int = 0, poll_max_seconds: int = 0,
                  peak_min_seconds: int = 0, peak_max_seconds: int = 0,
                  offpeak_min_seconds: int = 0, offpeak_max_seconds: int = 0,
-                 secure: bool = True, secure_priority: int = 0):
+                 secure: bool = True, secure_priority: int = 0,
+                 stop_after: str = ""):
         self.peak_min_seconds, self.peak_max_seconds = peak_min_seconds, peak_max_seconds
         self.offpeak_min_seconds = offpeak_min_seconds
         self.offpeak_max_seconds = offpeak_max_seconds
@@ -67,6 +68,23 @@ class Event:
         self.url = url
         #: Words that identify this event in the Discovery index, lowercase.
         self.match_words = tuple(w.lower() for w in match_words)
+        #: The last date this page is worth searching, "YYYY-MM-DD", or ""
+        #: to run until the watcher's own STOP_AFTER_DATE.
+        #:
+        #: Products on the same festival do not all stop being worth buying on
+        #: the same day. The Early Entry Pass grants campsite access from 2pm
+        #: on Thursday the 27th; from the 28th it is worth nothing, while the
+        #: weekend tickets are still worth having. With only a global stop
+        #: date the watcher spent a full day searching for an expired add-on —
+        #: real requests against a rate limit that has already blocked this
+        #: connection nineteen times — and, because securing is armed for that
+        #: page, could have opened the buying browser for it.
+        #:
+        #: An expired page is dropped by due_events() rather than removed from
+        #: EVENTS, so its history, its last reading and its place in the hourly
+        #: report all survive. It stops being asked about; it does not stop
+        #: having existed.
+        self.stop_after = stop_after
         #: This page's own id for the Inventory Status API, if one is known.
         #: Empty means that source cannot answer about this event and must say
         #: so — see sources/inventory_api.py. Answering with another page's
@@ -118,6 +136,21 @@ class Event:
         if not is_peak(now) and self.offpeak_min_seconds:
             return self.offpeak_min_seconds, self.offpeak_max_seconds
         return self.poll_min_seconds, self.poll_max_seconds
+
+    def expired(self, today: str = "") -> bool:
+        """Has this page stopped being worth searching, whatever the watcher does?
+
+        Compared as ISO date strings, the same way state.past_stop_date() does
+        it, so there is no timezone argument about when a day ends.
+        `stop_after` is the LAST day this page runs, so this is true from the
+        following morning.
+        """
+        if not self.stop_after:
+            return False
+        from datetime import datetime, timezone
+
+        now = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return now > self.stop_after
 
     def next_gap(self, now=None) -> int:
         """How long to wait before searching this page again.
@@ -292,6 +325,22 @@ DEFAULT_EVENT_POLL_SECONDS = STANDARD_POLL_SECONDS
 
 #: Securing precedence, highest first. Only the ordering matters, not the
 #: numbers; they are spaced so a page can be slotted between them later.
+#:
+#: BOTH weekend pages share this value, and that is deliberate rather than an
+#: oversight — it was read as one on 2026-08-20 and is written down here so it
+#: is not "fixed" later. Preemption requires strictly greater priority
+#: (engine._maybe_secure), so equal values mean the two weekend pages cannot
+#: take the buying browser from one another.
+#:
+#: That is the right way round. The instalment plan is the same weekend
+#: camping ticket paid in stages, so a held instalment listing is not a
+#: consolation prize, it is the thing this project exists to find. Letting the
+#: standard page preempt it would drop a ticket that is already in a basket in
+#: order to chase one that may have gone — trading a certainty for a maybe,
+#: for no gain beyond a payment schedule.
+#:
+#: The add-on is the only case where preemption earns its cost, because an
+#: Early Entry pass genuinely is worthless without a weekend ticket beside it.
 SECURE_PRIORITY_WEEKEND = int(os.environ.get("EP_PRIORITY_WEEKEND", "100"))
 SECURE_PRIORITY_ADDON = int(os.environ.get("EP_PRIORITY_ADDON", "10"))
 
@@ -368,6 +417,10 @@ EVENTS = [
         secure=True,
         # Watched and secured, but it gives way. See Event.secure_priority.
         secure_priority=SECURE_PRIORITY_ADDON,
+        # Entry is from 2pm on the Thursday, so the 27th is the last day this
+        # is worth anything at all. The weekend pages keep running to the
+        # watcher's own stop date. See Event.stop_after.
+        stop_after=os.environ.get("EP_EARLY_ENTRY_STOP_AFTER", "2026-08-27"),
     ),
 ]
 

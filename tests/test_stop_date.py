@@ -109,5 +109,60 @@ check("state starts un-notified", state["stop_notified"], False)
 state["stop_notified"] = True
 check("and the flag persists", state["stop_notified"], True)
 
+
+print("\nPages stop on their own dates, not only on the watcher's")
+# Products on one festival do not all stop being worth buying together. The
+# Early Entry Pass grants campsite access from 2pm on the Thursday; from the
+# Friday it is worth nothing, while the weekend tickets are still worth
+# having. With only a global stop date the watcher spent a whole day
+# searching for an expired add-on, against a rate limit that has already
+# blocked this connection nineteen times — and, since securing is armed for
+# that page, could have opened the buying browser for one.
+early = next(e for e in config.EVENTS if e.slug == "early-entry")
+weekend = next(e for e in config.EVENTS if e.slug == "weekend-camping")
+
+check("the pass is live on its own last day", early.expired("2026-08-27"), False)
+check("and expired the next morning", early.expired("2026-08-28"), True)
+check("the weekend ticket is not", weekend.expired("2026-08-28"), False)
+check("a page with no date of its own never expires alone",
+      weekend.expired("2027-01-01"), False)
+
+
+print("\nAn expired page is dropped from the schedule, both ways in")
+
+
+class FakeEvent:
+    """Minimum an event needs to be scheduled, with a stop date of its own."""
+
+    def __init__(self, slug, stop_after=""):
+        self.slug = slug
+        self.stop_after = stop_after
+        self.poll_seconds = 600
+        self.poll_max_seconds = 600
+
+    expired = config.Event.expired
+
+
+gone = FakeEvent("expired-addon", stop_after="2020-01-01")
+alive = FakeEvent("weekend")
+
+# Neither has ever been polled, so both would otherwise be due immediately.
+fresh = dict(st._defaults())
+due = st.due_events(fresh, [gone, alive])
+check("the live page is due", [e.slug for e in due], ["weekend"])
+
+# And the stall guard must not rescue it either. A page nobody should ask
+# about cannot be "overdue" — that was the path that would have kept polling
+# it once its ordinary schedule stopped mattering.
+stale = dict(st._defaults())
+stale["events"] = {
+    "expired-addon": {"last_polled_at": "2020-01-02T00:00:00+00:00",
+                      "next_gap_seconds": 600},
+    "weekend": {"last_polled_at": st.utc_now().isoformat(),
+                "next_gap_seconds": 600},
+}
+check("and the stall guard does not resurrect the expired one",
+      [e.slug for e in st.due_events(stale, [gone, alive])], [])
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

@@ -29,6 +29,7 @@ written during.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 from . import config
@@ -68,16 +69,37 @@ def _load() -> dict:
 
 
 def _write(data: dict) -> None:
+    """Write the counter atomically, the same way state.save() does.
+
+    Temp file, flush, fsync, rename. This did the first, third and fourth of
+    those but not the fsync, for no reason anyone recorded — the two files sit
+    in the same directory, are written on the same cadence, and survive the
+    same power cut, so writing them differently was an inconsistency waiting
+    to be read as a decision.
+
+    The failure it forecloses is small but real: a machine that loses power
+    mid-write comes back with a counter that reads zero, and a zero counter
+    means the beacon spends the day's allowance again before anything notices
+    — which is exactly the 2026-08-19 outage that made this module necessary.
+    """
+    tmp = None
     try:
         path = _path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.parent / (path.name + ".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except OSError:
         # Losing the count costs accounting, not delivery. Never let it break
         # the send it is counting.
-        pass
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def used() -> int:
