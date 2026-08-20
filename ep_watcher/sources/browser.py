@@ -1004,9 +1004,32 @@ class BrowserSession:
                 "notes": list(reading.notes),
                 "resale_api": record,
             }
+            # The JSON and the text first, and they are the record that matters:
+            # both are local writes, both complete in milliseconds, and between
+            # them they hold the API response, the listing ids and the rendered
+            # page. If everything below fails, nothing has been lost.
             base.with_suffix(".json").write_text(json.dumps(payload, indent=2, default=str))
             base.with_suffix(".txt").write_text(self.visible_text())
-            self.page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+
+            # The screenshot is a nice-to-have and it is on the critical path,
+            # so it gets a short leash rather than the 45-second page default.
+            #
+            # On 2026-08-20 at 09:44 a real Early Entry listing appeared and
+            # this line spent the full 45 seconds before timing out —
+            # `full_page=True` on a heavy search result. Those 45 seconds came
+            # out of the one poll where speed is the entire point: the alert
+            # waited for them, and so did the securing attempt, which then
+            # found the listing had sold. A record of a ticket that got away
+            # is a poor trade for the ticket.
+            #
+            # Viewport rather than full page, and three seconds rather than
+            # forty-five. If it does not make it, the two files above already
+            # answer "what did a real listing look like?".
+            try:
+                self.page.screenshot(path=str(base.with_suffix(".png")),
+                                     timeout=3_000)
+            except Exception as shot:
+                reading.note(f"find recorded, but the screenshot timed out ({shot.__class__.__name__})")
             print(f"[{stamp()}] find recorded: {base.with_suffix('.json')}")
         except Exception as exc:
             # Never let record-keeping cost the alert it is recording.

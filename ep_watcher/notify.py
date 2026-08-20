@@ -62,6 +62,46 @@ def _send_email(subject: str, body: str) -> None:
     print(f"[{stamp()}] Email sent to {config.ALERT_TO}")
 
 
+def _header_safe(text: str) -> str:
+    """Make a string safe to put in an HTTP header, keeping every character.
+
+    ntfy carries the title as a header, and HTTP headers are latin-1. Any
+    character outside it raises UnicodeEncodeError inside requests before a
+    single byte leaves the machine — so the push does not fail late or arrive
+    mangled, it never goes at all.
+
+    This is not an edge case in this project, it is the normal case:
+
+      * Prices are in euro. On 2026-08-20 at 09:44 a real Early Entry listing
+        was found at €46.50, the email went out, and the push died with
+        "'latin-1' codec can't encode character '\u20ac'". The push is the
+        channel that reaches David away from the desk, on listings that live
+        twelve to twenty minutes.
+      * The em-dash is worse, because it is in fixed titles rather than in
+        data. "EP2026: TICKET HELD — check out NOW" and "HELD ... — TAP TO
+        PAY" both contain one, which means the single most urgent push this
+        system can send was guaranteed to fail every time.
+      * _mark() prepends "[TEST — not real]" in test mode, so every push
+        failed there too, which is where it should have been noticed.
+
+    RFC 2047 encoded-words are the fix ntfy documents, and the round trip was
+    verified against a live topic: a title goes out base64-wrapped and comes
+    back with its em-dash and euro sign intact. Pure-ASCII titles are left
+    alone so the common case stays readable in logs and in any client that
+    does not decode.
+    """
+    if not text:
+        return ""
+    try:
+        text.encode("latin-1")
+        return text
+    except UnicodeEncodeError:
+        import base64
+
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        return f"=?utf-8?B?{encoded}?="
+
+
 def _send_ntfy(title: str, message: str, priority: str = "default", tags=None,
                click: str = None) -> None:
     """`click` is where tapping the notification takes you.
@@ -75,7 +115,8 @@ def _send_ntfy(title: str, message: str, priority: str = "default", tags=None,
         f"https://ntfy.sh/{config.NTFY_TOPIC}",
         data=message.encode("utf-8"),
         headers={
-            "Title": _mark(title),
+            # Header values, and therefore latin-1 only. See _header_safe.
+            "Title": _header_safe(_mark(title)),
             "Priority": priority,
             "Tags": ",".join(tags or []),
             "Click": click or config.EVENT_URL,

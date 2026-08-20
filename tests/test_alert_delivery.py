@@ -175,5 +175,46 @@ check_true("it says how long the watcher was dark", "69 minutes" in body)
 check_true("and what the fault actually was", "no internet connection" in body)
 check_true("and warns a listing could have been missed", "missed" in body.lower())
 
+
+print("\nA push title must survive every character the alerts actually use")
+# ntfy carries the title as an HTTP header, and headers are latin-1. Every
+# character outside it raises inside requests before a byte leaves the machine,
+# so the push does not arrive mangled — it never goes at all.
+#
+# This fired for real on 2026-08-20 at 09:44: an Early Entry listing at €46.50
+# was found, the email went out, and the push died on the euro sign. The
+# em-dash is the worse half, because it sits in FIXED titles rather than in
+# data — including "EP2026: TICKET HELD — check out NOW", which means the most
+# urgent push this system can send was guaranteed to fail every single time.
+for raw in ("TICKET LIVE — €46.50 Early Entry",
+            "EP2026: TICKET HELD — check out NOW",
+            "HELD Verified Resale — €366.39 — TAP TO PAY",
+            "[TEST — not real] anything at all"):
+    safe = notify._header_safe(raw)
+    try:
+        safe.encode("latin-1")
+        ok = True
+    except UnicodeEncodeError:
+        ok = False
+    check_true(f"header-safe: {raw[:34]!r}", ok)
+
+# Plain ASCII must pass through untouched, so the ordinary case stays readable
+# in the log and in any client that does not decode encoded-words.
+check("ascii titles are left alone",
+      notify._header_safe("EP2026 watcher: every check failing"),
+      "EP2026 watcher: every check failing")
+check("and empty stays empty", notify._header_safe(""), "")
+
+# The encoding is RFC 2047, which ntfy decodes back to the original. Verified
+# against a live topic on 2026-08-20 — the title returned with its em-dash and
+# euro sign intact.
+import base64 as _b64  # noqa: E402
+encoded = notify._header_safe("TICKET LIVE — €46.50")
+check_true("non-ascii is wrapped as an RFC 2047 encoded-word",
+           encoded.startswith("=?utf-8?B?") and encoded.endswith("?="))
+check("and decodes back to exactly what went in",
+      _b64.b64decode(encoded[len("=?utf-8?B?"):-2]).decode("utf-8"),
+      "TICKET LIVE — €46.50")
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
