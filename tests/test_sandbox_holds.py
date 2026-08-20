@@ -106,5 +106,91 @@ events.emit("selftest", note="written by tests/test_sandbox_holds.py")
 check_true("the sandboxed event log was created", events.path().exists())
 check("and it is not the live one", under_live(events.path()), False)
 
+print("\nNo test reloads config on top of settings it has already made")
+
+# The same failure as above, in its other costume, and it is worth a static
+# check because it is invisible at runtime — the reload succeeds, the test
+# passes, and the setting it silently discarded is missed somewhere else.
+#
+# It has now happened twice in one evening. Once to the sandbox (a reload
+# restored the live log paths and a fixture find was written into the real
+# event log), and once to test_page_budget, where a reload restored the peak
+# and night windows the file had pinned at the top — so it passed all
+# afternoon and failed at 20:00 local, against code that had not changed.
+#
+# The rule: if a file assigns config.SOMETHING and then reloads config, it
+# must assign it again afterwards. Anything else is a setting that looks
+# applied and is not.
+import ast  # noqa: E402
+
+TESTS = Path(__file__).resolve().parent
+
+
+def reload_lines(tree):
+    """Line numbers of every importlib.reload(config) call."""
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Attribute) and fn.attr == "reload":
+            arg = node.args[0] if node.args else None
+            if isinstance(arg, ast.Name) and arg.id == "config":
+                out.append(node.lineno)
+            # importlib.reload(sys.modules["ep_watcher.config"]) counts too.
+            elif isinstance(arg, ast.Subscript):
+                out.append(node.lineno)
+    return out
+
+
+def config_writes(tree):
+    """{attribute: [line numbers]} for every `config.X = ...` in the file."""
+    writes = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            for part in (target.elts if isinstance(target, ast.Tuple) else [target]):
+                if (isinstance(part, ast.Attribute)
+                        and isinstance(part.value, ast.Name)
+                        and part.value.id == "config"):
+                    writes.setdefault(part.attr, []).append(node.lineno)
+    return writes
+
+
+def assertion_lines(tree):
+    """Line numbers of every check()/check_true() call in the file."""
+    return [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id in ("check", "check_true")]
+
+
+offenders = []
+for path in sorted(TESTS.glob("test_*.py")):
+    tree = ast.parse(path.read_text())
+    reloads = reload_lines(tree)
+    if not reloads:
+        continue
+    checks = assertion_lines(tree)
+    # Only reloads that still have assertions after them can do harm. The
+    # tidy-up reload in a finally: at the very end of a file discards
+    # settings nothing will read again, and flagging it would train whoever
+    # reads this to skim past a list of things that are fine.
+    risky = [r for r in reloads if any(c > r for c in checks)]
+    if not risky:
+        continue
+    last_reload = max(risky)
+    for attr, lines in config_writes(tree).items():
+        # Written before the last risky reload, never written again after it,
+        # and an assertion follows. That setting is not in force for it.
+        if min(lines) < last_reload and not any(l > last_reload for l in lines):
+            offenders.append(f"{path.name}: config.{attr} set at line "
+                             f"{min(lines)}, discarded by the reload at "
+                             f"{last_reload}")
+
+for line in offenders:
+    print(f"        {line}")
+check("no setting is discarded by a later reload", offenders, [])
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

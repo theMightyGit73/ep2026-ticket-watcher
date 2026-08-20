@@ -518,6 +518,9 @@ class HoldResult:
     #: been up to its whole interval behind, and that latency is invisible in a
     #: report that starts its clock when the buyer wakes up.
     detected_age: Optional[float] = None
+    #: How many goes it took. More than one only ever happens when the feed
+    #: said the ticket had not really sold — see secure().
+    attempts: int = 1
 
     def note(self, text: str) -> None:
         self.notes.append(text)
@@ -684,6 +687,19 @@ class BuySession:
     # what secure(), doctor and check-buy all already use.
 
 
+class _ParkNotes:
+    """Swallow the note() calls set_quantity makes while nobody is listening.
+
+    _NoteSink writes into a HoldResult, and there is no attempt in progress
+    when the browser is merely parking. Printing them would put "quantity set
+    to 1" into the log after every find — noise that reads like something
+    happening.
+    """
+
+    def note(self, text: str) -> None:
+        pass
+
+
 class BuyerWorker(threading.Thread):
     """A signed-in browser kept open and warm, waiting for a listing.
 
@@ -825,6 +841,35 @@ class BuyerWorker(threading.Thread):
             return
         self._session.page.goto(event.url, wait_until="domcontentloaded")
         self._parked_on = event.slug
+        self._prearm()
+
+    def _prearm(self) -> None:
+        """Set the quantity now, while nothing is waiting on it.
+
+        The page loads with a quantity of 2 and resale results are filtered by
+        quantity, so every attempt has to set it to 1 before it can search.
+        Doing that on the critical path cost 1.6s and 6.5s on the two attempts
+        of 2026-08-20 — the variation is the stepper rendering after a fresh
+        page load, which is exactly the work that does not need a listing to
+        be happening.
+
+        Set here instead, on the parked page, where the seconds are free. The
+        attempt still calls set_quantity, which now finds the value already
+        correct and returns on its fast path rather than driving the stepper.
+
+        Costs no request: the stepper is a client-side control and nothing is
+        submitted until search is pressed.
+
+        Never raises. A page that will not take a quantity here is a page the
+        attempt will have to deal with itself, and a parked browser failing
+        loudly over a preparation step would take out the warm browser for a
+        problem that has not happened yet.
+        """
+        try:
+            self._session.set_quantity(config.WANTED_QUANTITY, _ParkNotes())
+        except Exception as exc:
+            print(f"[{_stamp()}] warm browser could not pre-set the quantity: "
+                  f"{type(exc).__name__}: {exc}")
 
     def _safe_park(self) -> None:
         """Re-park, swallowing anything. Used off the critical path only."""
@@ -1034,12 +1079,72 @@ def secure_in_thread(event, listing, timeout_s: int = None,
 
 
 def secure(session: BuySession, event, listing, result: HoldResult = None) -> HoldResult:
-    """Put `listing` in a basket. Returns without paying, always.
+    """Put `listing` in a basket, and try again if it was never takeable.
+
+    One attempt is _secure_once below. This adds the only retry that is worth
+    making, and refuses the one that is not.
+
+    The distinction comes from the probe on the dead-end screen. When
+    Ticketmaster says "sold or removed" and its own resale feed AGREES the
+    ticket is gone, it sold: going back is pointless and would only spend
+    requests against a rate limit that has already blocked this connection.
+    That case returns immediately, exactly as before.
+
+    But when the feed still lists the ticket a second after refusing it,
+    nothing was sold. Something is holding it — most likely another buyer's
+    basket — and those lapse. That is the case worth waiting out, and it is
+    the case a faster watcher could never have won, because there was nothing
+    to win at the moment it looked.
+
+    Bounded by the same SECURE_TIMEOUT_SECONDS budget the single attempt
+    always had, so this cannot hold the buying browser — or the poll loop
+    behind it — any longer than it could before. A weekend ticket can still
+    preempt the whole thing.
+    """
+    result = result or HoldResult()
+    deadline = time.monotonic() + config.SECURE_TIMEOUT_SECONDS
+
+    for attempt in range(1 + config.SECURE_RETRIES):
+        if attempt:
+            result.attempts = attempt + 1
+            result.note(f"attempt {attempt + 1}: going back for it")
+        out = _secure_once(session, event, listing, result, deadline)
+        if out.secured:
+            return out
+        # Genuinely sold, or the question could not be asked. Either way there
+        # is nothing to come back for.
+        if not out.still_listed_after:
+            return out
+        if attempt >= config.SECURE_RETRIES:
+            out.note(f"still listed, but {attempt + 1} attempts is the limit — "
+                     f"the alert tells David to try it himself")
+            return out
+        pause = config.SECURE_RETRY_PAUSE_SECONDS
+        if time.monotonic() + pause >= deadline:
+            out.note("still listed, but there is no time left in the window "
+                     "to go back — the alert tells David to try it himself")
+            return out
+        out.note(f"it is still in the feed, so it did not sell — waiting "
+                 f"{pause:.0f}s for the basket holding it to lapse")
+        # Cleared so the next attempt's probe answers for itself. A stale True
+        # here would be read as evidence from a look that never happened.
+        out.still_listed_after = None
+        out.ids_after = []
+        time.sleep(pause)
+    return out
+
+
+def _secure_once(session: BuySession, event, listing,
+                 result: HoldResult = None, deadline: float = None) -> HoldResult:
+    """One attempt at putting `listing` in a basket. Returns without paying, always.
 
     `session` must already be started and signed in. Failure at any step is
     recorded and returned rather than raised: the caller's next move is to
     send the ordinary "a ticket is live" alert, which must not be lost
     because this optimistic extra step went wrong.
+
+    `deadline` is a monotonic clock shared with secure() above, so that
+    retries spend one budget between them rather than a fresh one each.
     """
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -1047,7 +1152,8 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
     from .sources.browser import BASKET_MARKERS, SEARCH_BUTTONS
 
     result = result or HoldResult()
-    deadline = time.monotonic() + config.SECURE_TIMEOUT_SECONDS
+    if deadline is None:
+        deadline = time.monotonic() + config.SECURE_TIMEOUT_SECONDS
 
     def out_of_time() -> bool:
         if time.monotonic() < deadline:

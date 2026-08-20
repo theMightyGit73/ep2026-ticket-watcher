@@ -65,8 +65,29 @@ B = next(e for e in config.EVENTS if e.slug == "weekend-camping-instalment")
 # so gap_range() always returns the peak range — which is also what
 # poll_min_seconds/poll_max_seconds describe. The windows themselves are
 # tested in test_peak_hours.py and test_night_mode.py, against explicit times.
-config.PEAK_START_HOUR, config.PEAK_END_HOUR = 0, 24
-config.NIGHT_START_HOUR = config.NIGHT_END_HOUR = 0
+#
+# Pinned through the ENVIRONMENT rather than by assigning the module
+# attributes, because this file reloads config further down to check
+# environment-driven settings, and a reload restores config.py's defaults.
+# Assigning the attributes worked until that reload was added, at which point
+# the file went back to testing whichever cadence happened to be in force —
+# and failed at 20:00 local when the peak window closed, against code that had
+# not changed. That is the exact failure this pinning exists to prevent.
+#
+# Environment variables survive a reload, because reading them is how config
+# builds these values in the first place.
+import os  # noqa: E402
+
+os.environ["EP_PEAK_START_HOUR"] = "0"
+os.environ["EP_PEAK_END_HOUR"] = "24"
+os.environ["EP_NIGHT_START_HOUR"] = "0"
+os.environ["EP_NIGHT_END_HOUR"] = "0"
+
+import importlib  # noqa: E402
+
+config = importlib.reload(config)
+A = next(e for e in config.EVENTS if e.slug == "weekend-camping")
+B = next(e for e in config.EVENTS if e.slug == "weekend-camping-instalment")
 
 
 def fresh():
@@ -95,9 +116,6 @@ check("total nominal volume across the pages being searched",
 # budget that kept counting a page nobody searches would hide the headroom he
 # bought — and would eventually be used to argue against speeding up the page
 # that matters.
-import importlib  # noqa: E402
-import os  # noqa: E402
-
 _was_early = dict(os.environ)
 try:
     os.environ["EP_EARLY_ENTRY"] = "1"
@@ -109,6 +127,13 @@ try:
 finally:
     os.environ.clear(); os.environ.update(_was_early)
     config = importlib.reload(config)
+    # The clock windows are pinned through the environment at the top of this
+    # file, so the reload above preserves them. What it does NOT preserve are
+    # the Event objects: reload builds new ones, and A and B would still point
+    # at the old. They compare equal on everything checked here, but holding
+    # stale objects is how a later edit starts testing nothing.
+    A = next(e for e in config.EVENTS if e.slug == "weekend-camping")
+    B = next(e for e in config.EVENTS if e.slug == "weekend-camping-instalment")
 
 # What the switch does BESIDES move these numbers — that it also governs
 # holding, that the pass still gives way to a weekend ticket, that the

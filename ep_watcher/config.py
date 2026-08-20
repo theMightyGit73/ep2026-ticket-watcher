@@ -794,6 +794,33 @@ WARM_BUY_BROWSER = os.environ.get("EP_WARM_BUY_BROWSER", "1").lower() in ("1", "
 
 SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "120"))
 
+#: How many extra goes at a listing the feed says did not actually sell.
+#:
+#: Only ever spent on that one case. When Ticketmaster's dead-end screen and
+#: its own resale feed agree the ticket is gone, it sold and there is nothing
+#: to come back for — that returns immediately and costs no extra request.
+#:
+#: The case this exists for is the other one, and it is the one the evidence
+#: keeps pointing at: the screen says sold, the feed still lists the ticket a
+#: second later, and something is holding it rather than owning it. Baskets
+#: lapse. Waiting one out is a race nobody else is running, whereas being
+#: fractionally faster at the moment of refusal wins nothing, because at that
+#: moment the ticket was not available to anybody.
+#:
+#: Three attempts at ~15s each with a pause between them fits inside
+#: SECURE_TIMEOUT_SECONDS, which is what bounds the whole thing — the buying
+#: browser cannot be held any longer than a single attempt could hold it
+#: before, and a weekend ticket can still preempt the lot.
+SECURE_RETRIES = int(os.environ.get("EP_SECURE_RETRIES", "2"))
+
+#: Seconds between those goes.
+#:
+#: Long enough not to be a second refusal from the same wall, short enough to
+#: fit several inside the window. Not tuned against evidence yet — no retry
+#: has ever run — so it is a starting point that the `hold` records in the
+#: event log will settle.
+SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "20"))
+
 #: How long to wait for the availability alert once the hold attempt is done.
 #:
 #: The alert is sent on its own thread so the buying browser does not queue
@@ -843,8 +870,51 @@ ALERT_PHONE = os.environ.get("ALERT_PHONE", "")
 
 
 def can_ring_phone() -> bool:
-    """All four set? Asked as a function so a test can set them and reload."""
-    return bool(TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM and ALERT_PHONE)
+    """All four set, and the numbers shaped like numbers?
+
+    Asked as a function so a test can set the values and reload. The format
+    check is part of it because Twilio rejects a badly-formed number with an
+    HTTP error rather than a ring, and the moment that would be discovered is
+    the moment a ticket is on screen.
+    """
+    return bool(TWILIO_SID and TWILIO_TOKEN
+                and phone_problem(TWILIO_FROM) is None
+                and phone_problem(ALERT_PHONE) is None)
+
+
+def phone_problem(number: str):
+    """What is wrong with `number`, or None if it looks dialable.
+
+    E.164 is what Twilio requires: a leading +, a country code, and digits.
+    Checked here rather than trusted, because the two ways this goes wrong are
+    both easy and both silent until it matters — a number copied from a
+    contact card as "089 708 5212" has no country code and will never reach
+    anybody, and one written "00353..." is the dialling prefix rather than the
+    international form.
+
+    Deliberately not a full validator. It is not this project's business to
+    know the shape of every country's numbers; it is its business to catch the
+    mistakes somebody actually makes at a keyboard.
+    """
+    if not number:
+        return "not set"
+    text = number.strip()
+    if text.startswith("00"):
+        return (f"{text} starts with the dialling prefix 00 — Twilio needs the "
+                f"international form, so write it as +{text[2:]}")
+    if not text.startswith("+"):
+        return (f"{text} has no country code — it must start with + (an Irish "
+                f"mobile is +353 followed by the number without its leading 0)")
+    digits = text[1:]
+    if not digits.isdigit():
+        return f"{text} has something in it that is not a digit"
+    if not 8 <= len(digits) <= 15:
+        return (f"{text} has {len(digits)} digits, which is outside the 8-15 "
+                f"that a real international number has")
+    if text.startswith("+3530"):
+        return (f"{text} keeps the 0 from the national form — an Irish mobile "
+                f"written 089 708 5212 is +35389 7085212, with the 0 dropped")
+    return None
 
 
 #: Minutes before the phone may ring again.

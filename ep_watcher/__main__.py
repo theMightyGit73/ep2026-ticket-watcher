@@ -1335,6 +1335,36 @@ def cmd_doctor(_args) -> int:
     else:
         print("  [ -- ]  Push not configured — email only, which is minutes slower")
 
+    # The phone call. Optional, so its absence is a dash rather than a fault —
+    # but a number that is SET and malformed is a real problem, because
+    # everything looks configured right up until Twilio refuses the call, and
+    # the moment that happens is the moment a ticket is on screen.
+    phone_fault = config.phone_problem(config.ALERT_PHONE)
+    from_fault = config.phone_problem(config.TWILIO_FROM)
+    if config.can_ring_phone():
+        ok("Phone call", f"will ring {config.ALERT_PHONE} on a real find")
+    elif config.ALERT_PHONE and phone_fault:
+        bad("Phone call", f"ALERT_PHONE {phone_fault}",
+            "fix ALERT_PHONE in ~/.ep2026-watcher/env, then: "
+            "python -m ep_watcher ring")
+    elif config.TWILIO_FROM and from_fault:
+        bad("Phone call", f"TWILIO_FROM {from_fault}",
+            "fix TWILIO_FROM in ~/.ep2026-watcher/env, then: "
+            "python -m ep_watcher ring")
+    elif config.ALERT_PHONE:
+        # Half-configured is worth naming rather than dashing: somebody
+        # started setting this up and stopped, and will otherwise assume the
+        # phone rings.
+        short = [n for n in ("TWILIO_SID", "TWILIO_TOKEN", "TWILIO_FROM")
+                 if not getattr(config, n)]
+        warn("Phone call",
+             f"a number is set but the phone cannot ring yet "
+             f"(no {', '.join(short)})")
+        print("          Optional. `python -m ep_watcher ring` says what is "
+              "needed.")
+    else:
+        print("  [ -- ]  Phone call not configured — see `ring` (optional)")
+
     # The number that decides whether push works for the rest of the day.
     # Nothing counted it until 2026-08-19, which is how the allowance was
     # spent invisibly and the channel a ticket alert travels on stayed dead
@@ -1643,13 +1673,35 @@ def cmd_ring(_args) -> int:
         missing = [n for n in ("TWILIO_SID", "TWILIO_TOKEN", "TWILIO_FROM",
                                "ALERT_PHONE") if not getattr(config, n)]
         print("  Phone calls are OFF — not configured.\n")
-        print(f"  Missing: {', '.join(missing)}\n")
-        print("  Everything else still works; this is an optional extra.")
-        print("  To switch it on, put these in ~/.ep2026-watcher/env:\n")
-        print("      export TWILIO_SID=AC...")
-        print("      export TWILIO_TOKEN=...")
-        print("      export TWILIO_FROM=+353...   # your Twilio number")
-        print("      export ALERT_PHONE=+353...   # your mobile\n")
+        if missing:
+            print(f"  Missing: {', '.join(missing)}\n")
+        # A number that is set but malformed is the worse case: everything
+        # looks configured and Twilio refuses the call at the one moment it
+        # matters. Say exactly what is wrong with it.
+        for label, number in (("ALERT_PHONE", config.ALERT_PHONE),
+                              ("TWILIO_FROM", config.TWILIO_FROM)):
+            problem = config.phone_problem(number)
+            if problem and number:
+                print(f"  {label} looks wrong: {problem}\n")
+        print("  Everything else still works; this is an optional extra.\n")
+        # Only what is actually absent. Listing settings he has already put in
+        # reads as though they did not take, which is the wrong thing to think
+        # while looking at a file you just edited.
+        hints = {
+            "TWILIO_SID": "TWILIO_SID=AC...            # Twilio console",
+            "TWILIO_TOKEN": "TWILIO_TOKEN=...             # Twilio console",
+            "TWILIO_FROM": "TWILIO_FROM=+353...          # your Twilio number",
+            "ALERT_PHONE": "ALERT_PHONE=+353...          # your mobile",
+        }
+        if missing:
+            print("  Add to ~/.ep2026-watcher/env (no quotes, no 'export' —")
+            print("  run_watcher.sh sources it with `set -a`):\n")
+            for name in missing:
+                print(f"      {hints[name]}")
+            print()
+        already = [n for n in hints if n not in missing]
+        if already:
+            print(f"  Already set: {', '.join(already)}\n")
         print("  A Twilio number is about €1/month and a call about €0.02.")
         print("  Then run this again.\n")
         return 1

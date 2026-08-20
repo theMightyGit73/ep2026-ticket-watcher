@@ -185,5 +185,146 @@ for missing in ("TWILIO_SID", "TWILIO_TOKEN", "TWILIO_FROM", "ALERT_PHONE"):
         for n, v in was.items():
             setattr(config, n, v)
 
+print("\nA number that cannot be dialled is caught before it matters")
+
+# Every one of these is a mistake somebody actually makes copying a number off
+# a phone, and every one of them fails as an HTTP error at the moment a ticket
+# is on screen rather than as anything visible beforehand.
+for bad, expect in [
+    ("089 708 5212", "no country code"),
+    ("0899999999", "no country code"),
+    ("00353897085212", "dialling prefix"),
+    ("+3530897085212", "keeps the 0"),
+    ("+353 89 SEVEN", "not a digit"),
+    ("+353", "outside the 8-15"),
+    ("", "not set"),
+]:
+    problem = config.phone_problem(bad)
+    check_true(f"{bad!r} is rejected", problem is not None)
+    check_true(f"...and says why ({expect})", problem and expect in problem)
+
+# The real one, in the form the env file now holds.
+check("a correct Irish mobile passes",
+      config.phone_problem("+353897085212"), None)
+check("and so does a US number", config.phone_problem("+15551234567"), None)
+# Whitespace either side is what a copy-paste leaves behind.
+check("surrounding spaces are tolerated",
+      config.phone_problem("  +353897085212  "), None)
+
+
+print("\nGoing back for a ticket that did not sell")
+
+
+class ScriptedSecure:
+    """Stands in for _secure_once, returning a scripted outcome per attempt."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, session, event, listing, result=None, deadline=None):
+        self.calls += 1
+        secured, still = self.outcomes[min(self.calls - 1, len(self.outcomes) - 1)]
+        result = result or buyer.HoldResult()
+        result.secured = secured
+        result.still_listed_after = still
+        return result
+
+
+def run_secure(*outcomes, retries=2, pause=0.0):
+    real_once, real_retries, real_pause = (
+        buyer._secure_once, config.SECURE_RETRIES,
+        config.SECURE_RETRY_PAUSE_SECONDS)
+    scripted = ScriptedSecure(*outcomes)
+    try:
+        buyer._secure_once = scripted
+        config.SECURE_RETRIES = retries
+        config.SECURE_RETRY_PAUSE_SECONDS = pause
+        out = buyer.secure(None, EVENT, LISTING)
+        return out, scripted.calls
+    finally:
+        buyer._secure_once = real_once
+        config.SECURE_RETRIES = real_retries
+        config.SECURE_RETRY_PAUSE_SECONDS = real_pause
+
+
+# Sold: the feed agreed it was gone. Going back would spend requests against a
+# rate limit for a ticket that does not exist.
+out, calls = run_secure((False, False))
+check("a ticket that really sold is not chased", calls, 1)
+check("and is reported as a failure", out.secured, False)
+
+# Unknown: the probe could not ask. Treated like sold — a retry campaign
+# started on a guess is a retry campaign against nothing.
+out, calls = run_secure((False, None))
+check("an unanswerable probe is not chased either", calls, 1)
+
+# Still listed: this is the case worth waiting out.
+out, calls = run_secure((False, True), retries=2)
+check("a ticket still in the feed is retried to the limit", calls, 3)
+check_true("and the notes say why it went back",
+           any("did not sell" in n for n in out.notes))
+check_true("and say when it gave up",
+           any("is the limit" in n for n in out.notes))
+
+# A retry that works stops immediately — no further attempts after a basket.
+out, calls = run_secure((False, True), (True, None), retries=5)
+check("a successful retry stops at once", calls, 2)
+check("and reports the hold", out.secured, True)
+
+# The retry count is honoured, including zero.
+_, calls = run_secure((False, True), retries=0)
+check("retries can be switched off entirely", calls, 1)
+_, calls = run_secure((False, True), retries=1)
+check("one retry means two attempts", calls, 2)
+
+# The budget is the bound. With no time left for a pause, it must not sleep.
+real_timeout = config.SECURE_TIMEOUT_SECONDS
+try:
+    config.SECURE_TIMEOUT_SECONDS = 0
+    out, calls = run_secure((False, True), retries=5, pause=30.0)
+    check("no time in the window means no going back", calls, 1)
+    check_true("and it says so rather than going quiet",
+               any("no time left" in n for n in out.notes))
+finally:
+    config.SECURE_TIMEOUT_SECONDS = real_timeout
+
+
+print("\nThe quantity is set while the browser is idle, not on the clock")
+
+
+class FakeSess:
+    def __init__(self, blow_up=False):
+        self.set_to = None
+        self.blow_up = blow_up
+
+    def set_quantity(self, qty, sink):
+        if self.blow_up:
+            raise RuntimeError("stepper missing")
+        self.set_to = qty
+        sink.note("quantity set")
+
+
+worker = buyer.BuyerWorker.__new__(buyer.BuyerWorker)
+worker._session = FakeSess()
+worker._prearm()
+check("parking sets the wanted quantity in advance",
+      worker._session.set_to, config.WANTED_QUANTITY)
+
+# A page that will not take a quantity here must not take out the warm
+# browser — the attempt itself can deal with it.
+worker._session = FakeSess(blow_up=True)
+try:
+    worker._prearm()
+    check("a failure while pre-arming is swallowed", True, True)
+except Exception as exc:
+    check("a failure while pre-arming is swallowed",
+          f"raised {type(exc).__name__}", True)
+
+# The sink it passes must accept note() — set_quantity calls it.
+buyer._ParkNotes().note("anything")
+check("the parking note sink accepts notes", True, True)
+
+
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
