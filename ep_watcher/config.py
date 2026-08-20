@@ -1517,10 +1517,35 @@ RESALE_SWEEP_SECONDS = int(os.environ.get("EP_RESALE_SWEEP_SECONDS", "90"))
 #: already blocked this connection twenty times deserves one.
 RESALE_SWEEP = os.environ.get("EP_RESALE_SWEEP", "1").lower() in ("1", "true", "yes")
 
-#: How many consecutive refusals stop the sweep for the rest of the session.
+#: How many consecutive refusals send the sweep for a rest.
 #: A sweep that is being refused is not finding tickets, it is only adding
 #: evidence that this client is asking too often — the opposite of the job.
 RESALE_SWEEP_MAX_REFUSALS = int(os.environ.get("EP_RESALE_SWEEP_MAX_REFUSALS", "3"))
+
+#: How long that rest lasts before the sweep tries again, slower.
+#:
+#: This used to be forever — refusals ended the sweep for the life of the
+#: process. On 2026-08-20 that happened twice in three hours, and both of the
+#: real weekend listings found that day (17:42 and 18:13) were found by the
+#: sweep rather than by a search. So the permanent stop switched off the
+#: detector that works, for the rest of a run that lasts days, with no symptom
+#: beyond finding nothing — and only a person noticing ever brought it back.
+#:
+#: The refusals look like a volume threshold rather than a verdict: the sweep
+#: answers roughly sixty calls, is refused, and answers again after a rest.
+#: Thirty minutes is a guess at "long enough to matter, short enough to leave
+#: most of the day covered", and the sweep_backoff records in the event log
+#: are what will settle it.
+RESALE_SWEEP_BACKOFF_SECONDS = float(
+    os.environ.get("EP_RESALE_SWEEP_BACKOFF", "1800"))
+
+#: The slowest the sweep will go before it stops slowing down.
+#:
+#: Each rest doubles the interval, so a sweep that keeps being refused settles
+#: at a rate the endpoint tolerates instead of oscillating between too fast
+#: and off. At ten minutes it is still far faster than the searches, which is
+#: the whole reason it exists.
+RESALE_SWEEP_MAX_SECONDS = float(os.environ.get("EP_RESALE_SWEEP_MAX", "600"))
 
 PROFILE_MAX_AGE_MINUTES = float(os.environ.get("EP_PROFILE_MAX_AGE", "90"))
 

@@ -134,20 +134,54 @@ if refusals:
     check("and the status", refusals[-1]["status"], 403)
 
 
-print("\nRefusals stop it, and stop it for good")
+print("\nRefusals rest it, and it comes back slower")
 # A sweep being refused is not finding tickets. It is only adding evidence
-# that this client asks too often, which is the opposite of its job.
+# that this client asks too often, which is the opposite of its job — so it
+# stops asking FOR A WHILE.
+#
+# It used to stop for the life of the process, and on 2026-08-20 that fired
+# twice in three hours. Both of the real weekend listings found that day —
+# 17:42 and 18:13 — came from the sweep rather than from a search, so the
+# permanent stop switched off the detector that works for the rest of a run
+# that lasts days, with no symptom beyond finding nothing. Unattended, nothing
+# would ever have brought it back.
 handled.clear()
 sweep = engine.ResaleSweep()
 state = fresh_state()
+was_interval = sweep._interval
 for attempt in range(config.RESALE_SWEEP_MAX_REFUSALS):
     sweep._next.clear()          # make it due again
     sweep.run(FakeSession([payload([], status=403)]), state)
-check("it gives up after the limit", sweep.stopped, True)
+check("it does NOT stop for good", sweep.stopped, False)
+check_true("it is resting", sweep._resume_at > time.monotonic())
+check("and counted the rest", sweep.backoffs, 1)
+check("the count is cleared for the next run", sweep._refusals, 0)
+check_true("and it will come back slower", sweep._interval > was_interval)
+
+# While resting it must ask nothing at all, by either route in.
 sweep._next.clear()
 blocked = FakeSession([payload([LISTING])])
-check("and asks nothing further", sweep.run(blocked, state), None)
-check("not even one more call", blocked.calls, 0)
+check("it asks nothing while resting", sweep.run(blocked, state), None)
+check("not even one call", blocked.calls, 0)
+check("and the sleep loop is told not to bother",
+      sweep.any_due(time.monotonic()), False)
+
+# When the rest is over it works again — this is the whole point.
+sweep._resume_at = 0.0
+sweep._next.clear()
+handled.clear()
+found = sweep.run(FakeSession([payload([LISTING])]), fresh_state())
+check_true("once rested, it finds things again", found is not None)
+
+# Slowing down is bounded, or a fortnight of refusals would put the interval
+# past the end of the festival.
+sweep = engine.ResaleSweep()
+for _ in range(12):
+    sweep._back_off(time.monotonic())
+check("the interval stops at the ceiling",
+      sweep._interval, config.RESALE_SWEEP_MAX_SECONDS)
+check_true("and it is still a sweep, not a search",
+           sweep._interval < config.EVENTS[0].poll_min_seconds * 4)
 
 # A good answer clears the count, so an isolated refusal cannot accumulate
 # across an entire fortnight into a shutdown.

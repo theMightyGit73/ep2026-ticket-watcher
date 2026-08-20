@@ -791,6 +791,32 @@ class ResaleSweep:
         self._next = {}
         self._refusals = 0
         self.stopped = False
+        #: Monotonic time to start asking again after a run of refusals, and
+        #: the interval to use when we do.
+        #:
+        #: Refusals used to end the sweep for the rest of the process, on the
+        #: reasoning that a sweep being refused is not finding tickets, it is
+        #: only adding evidence that this client asks too often. The first half
+        #: is right and the second half is why this backs off — but ending it
+        #: permanently was wrong, and 2026-08-20 showed how wrong.
+        #:
+        #: On that day the sweep was refused into silence at 18:37 and again at
+        #: 20:13, and BOTH of the real weekend listings — 17:42 and 18:13 —
+        #: were found by the sweep rather than by a search. It is the detector
+        #: that works, and nothing restarted it except a person noticing.
+        #: Unattended, the watcher would have spent its remaining days with its
+        #: best source switched off and no symptom beyond finding nothing.
+        #:
+        #: The pattern is a volume threshold, not a verdict on the client: it
+        #: answers ~60 calls, refuses, and answers again after a rest. So rest,
+        #: then come back slower, and keep coming back slower until it holds.
+        self._resume_at = 0.0
+        self._interval = config.RESALE_SWEEP_SECONDS
+        #: How many times we have had to back off. Reported, because a sweep
+        #: that has quietly settled at ten-minute intervals is a different
+        #: thing from one running at ninety seconds, and the hourly numbers
+        #: would otherwise look identical.
+        self.backoffs = 0
         #: Asked, answered, and came back with nothing to ask with.
         #:
         #: Counted because a sweep that is silently failing looks exactly like
@@ -820,12 +846,41 @@ class ResaleSweep:
         parse state.json on every one of those wakes just to discover that
         nothing is due yet. This answers the same question from memory.
         """
-        if not config.RESALE_SWEEP or self.stopped:
+        if not config.RESALE_SWEEP or self.stopped or now < self._resume_at:
             return False
         return any(e.searchable() and self.due(e, now) for e in config.EVENTS)
 
     def _schedule(self, event, now: float) -> None:
-        self._next[event.slug] = now + config.RESALE_SWEEP_SECONDS
+        self._next[event.slug] = now + self._interval
+
+    def _back_off(self, now: float) -> None:
+        """Rest after a run of refusals, and come back slower.
+
+        Not a stop. See _resume_at: the sweep found both of the real weekend
+        listings on 2026-08-20, and switching it off for the rest of a run
+        that lasts days costs far more than the refusals do.
+
+        The interval doubles each time up to a ceiling, so a sweep that keeps
+        being refused settles at a rate the endpoint tolerates rather than
+        oscillating between too fast and off. If even the ceiling is refused
+        it simply keeps resting between attempts — which is the polite
+        behaviour the original permanent stop was reaching for, without the
+        amnesia.
+        """
+        self.backoffs += 1
+        self._refusals = 0
+        self._resume_at = now + config.RESALE_SWEEP_BACKOFF_SECONDS
+        was = self._interval
+        self._interval = min(self._interval * 2, config.RESALE_SWEEP_MAX_SECONDS)
+        # Cleared so nothing is due the instant we resume; the per-event
+        # clocks are re-drawn against the new interval on the next pass.
+        self._next = {}
+        print(f"[{stamp()}] resale sweep resting "
+              f"{config.RESALE_SWEEP_BACKOFF_SECONDS / 60:.0f} min after "
+              f"{config.RESALE_SWEEP_MAX_REFUSALS} refusals, then every "
+              f"{self._interval}s (was {was}s) — searches are unaffected")
+        events.emit("sweep_backoff", seconds=config.RESALE_SWEEP_BACKOFF_SECONDS,
+                    interval=self._interval, backoffs=self.backoffs)
 
     def _refused(self, status) -> bool:
         """Did Ticketmaster refuse this call, as opposed to answering it?"""
@@ -839,13 +894,19 @@ class ResaleSweep:
         """
         if not config.RESALE_SWEEP or self.stopped or session is None:
             return None
-        # Resting out a 403, or holding a ticket. In the first case the whole
-        # point is to stop asking; in the second the watcher has deliberately
-        # paused and the buying browser owns the moment.
+        now = time.monotonic()
+        # Resting out its own run of refusals. Checked here as well as in
+        # any_due() because run() is reachable directly, and a rest that only
+        # held when the caller remembered to ask first would not be a rest.
+        if now < self._resume_at:
+            return None
+        # Resting out a 403 on the page itself, or holding a ticket. In the
+        # first case the whole point is to stop asking; in the second the
+        # watcher has deliberately paused and the buying browser owns the
+        # moment.
         if state_mod.backoff_remaining(st) > 0 or state_mod.hold_remaining(st) > 0:
             return None
 
-        now = time.monotonic()
         for event in config.EVENTS:
             if not event.searchable() or not self.due(event, now):
                 continue
@@ -887,13 +948,12 @@ class ResaleSweep:
                 events.emit("sweep_refused", event=event.slug, status=status,
                             count=self._refusals)
                 if self._refusals >= config.RESALE_SWEEP_MAX_REFUSALS:
-                    # Stop for the session. A sweep being refused is not
-                    # finding tickets, it is only adding evidence that this
-                    # client asks too often — the opposite of its job. The
-                    # searches underneath are unaffected and keep running.
-                    self.stopped = True
-                    print(f"[{stamp()}] resale sweep DISABLED for this session "
-                          f"— the searches continue on their own cadence")
+                    # Rest and come back slower, rather than stopping dead.
+                    # A sweep being refused is not finding tickets, it is only
+                    # adding evidence that this client asks too often — so it
+                    # stops asking FOR A WHILE. The searches underneath are
+                    # unaffected and keep running throughout.
+                    self._back_off(now)
                 return None
             if record.get("data") is None:
                 continue
