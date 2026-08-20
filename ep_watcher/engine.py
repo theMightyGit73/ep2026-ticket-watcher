@@ -666,6 +666,10 @@ class ResaleSweep:
     a search-driven find. There is no second alerting path to keep in step.
     """
 
+    #: How many calls between one-line summaries in the log. At 90s x 3 pages
+    #: this is roughly half-hourly.
+    REPORT_EVERY = 60
+
     def __init__(self):
         #: slug -> monotonic deadline. In memory rather than in state.json on
         #: purpose: a restart SHOULD sweep immediately, and writing the state
@@ -674,6 +678,22 @@ class ResaleSweep:
         self._next = {}
         self._refusals = 0
         self.stopped = False
+        #: Asked, answered, and came back with nothing to ask with.
+        #:
+        #: Counted because a sweep that is silently failing looks exactly like
+        #: a sweep that is finding nothing, and this project does not allow
+        #: those two to share a symptom. The realistic failure is mundane: the
+        #: fetch is relative to the page's origin, so a browser parked
+        #: somewhere other than ticketmaster.ie returns None every time and
+        #: says nothing about it.
+        self.calls = 0
+        self.answers = 0
+        self.unavailable = 0
+
+    def _maybe_report(self) -> None:
+        if self.calls and self.calls % self.REPORT_EVERY == 0:
+            print(f"[{stamp()}] resale sweep: {self.answers}/{self.calls} calls "
+                  f"answered, nothing found on {self.unavailable}")
 
     def due(self, event, now: float) -> bool:
         return now >= self._next.get(event.slug, 0.0)
@@ -720,7 +740,12 @@ class ResaleSweep:
             except Exception as exc:
                 print(f"[{stamp()}] resale sweep: {type(exc).__name__}: {exc}")
                 continue
+            self.calls += 1
+            self._maybe_report()
             if record is None:
+                # No answer AND no error to report — the page is very likely
+                # not on ticketmaster.ie, so the relative fetch had no origin
+                # to resolve against. Counted, so the summary above shows it.
                 continue
 
             status = record.get("status")
@@ -740,6 +765,7 @@ class ResaleSweep:
             if record.get("data") is None:
                 continue
             self._refusals = 0
+            self.answers += 1
 
             reading = Reading(
                 source="resale-sweep",
@@ -752,8 +778,10 @@ class ResaleSweep:
             if not _parse_resale_json(record, reading):
                 continue
             if reading.resale not in GOOD_STATUSES:
-                # The overwhelmingly common case, and it ends here: nothing is
-                # counted, nothing is written, nothing is sent.
+                # The overwhelmingly common case, and it ends here: no state
+                # is written and nothing is sent. Only the local tally moves,
+                # so the half-hourly line can prove the sweep is alive.
+                self.unavailable += 1
                 continue
 
             # Carry the last known primary forward rather than letting this

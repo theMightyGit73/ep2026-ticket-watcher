@@ -181,6 +181,37 @@ check_true("it comes due again within its interval",
 expired = [e for e in config.EVENTS if e.expired("2999-01-01")]
 check_true("every page expires eventually", len(expired) >= 1)
 
+print("\nIt can prove it is alive, because silence must not be ambiguous")
+# A sweep that is quietly failing looks exactly like a sweep that is finding
+# nothing. The realistic failure is mundane: the fetch is relative to the
+# page's origin, so a browser parked anywhere but ticketmaster.ie returns None
+# every time and says so to nobody.
+sweep = engine.ResaleSweep()
+state = fresh_state()
+sweep.run(FakeSession([payload([]) for _ in config.EVENTS]), state)
+check_true("calls are counted", sweep.calls >= 1)
+check("and answers too", sweep.answers, sweep.calls)
+check("with the empty ones tallied separately", sweep.unavailable, sweep.calls)
+
+
+class DeadSession:
+    """A browser parked off-origin: the fetch resolves against nothing."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def fetch_resale_json(self, event, qty):
+        self.calls += 1
+        return None
+
+
+sweep = engine.ResaleSweep()
+dead = DeadSession()
+sweep.run(dead, fresh_state())
+check_true("a dead sweep still counts the attempt", sweep.calls >= 1)
+check("but records no answer", sweep.answers, 0)
+check_true("so the two cases are distinguishable", sweep.calls != sweep.answers)
+
 engine.handle = real_handle
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
