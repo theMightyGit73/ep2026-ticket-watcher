@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import _sandbox  # noqa: F401,E402  (redirect writes; see tests/_sandbox.py)
 
-from ep_watcher import config, engine, state as st  # noqa: E402
+from ep_watcher import config, engine, events as ev, state as st  # noqa: E402
 from ep_watcher.model import AVAILABLE, UNAVAILABLE  # noqa: E402
 
 failures = []
@@ -117,6 +117,21 @@ st.event_state(state, config.EVENTS[0].slug)["last_primary"] = UNAVAILABLE
 sweep = engine.ResaleSweep()
 found = sweep.run(FakeSession([payload([LISTING])]), state)
 check("the known primary is carried forward", found.primary, UNAVAILABLE)
+
+
+print("\nA refusal records which page it was, because that is the diagnosis")
+# The first version of the refusal log said only "HTTP 403". On 2026-08-20 the
+# sweep shut itself off after three of them while the ordinary searches either
+# side succeeded — so it was that endpoint refusing that call, not an IP
+# block, and the one fact needed to work out why was the one not recorded.
+sweep = engine.ResaleSweep()
+state = fresh_state()
+sweep.run(FakeSession([payload([], status=403)]), state)
+refusals = [r for r in ev.read(kind="sweep_refused")]
+check_true("a refusal is recorded as an event", refusals)
+if refusals:
+    check("naming the page", refusals[-1]["event"], config.EVENTS[0].slug)
+    check("and the status", refusals[-1]["status"], 403)
 
 
 print("\nRefusals stop it, and stop it for good")

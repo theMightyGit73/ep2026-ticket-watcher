@@ -815,8 +815,26 @@ class ResaleSweep:
             status = record.get("status")
             if self._refused(status):
                 self._refusals += 1
-                print(f"[{stamp()}] resale sweep refused (HTTP {status}) "
-                      f"— {self._refusals}/{config.RESALE_SWEEP_MAX_REFUSALS}")
+                # WHICH page was refused is the whole diagnosis, and the first
+                # version of this line did not say.
+                #
+                # On 2026-08-20 the sweep drew three 403s within a minute and
+                # shut itself off, while the ordinary searches either side of
+                # it succeeded normally — so it was not an IP block, it was
+                # that endpoint refusing that call. The leading hypothesis is
+                # that the sweep asks for all three event ids from whichever
+                # page the browser happens to be parked on, and Ticketmaster
+                # objects to being asked about an event whose page you are not
+                # on. Two of every three calls are "foreign" in that sense.
+                #
+                # Recording the slug is what will confirm or kill that: if the
+                # refusals cluster on the pages we are NOT parked on, the fix
+                # is to sweep only the parked one rather than to slow down.
+                print(f"[{stamp()}] resale sweep refused (HTTP {status}) on "
+                      f"{event.slug} — {self._refusals}/"
+                      f"{config.RESALE_SWEEP_MAX_REFUSALS}")
+                events.emit("sweep_refused", event=event.slug, status=status,
+                            count=self._refusals)
                 if self._refusals >= config.RESALE_SWEEP_MAX_REFUSALS:
                     # Stop for the session. A sweep being refused is not
                     # finding tickets, it is only adding evidence that this
