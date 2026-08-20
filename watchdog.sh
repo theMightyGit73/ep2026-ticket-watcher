@@ -52,10 +52,29 @@ say() { echo "[$(date -u '+%Y-%m-%d %H:%M UTC')] $*" >> "$LOG"; }
 LOG_DIR="${EP_LOG_DIR:-$HOME/.ep2026-watcher/logs}"
 LOG_MAX_BYTES="${EP_LOG_MAX_BYTES:-$((5 * 1024 * 1024))}"
 
+# File size in bytes, portably.
+#
+# `stat -f%z` is BSD and correct on macOS, where this runs in production. On
+# Linux the SAME flag means "filesystem status", so it does not error loudly —
+# it succeeds at answering a different question, and the size came back empty.
+# The `|| echo 0` then turned that into a zero, and a zero is never greater
+# than the threshold, so rotation silently did nothing and said nothing.
+#
+# Caught by CI on 2026-08-20, which is the whole argument for running these
+# scripts somewhere other than the machine they were written on. It would
+# otherwise have surfaced as a Docker deployment whose logs grew for ever
+# while the file that was supposed to stop it sat right there looking correct.
+#
+# `wc -c` is POSIX and means the same thing everywhere.
+file_size() {
+    wc -c < "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
 rotate_log() {
     local file="$1" size
     [ -f "$file" ] || return 0
-    size=$(/usr/bin/stat -f%z "$file" 2>/dev/null || echo 0)
+    size=$(file_size "$file")
+    [ -n "$size" ] || return 0
     [ "$size" -gt "$LOG_MAX_BYTES" ] 2>/dev/null || return 0
     # One generation kept, deliberately. A fortnight of this watcher is about
     # 4 MB of log, so a single previous file comfortably covers the gap
