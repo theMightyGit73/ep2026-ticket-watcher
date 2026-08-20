@@ -29,6 +29,52 @@ STALE_MINUTES="${EP_STALE_MINUTES:-45}"
 mkdir -p "$(dirname "$LOG")"
 say() { echo "[$(date -u '+%Y-%m-%d %H:%M UTC')] $*" >> "$LOG"; }
 
+# ── Keep the logs from growing without limit ─────────────────────────────────
+#
+# Nothing else was ever going to. launchd appends to StandardOutPath for the
+# whole life of the job, macOS's newsyslog does not manage files under ~/, and
+# the watcher only ever prints. watcher.log reached 2 MB in the first eight
+# days and was on course to keep going.
+#
+# That log is the first thing anyone opens when the watcher has gone quiet, so
+# an unbounded one is a diagnostic problem long before it is a disk problem.
+# Done here because this script already runs every fifteen minutes and is the
+# only thing in the system that wakes up on a timer without needing the
+# watcher to be healthy.
+#
+# COPY then TRUNCATE — never move, never rename.
+#
+# launchd holds an open descriptor on this exact inode. Renaming the file
+# takes the live log with it: every subsequent line lands in a file called
+# ".1" that nobody is tailing, while watcher.log sits at zero bytes looking
+# exactly like a watcher that has died. Truncating in place keeps the inode,
+# so the open descriptor carries on writing and only the history moves.
+LOG_DIR="${EP_LOG_DIR:-$HOME/.ep2026-watcher/logs}"
+LOG_MAX_BYTES="${EP_LOG_MAX_BYTES:-$((5 * 1024 * 1024))}"
+
+rotate_log() {
+    local file="$1" size
+    [ -f "$file" ] || return 0
+    size=$(/usr/bin/stat -f%z "$file" 2>/dev/null || echo 0)
+    [ "$size" -gt "$LOG_MAX_BYTES" ] 2>/dev/null || return 0
+    # One generation kept, deliberately. A fortnight of this watcher is about
+    # 4 MB of log, so a single previous file comfortably covers the gap
+    # between something going wrong and somebody looking at it. Keeping more
+    # would be hoarding, on the machine that also has to hold a Chrome
+    # profile and stay responsive enough to buy a ticket.
+    if cp "$file" "$file.1" 2>/dev/null; then
+        : > "$file"
+        say "rotated $(basename "$file") at ${size} bytes — kept as $(basename "$file").1"
+    else
+        say "could not rotate $(basename "$file") — leaving it alone"
+    fi
+}
+
+for logfile in "$LOG_DIR"/*.log; do
+    [ -e "$logfile" ] || continue     # nothing there yet; the glob is literal
+    rotate_log "$logfile"
+done
+
 # Past the stop date? Then stopping is correct and must not be "repaired".
 STOP_AFTER="${EP_STOP_AFTER:-2026-08-28}"
 if [[ "$(date -u +%F)" > "$STOP_AFTER" ]]; then
