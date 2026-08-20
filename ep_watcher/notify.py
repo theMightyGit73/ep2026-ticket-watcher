@@ -601,7 +601,8 @@ def _reading_block(events, reading: Reading) -> str:
 
 
 def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
-              health=None, net=None, coverage=None, events=None) -> bool:
+              health=None, net=None, coverage=None, events=None,
+              securing=None) -> bool:
     """The hourly "still nothing, still trying" report.
 
     Deliberately carries the numbers rather than just the sentiment. "No
@@ -612,6 +613,13 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
     `coverage` is (degraded, resale_blind) and answers the harder question:
     not "did the watcher run" but "could it see". A poll that ran fine and
     learned nothing about resale is the one that quietly costs the ticket.
+
+    `securing` is a sentence about the buying profile having lost its sign-in,
+    or "" when there is nothing wrong. It is checked hourly rather than only
+    at startup because the account cookies can lapse at any point in a run
+    that lasts a fortnight — and a securing feature that is armed but cannot
+    work announces itself, otherwise, at the single worst moment: when a real
+    listing is on screen and there are ninety seconds to act.
     """
     healthy = failures < checks or checks == 0
 
@@ -651,6 +659,8 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
             "\n\nEVERY check was unhealthy this hour. That is a broken watcher,\n"
             "not a quiet Ticketmaster — the numbers above are the difference."
         )
+    if securing:
+        health_line += f"\n\n{securing}"
 
     health_block = f"\n{_health_section(health)}\n" if health else ""
     net_block = f"\n{_network_section(net)}\n" if net else ""
@@ -659,12 +669,18 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
 
     # Put the ask in the subject line: a "switch networks" instruction buried
     # three paragraphs into an hourly "no luck yet" email is one nobody reads.
+    # Priority order, and it is deliberate. A securing feature that is armed
+    # but signed out is worse news than a network nudge: the nudge asks for a
+    # small chore, this one says a ticket found in the next hour will not be
+    # held. Whichever is worst gets the subject line, because only the subject
+    # survives being read on a phone.
     switch_now = bool(net and net[0])
-    subject = (
-        "Switch the MacBook to your other network — EP2026 watcher"
-        if switch_now
-        else f"No luck yet — still watching {config.WATCH_LABEL}"
-    )
+    if securing:
+        subject = "Securing is armed but SIGNED OUT — EP2026 watcher"
+    elif switch_now:
+        subject = "Switch the MacBook to your other network — EP2026 watcher"
+    else:
+        subject = f"No luck yet — still watching {config.WATCH_LABEL}"
     body = (
         f"Hi David,\n\n"
         f"No ticket has appeared in the last hour. Still trying.\n\n"

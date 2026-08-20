@@ -321,9 +321,6 @@ def _print_reading(reading) -> int:
     for listing in reading.listings:
         print(f"  → {listing.kind}: {listing.describe()}")
     print("─" * 68)
-
-    if reading.needs_login:
-        print("\n  Session needs attention:  python -m ep_watcher login\n")
     return 1 if reading.failed else 0
 
 

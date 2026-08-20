@@ -20,6 +20,7 @@ signed in and was since signed out — the exact rot the banner exists to catch
 Run with:  .venv/bin/python tests/test_securing_readiness.py
 """
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -28,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ep_watcher import buyer, config  # noqa: E402
+from ep_watcher import buyer, config, engine  # noqa: E402
 from ep_watcher import __main__ as cli  # noqa: E402
 
 failures = []
@@ -88,6 +89,25 @@ def banner(secure_on, profile, session_file):
         # whatever is on the machine running them.
         config.PROFILE_DIR = profile.parent / "no-such-watcher-profile"
         return cli.securing_banner()
+    finally:
+        config.SECURE_ON_FIND, config.BUY_PROFILE_DIR = was_flag, was_dir
+        buyer.SESSION_FILE, config.PROFILE_DIR = was_session, was_watcher
+
+
+def warning(secure_on, profile, session_file):
+    """engine.securing_warning() for one configuration, globals restored.
+
+    The hourly counterpart to banner(). Both ask session_evidence() the same
+    question; this test exists to keep them answering it the same way.
+    """
+    was_flag, was_dir = config.SECURE_ON_FIND, config.BUY_PROFILE_DIR
+    was_session, was_watcher = buyer.SESSION_FILE, config.PROFILE_DIR
+    try:
+        config.SECURE_ON_FIND = secure_on
+        config.BUY_PROFILE_DIR = profile
+        buyer.SESSION_FILE = session_file
+        config.PROFILE_DIR = profile.parent / "no-such-watcher-profile"
+        return engine.securing_warning()
     finally:
         config.SECURE_ON_FIND, config.BUY_PROFILE_DIR = was_flag, was_dir
         buyer.SESSION_FILE, config.PROFILE_DIR = was_session, was_watcher
@@ -172,6 +192,41 @@ with tempfile.TemporaryDirectory() as tmp:
     check_true("the banner now says it is NOT signed in", "NOT signed in" in body)
     check_true("and names the cookies that went missing",
                "id-token" in body or "gone" in body)
+
+    print("\nAnd the same rot, an hour into a fortnight, reaches the inbox")
+    # The banner above only ever speaks at startup. This run lasts two weeks,
+    # so the cookies can lapse on day nine — long after the only sentence that
+    # would have mentioned it scrolled off the log. The hourly report asks the
+    # same question again, of the same evidence, so the answer cannot drift
+    # between the two.
+    check_true("armed and signed out warns in the hourly report",
+               "SIGNED OUT" in warning(True, good, session_file))
+    check_true("and says how to fix it",
+               "login-buy" in warning(True, good, session_file))
+
+    # The three quiet cases. Each is silence for a different reason, and
+    # getting any of them wrong would put a false alarm in every hourly email
+    # — which is how a warning stops being read.
+    make_profile(good, ACCOUNT)       # signed in again
+    check("a signed-in profile says nothing", warning(True, good, session_file), "")
+    check("securing switched off says nothing",
+          warning(False, good, session_file), "")
+    # "Cannot tell" is not "signed out", and only the second of those may
+    # speak. session_evidence() answers None when a sign-in was recorded but
+    # named no lasting cookie to watch — there is then genuinely nothing to
+    # check against, and this project has already been bitten once by reading
+    # that silence as a no.
+    vague = tmp / "vague"
+    make_profile(vague, ACCOUNT)
+    vague_session = tmp / "vague-session.json"
+    vague_session.write_text(json.dumps({"persistent_cookies": [], "auth_cookies": []}))
+    check("cannot-tell stays quiet rather than crying wolf",
+          warning(True, vague, vague_session), "")
+
+    # But a buying profile that has never existed at all is not a "cannot
+    # tell" — it is a definite no, and the loudest one available.
+    check_true("a profile that was never created does warn",
+               "SIGNED OUT" in warning(True, tmp / "never-made", session_file))
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
