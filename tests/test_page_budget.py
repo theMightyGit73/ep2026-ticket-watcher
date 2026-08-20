@@ -81,12 +81,38 @@ def aged(state, event, minutes):
 
 print("\nThe budget is weighted, and it is the same budget")
 
-# Three pages since 2026-08-19, two of them searched equally hard since David
-# said the Early Entry Pass matters as much as the ticket. This is the nominal
-# flat sum; the numbers that actually bind are peak_searches_per_hour() and
-# searches_per_day(), checked in test_peak_hours.py.
-check("total nominal volume across all three pages",
-      round(config.searches_per_hour()), 18)
+# Two pages are searched today: the Early Entry Pass was switched off on
+# 2026-08-20 so that every request goes to finding an actual weekend ticket.
+# This is the nominal flat sum; the numbers that actually bind are
+# peak_searches_per_hour() and searches_per_day(), checked in
+# test_peak_hours.py.
+check("total nominal volume across the pages being searched",
+      round(config.searches_per_hour()), 10)
+
+# The budget must FALL when a page is switched off, and by that page's share.
+# This is the point of the switch rather than a side effect of it: David
+# turned the pass off to spend its requests looking for the ticket, and a
+# budget that kept counting a page nobody searches would hide the headroom he
+# bought — and would eventually be used to argue against speeding up the page
+# that matters.
+import importlib  # noqa: E402
+import os  # noqa: E402
+
+_was_early = dict(os.environ)
+try:
+    os.environ["EP_EARLY_ENTRY"] = "1"
+    with_pass = importlib.reload(config)
+    check("with the pass switched back on, all three are counted",
+          round(with_pass.searches_per_hour()), 18)
+    check_true("and the busiest hour is still under the block line",
+               with_pass.peak_searches_per_hour() < with_pass.BLOCK_RATE_PER_HOUR)
+finally:
+    os.environ.clear(); os.environ.update(_was_early)
+    config = importlib.reload(config)
+
+# What the switch does BESIDES move these numbers — that it also governs
+# holding, that the pass still gives way to a weekend ticket, that the
+# scheduler and the sweep both honour it — is in test_early_entry_switch.py.
 # The nominal range must agree with the window actually in force. When these
 # drifted apart the standard page reported 13.3 searches an hour while really
 # running at 8.6 — the budget arithmetic quietly lying about itself.
@@ -199,7 +225,14 @@ for index, event in enumerate(config.EVENTS):
     st.note_event_polled(s, event.slug)
     aged(s, event, 4 + index * 11)
 rows = {row[0]: row for row in st.event_summaries(s)}
-check("every page is reported", len(rows), len(config.EVENTS))
+# Every page BEING SEARCHED. A switched-off page is left out on purpose: its
+# last reading is frozen at whatever it said when the switch was flipped, and
+# a stale row beside two live ones reads as a page that has broken. What is
+# off is stated once by config.paused_note() instead.
+check("every searched page is reported",
+      len(rows), len([e for e in config.EVENTS if e.searchable()]))
+check_true("and the page that is off is not among them",
+           not any("Early Entry" in name for name in rows))
 check("with its age", round(rows[A.name][4]), 4)
 check("...for each of them", round(rows[B.name][4]), 15)
 check_true("and none of them is missing one",

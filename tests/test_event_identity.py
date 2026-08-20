@@ -34,6 +34,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ep_watcher import config, notify, state as st  # noqa: E402
 from ep_watcher.model import AVAILABLE, UNAVAILABLE, UNKNOWN, Listing, Reading  # noqa: E402
 
+# Every configured page, including the one switched off by default.
+#
+# The bug this file exists to prevent — an alert naming or linking the wrong
+# page — gets MORE likely as pages are added, not less, so the checks run
+# against all three whatever today's switches say. See
+# config.WATCH_EARLY_ENTRY.
+import importlib  # noqa: E402
+import os  # noqa: E402
+
+os.environ["EP_EARLY_ENTRY"] = "1"
+importlib.reload(config)
+
 failures = []
 sent = []
 pushed = []

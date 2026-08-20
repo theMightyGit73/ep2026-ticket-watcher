@@ -722,6 +722,15 @@ def heartbeat(checks: int, failures: int, hours: float, reading: Reading,
     if securing:
         health_line += f"\n\n{securing}"
 
+    # What is switched off, said every hour. A page nobody is searching is not
+    # a fault and gets no alarm, but it must not become invisible either: the
+    # Early Entry Pass was switched off on an afternoon when the weekend
+    # ticket was the only thing that mattered, and the day that stops being
+    # true is a day David has to remember unprompted. This is the prompt.
+    paused = config.paused_note()
+    if paused:
+        health_line += f"\n\n{paused}"
+
     health_block = f"\n{_health_section(health)}\n" if health else ""
     net_block = f"\n{_network_section(net)}\n" if net else ""
     if net_block:

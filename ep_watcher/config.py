@@ -23,24 +23,35 @@ class Event:
                  poll_min_seconds: int = 0, poll_max_seconds: int = 0,
                  peak_min_seconds: int = 0, peak_max_seconds: int = 0,
                  offpeak_min_seconds: int = 0, offpeak_max_seconds: int = 0,
+                 watch: bool = True,
                  secure: bool = True, secure_priority: int = 0,
                  stop_after: str = ""):
         self.peak_min_seconds, self.peak_max_seconds = peak_min_seconds, peak_max_seconds
         self.offpeak_min_seconds = offpeak_min_seconds
         self.offpeak_max_seconds = offpeak_max_seconds
+        #: Is this page searched at all?
+        #:
+        #: A step above `secure`, and the two are a ladder rather than a pair:
+        #: False here means the page is never loaded, never searched, never
+        #: swept and never alerted on, so `secure` below cannot arise. The
+        #: page stays in EVENTS with its history, its cadence and its
+        #: priority intact — nothing is deleted, it is switched off.
+        #:
+        #: That distinction is the whole point of the flag. `stop_after`
+        #: retires a page for good on a date; this is the reversible version,
+        #: for a page that is still wanted but not *now*, because its
+        #: requests are needed somewhere more important. Switching it back on
+        #: must be one edit and a restart, not an archaeology exercise.
+        self.watch = watch
         #: May the buyer open a signed-in browser and hold this one?
         #:
         #: Per page, because "tell me about it" and "grab it for me" are not
         #: the same instruction, and a page may be worth watching without
         #: being worth an urgent walk to the laptop.
         #:
-        #: All three are True today. The Early Entry Pass was briefly False,
-        #: on the reasoning that it is an add-on Ticketmaster says is only
-        #: valid alongside a Weekend Ticket — so holding one would pull David
-        #: to a checkout for something he cannot use yet. He overruled that on
-        #: 2026-08-19: he wants it treated as importantly as the ticket. The
-        #: switch stays because the argument may return, and because a page
-        #: added later may genuinely not deserve grabbing.
+        #: Both weekend pages are True. The Early Entry Pass is governed by
+        #: WATCH_EARLY_ENTRY below, which sets `watch` and `secure` together
+        #: — see the comment there for why the two move as one.
         self.secure = secure
         #: Which page wins when two want the buying browser at once.
         #:
@@ -151,6 +162,17 @@ class Event:
 
         now = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return now > self.stop_after
+
+    def searchable(self, today: str = "") -> bool:
+        """Should this page be searched right now, for any reason at all?
+
+        The single predicate every caller asks, so that "switched off" and
+        "past its date" cannot drift apart. Both mean the same thing to the
+        request budget — no page load, no search, no sweep — and they were
+        two separate checks for about an hour, which is exactly long enough
+        for a new call site to remember one and forget the other.
+        """
+        return self.watch and not self.expired(today)
 
     def next_gap(self, now=None) -> int:
         """How long to wait before searching this page again.
@@ -345,6 +367,45 @@ SECURE_PRIORITY_WEEKEND = int(os.environ.get("EP_PRIORITY_WEEKEND", "100"))
 SECURE_PRIORITY_ADDON = int(os.environ.get("EP_PRIORITY_ADDON", "10"))
 
 
+# ── The Early Entry Pass: one switch, and this is it ─────────────────────────
+#
+#   OFF. To turn it back on:
+#
+#       echo 'export EP_EARLY_ENTRY=1' >> ~/.ep2026-watcher/env
+#       ./restart.sh
+#
+#   That is the whole procedure. Nothing else has to change, and nothing
+#   about the pass has been deleted — its page, its cadence, its priority,
+#   its stop date and its history are all still here, waiting.
+#
+# David's instruction of 2026-08-20, and the reason is worth keeping because
+# it tells you when to reverse it: the weekend ticket is the critical thing
+# and he does not have one yet, so every request the watcher can spend should
+# be spent looking for it. An Early Entry pass is not worth a single search
+# until there is a ticket for it to sit beside — Ticketmaster's own note reads
+# "Early Entry passes are only valid with a Weekend Ticket".
+#
+# So the trigger for flipping this back to 1 is a real weekend ticket in hand.
+# At that moment the pass stops being a distraction and becomes the next thing
+# worth catching, and it should be caught properly.
+#
+# WHY ONE FLAG AND NOT TWO. Searching and securing were separate settings, and
+# the pass has held every combination of them over three days: watched and
+# secured, watched and alert-only, and now neither. They are tied together
+# here because both of the reasons for keeping them apart dissolve on the same
+# day. Alert-only existed because each attempt spent a buying-browser cold
+# start that a weekend ticket might need in the next minute; once a weekend
+# ticket is bought, the buying browser has nothing else to do. Searching at
+# all existed on the same budget the weekend pages were competing for; once
+# they have stopped competing, the budget is free.
+#
+# The point is that "turn the Early Entry search back on" and "and actually
+# get me one" have to be the same action. Turning on a search that only ever
+# emails him, on the day he wants the pass held, would be a switch that looks
+# like it worked and does half the job.
+WATCH_EARLY_ENTRY = os.environ.get("EP_EARLY_ENTRY", "0").lower() in ("1", "true", "yes")
+
+
 EVENTS = [
     Event(
         slug="weekend-camping",
@@ -389,17 +450,22 @@ EVENTS = [
     # own note reads "Early Entry passes are only valid with a Weekend
     # Ticket".
     #
-    # It IS secured, and this comment used to say the opposite. It was
-    # excluded when the feature was built, on the reasoning that holding an
-    # add-on would pull David to a checkout for something useless on its own;
-    # he overruled that on 2026-08-19 and asked for it to be treated as
-    # importantly as the ticket. The switch below was changed and this
-    # sentence was not, so the file argued with itself for a day — in a
-    # codebase where the comments ARE the documentation, that is the
-    # expensive kind of stale.
+    # SWITCHED OFF as of 2026-08-20. Not searched, not swept, not alerted on,
+    # not secured. See WATCH_EARLY_ENTRY above for the one line that reverses
+    # that, and for why the trigger is a weekend ticket in hand.
     #
-    # What makes it safe is priority, not exclusion: it gives way to a
-    # weekend ticket rather than being refused. See Event.secure_priority.
+    # Everything below is left exactly as it was while the page was live —
+    # the cadence, the priority, the stop date — because the flag is meant to
+    # be flipped back and none of it is worth re-deriving on the day it is.
+    # Deliberately NOT expressed as a commented-out event or a deleted one:
+    # both would make turning it on an act of reconstruction, and this has to
+    # be a switch.
+    #
+    # Note that the comment does not restate the flag's value. This exact
+    # setting has held four positions in three days and the prose describing
+    # it went stale twice, once badly enough to need its own commit. Read
+    # WATCH_EARLY_ENTRY, or run `python -m ep_watcher budget`, which prints
+    # what is actually in force.
     Event(
         slug="early-entry",
         name="Electric Picnic 2026 - Early Entry Pass",
@@ -414,25 +480,31 @@ EVENTS = [
         peak_max_seconds=EARLY_ENTRY_PEAK_MAX_SECONDS,
         offpeak_min_seconds=EARLY_ENTRY_OFFPEAK_MIN_SECONDS,
         offpeak_max_seconds=EARLY_ENTRY_OFFPEAK_MAX_SECONDS,
-        # ALERT ONLY. David's call on 2026-08-20, and the third position this
-        # setting has held — the reasoning has changed each time, so it is
-        # written out rather than left to be re-litigated.
+        # Both from the one switch, so that turning the search back on also
+        # turns the holding back on. See WATCH_EARLY_ENTRY.
         #
-        #   * Originally False: holding an add-on would pull him to a checkout
-        #     for something useless without a weekend ticket.
-        #   * True on 2026-08-19: "treat it as importantly as the ticket",
-        #     with priority rather than exclusion keeping it safe.
-        #   * False again on 2026-08-20, for a reason neither of the first two
-        #     had. Early Entry passes at €46.50 turned out to appear several
-        #     times a day — five of the eight finds recorded — and each one
-        #     spends a buying-browser cold start and its requests. Priority
-        #     stops it BLOCKING a weekend ticket; it does not stop it spending
-        #     the budget and the attention. The alert still fires every time.
+        # The four positions this has held, kept because the reasoning has
+        # changed every time and the next change deserves to know:
         #
-        # secure_priority is kept, and is not vestigial: flipping this back to
-        # True must restore the give-way behaviour, not a pass that outranks a
-        # weekend ticket.
-        secure=False,
+        #   * Watched, not secured (built): holding an add-on would pull him
+        #     to a checkout for something useless without a weekend ticket.
+        #   * Watched and secured (2026-08-19): "treat it as importantly as
+        #     the ticket", with priority rather than exclusion keeping it safe.
+        #   * Watched, not secured (2026-08-20 morning): passes at €46.50 turn
+        #     out to appear several times a day — five of the first eight
+        #     finds — and each attempt spends a buying-browser cold start.
+        #   * Neither (2026-08-20 evening): the weekend ticket is critical and
+        #     is not yet in hand, so the pass should not be spending searches
+        #     that the weekend pages could use.
+        #
+        # secure_priority is kept and is not vestigial: when this comes back
+        # on, the pass must still GIVE WAY to a weekend ticket rather than
+        # outrank it. That stays true even in the case that switches it on —
+        # a weekend ticket already bought — because the watcher has no way to
+        # know the purchase happened, and would otherwise be one preemption
+        # away from dropping a second real ticket for an add-on.
+        watch=WATCH_EARLY_ENTRY,
+        secure=WATCH_EARLY_ENTRY,
         secure_priority=SECURE_PRIORITY_ADDON,
         # Entry is from 2pm on the Thursday, so the 27th is the last day this
         # is worth anything at all. The weekend pages keep running to the
@@ -440,6 +512,38 @@ EVENTS = [
         stop_after=os.environ.get("EP_EARLY_ENTRY_STOP_AFTER", "2026-08-27"),
     ),
 ]
+
+def paused_pages() -> list:
+    """Pages switched off on purpose, and still reversible. Never the expired.
+
+    Kept apart from `expired()` deliberately. A page past its stop date is
+    finished and saying so every hour would be nagging about the calendar; a
+    page somebody switched off is a decision that can be un-made, and the
+    watcher should keep saying it made it. The failure this guards against is
+    the ordinary one — a switch flipped in an afternoon and forgotten for a
+    week, while the thing it switched off is quietly assumed to be running.
+    """
+    return [e for e in EVENTS if not e.watch and not e.expired()]
+
+
+def paused_note() -> str:
+    """One line naming what is switched off, or "" when everything is on.
+
+    Names the env var outright rather than pointing at the code, because the
+    place this line is read is a phone. A pointer to a file on the MacBook is
+    not an instruction anybody can act on from a train.
+
+    EP_EARLY_ENTRY is the only such switch today and `watch` is only False on
+    that one page. A second switchable page would need this to look the name
+    up per event rather than assume it.
+    """
+    if not paused_pages():
+        return ""
+    names = ", ".join(e.name for e in paused_pages())
+    return (f"NOT being searched: {names}. "
+            f"Set EP_EARLY_ENTRY=1 in ~/.ep2026-watcher/env and restart to "
+            f"turn it back on (it will be held as well as alerted on).")
+
 
 # The first event stays the default for anything that still speaks in the
 # singular (the `login` and `calibrate` commands, mainly).
@@ -859,7 +963,14 @@ def searches_per_hour_at(hour: int) -> float:
 
     when = datetime(2000, 1, 1, hour % 24, 30)
     total = 0.0
-    for event in EVENTS:
+    # Only pages actually being searched. A page that is switched off or past
+    # its stop date sends nothing, so counting it would overstate the rate —
+    # and this number's whole job is to be the one that can be trusted against
+    # the block line. Overstating is the safe direction for a limit, but it is
+    # the unsafe direction for a decision: it would hide the headroom that
+    # switching a page off is meant to buy, and the point of switching the
+    # Early Entry Pass off is to spend that headroom on the weekend ticket.
+    for event in (e for e in EVENTS if e.searchable()):
         lo, hi = event.gap_range(when)
         if is_night(when) and NIGHT_POLL_SECONDS:
             lo = hi = max(NIGHT_POLL_SECONDS, lo)
@@ -883,8 +994,11 @@ def searches_per_hour() -> float:
     The number that actually has to stay under control — roughly 20 an hour is
     what got the home IP flagged in development — and the one to check after
     changing any page's interval.
+
+    Counts only the pages actually being searched, for the same reason
+    searches_per_hour_at() does.
     """
-    return sum(e.searches_per_hour for e in EVENTS)
+    return sum(e.searches_per_hour for e in EVENTS if e.searchable())
 
 
 POLL_INTERVAL_SECONDS = poll_interval()

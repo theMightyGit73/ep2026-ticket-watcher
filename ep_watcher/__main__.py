@@ -433,6 +433,13 @@ def cmd_watch(args) -> int:
     for line in securing_banner():
         print(line)
 
+    # Which pages this run will NOT look at. Printed next to the securing
+    # banner because it answers the same class of question — what does this
+    # watcher actually do — and because a page silently missing from the log
+    # is indistinguishable from a page that is failing.
+    for event in config.paused_pages():
+        print(f"  {event.name}: NOT SEARCHED (EP_EARLY_ENTRY=1 to turn on)")
+
     if not config.USE_BROWSER:
         # API-only: no browser to keep warm, so this is just a polling loop.
         print("  Browser DISABLED — API sources only\n")
@@ -1541,7 +1548,7 @@ def budget_report() -> tuple:
     # request volume, and a budget report that omits a source of requests is
     # the kind of reassuring number this project exists to distrust.
     if config.RESALE_SWEEP:
-        live = [e for e in config.EVENTS if not e.expired()]
+        live = [e for e in config.EVENTS if e.searchable()]
         per_hour = 3600.0 / config.RESALE_SWEEP_SECONDS * len(live)
         lines.append(
             f"    Resale sweep   : {per_hour:5.1f} calls/hour  "
@@ -1562,6 +1569,15 @@ def budget_report() -> tuple:
     lines.append("")
     lines.append("  Per page, in minutes between searches:")
     for event in config.EVENTS:
+        # A page that is off is listed, not omitted. Omitting it would make a
+        # switched-off page and a forgotten one look identical here, which is
+        # the one thing this report exists not to do — and this is the report
+        # somebody reads when asking "why is nothing happening on that page?".
+        if not event.searchable():
+            why = ("past its stop date" if event.expired()
+                   else "switched off — see EP_EARLY_ENTRY in config.py")
+            lines.append(f"    {event.slug:28} NOT SEARCHED  ({why})")
+            continue
         peak_lo, peak_hi = event.gap_range(datetime.datetime(2000, 1, 1, 12, 30))
         off_lo, off_hi = event.gap_range(datetime.datetime(2000, 1, 1, 22, 30))
         rate = 3600.0 / ((peak_lo + peak_hi) / 2.0)

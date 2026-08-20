@@ -200,14 +200,47 @@ searching both equally spent half the budget for an eighth of the return.
 | Page | Peak (10:00–20:00) | Off-peak | Secured? |
 | --- | --- | --- | --- |
 | Weekend Camping | 5–9 min | 10–15 min | yes |
-| Early Entry Pass | 5–9 min | 10–15 min | yes |
 | Weekend Camping Instalment Plan | 30–60 min | 60–90 min | yes |
+| Early Entry Pass | **not searched** | — | no |
 
-Peak load is 18.5 searches/hour and a day costs about 293.
+Peak load is 9.9 searches/hour and a day costs about 159, against a ceiling of
+~20/hour. Run `python -m ep_watcher budget` for what is actually in force —
+the numbers here are prose and the command computes.
 
-**The Early Entry Pass is searched exactly as hard as the weekend ticket**, on
-David's instruction of 2026-08-19. That parity has a price, and it is paid by
-the standard page. Three pages cannot all be searched every three minutes:
+### The Early Entry Pass is switched off
+
+Off since 2026-08-20, on David's instruction, and off means genuinely
+untouched: not searched, not swept, not alerted on, not held. The reasoning is
+worth stating because it also says when to reverse it — **the weekend ticket
+is the critical thing and he does not have one yet**, so every request the
+watcher can spend should go to finding one. A pass is worth nothing on its
+own; Ticketmaster's own note reads "Early Entry passes are only valid with a
+Weekend Ticket".
+
+**To turn it back on**, on the day there is a real ticket for it to sit beside:
+
+```bash
+echo 'export EP_EARLY_ENTRY=1' >> ~/.ep2026-watcher/env
+./restart.sh
+```
+
+That is the whole procedure, and it restores **both** halves — the page is
+searched again *and* a pass found on it is held, not just emailed about. The
+two used to be separate settings and are deliberately tied to this one flag,
+because a search that only ever sends an email is a switch that looks like it
+worked and does half the job. Nothing about the pass has been deleted: its
+cadence, its priority, its stop date and its history are all still in
+`config.py` waiting. `tests/test_early_entry_switch.py` exercises the ON path
+on every test run, so it stays known-good while it is unused.
+
+Turning it on costs 8.6 searches/hour and takes peak load to 18.5 — still
+under the line, and the test suite asserts that it stays there.
+
+#### What that parity cost while it was on
+
+Between 2026-08-19 and 2026-08-20 the pass was searched exactly as hard as the
+weekend ticket, and the bill was paid by the standard page. Three pages cannot
+all be searched every three minutes:
 
 | Both fast pages at | Peak searches/hour | |
 | --- | --- | --- |
@@ -217,30 +250,25 @@ the standard page. Three pages cannot all be searched every three minutes:
 | **7 min mean** | **18.5** | fits |
 
 The ~20/hour ceiling is not arbitrary — it is what got the home connection
-flagged during development. So the standard page slows from a 4-minute mean
+flagged during development. So the standard page slowed from a 4-minute mean
 to 7, which on a ~4.6 minute listing lifetime takes the chance of catching one
-from roughly 56% to about 45%. Raise `EP_STANDARD_PEAK_MIN` / `_MAX` to undo
-it and accept the request rate.
+from roughly 56% to about 45%. With the pass off, that headroom is available
+again: raise `EP_STANDARD_PEAK_MIN` / `_MAX` to spend it on the page that
+might actually carry a weekend ticket.
 
-The **Early Entry Pass** was added on 2026-08-19 and is treated differently on
-purpose. It is an add-on, not a ticket — Ticketmaster's own note reads "Early
-Entry passes are only valid with a Weekend Ticket" — and it was on general
-sale at €39.40 when it was added, with stock showing. A page that is selling
-does not need watching every three minutes, and the question here is "has it
-sold out and come back", not "did a resale listing flash past".
+#### How this setting has moved
 
-It is **alerted on but not secured**, and that setting has now held three
-positions. It began False — holding an add-on pulls David to a checkout for
-something useless on its own. It went True on 2026-08-19, when he asked for it
-to be treated as importantly as the ticket, with priority rather than
-exclusion keeping a weekend listing safe. It went back to False on 2026-08-20
-for a reason neither of the first two had: these passes turn out to appear
-several times a day — five of the first eight finds — and each attempt spends
-a buying-browser cold start and its share of the request budget. Priority
-stops a pass *blocking* a weekend ticket; it does not stop it spending the
-budget and the attention.
+Four positions in three days, kept because the reasoning changed every time
+and the next change deserves to know what the previous ones were for:
 
-The alert fires exactly as before, and still says what it is:
+| | Searched | Held | Why |
+| --- | --- | --- | --- |
+| Added 2026-08-19 | yes | no | Holding an add-on pulls David to a checkout for something useless on its own |
+| 2026-08-19 | yes | yes | "Treat it as importantly as the ticket" — priority, not exclusion, keeps a weekend listing safe |
+| 2026-08-20 am | yes | no | Passes at €46.50 appear several times a day — five of the first eight finds — and each attempt spends a buying-browser cold start |
+| **2026-08-20 pm** | **no** | **no** | The weekend ticket is critical and is not yet in hand; the pass should not be spending searches the weekend pages could use |
+
+When it is on, the alert says plainly what the thing is:
 
 ```text
 This is the EARLY ENTRY PASS — an ADD-ON for campsite access from 2pm
@@ -437,8 +465,12 @@ corner case.
 David's rule: **the weekend ticket is always priority, but try to get the
 early one as well.** Both halves are implemented.
 
-- The pass is still watched, still alerted on, and still secured whenever the
-  buying browser is free. It is worth having.
+This describes the arrangement **when the pass is switched on**. It is off
+today (see above), so nothing below is currently in play — it is kept because
+the switch is meant to be flipped back, and this is what happens when it is.
+
+- The pass is watched, alerted on, and secured whenever the buying browser is
+  free. It is worth having.
 - A weekend ticket outranks it, and outranking is real: a weekend find will
   **close the browser on a held pass** and go for the ticket instead.
 - The pass may never do the reverse, and neither weekend page may evict the
@@ -908,7 +940,8 @@ Environment variables, all optional:
 | `EP_STANDARD_PEAK_MAX` | `540` | Longest |
 | `EP_STANDARD_OFFPEAK_MIN` | `600` | The same, outside the peak window |
 | `EP_STANDARD_OFFPEAK_MAX` | `900` | |
-| `EP_EARLY_PEAK_MIN` / `_MAX` | `300` / `540` | The Early Entry Pass, watched as hard as the ticket by David's instruction |
+| `EP_EARLY_ENTRY` | `0` | **The Early Entry Pass switch.** `1` searches the page again *and* holds a pass found on it. Off since 2026-08-20 so the whole budget goes to the weekend ticket — turn it on once there is a real ticket for a pass to sit beside |
+| `EP_EARLY_PEAK_MIN` / `_MAX` | `300` / `540` | The Early Entry Pass's cadence when `EP_EARLY_ENTRY=1`. Same as the standard page |
 | `EP_EARLY_OFFPEAK_MIN` / `_MAX` | `600` / `900` | |
 | `EP_INSTALMENT_PEAK_MIN` / `_MAX` | `1800` / `3600` | The instalment plan. One of nine sightings was here, so it keeps a small share |
 | `EP_INSTALMENT_OFFPEAK_MIN` / `_MAX` | `3600` / `5400` | |

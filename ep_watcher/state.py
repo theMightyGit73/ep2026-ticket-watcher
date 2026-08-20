@@ -338,14 +338,14 @@ def due_events(state: dict, events) -> list:
     than twice its longest gap overdue is searched regardless, so a clock
     jumping forward or a corrupted timestamp cannot park a page for ever.
     """
-    # A page past its own stop date is not due, and cannot be rescued by the
-    # stall guard either — "overdue" is meaningless for something nobody
-    # should be asking about any more. Filtered first so both paths below
-    # inherit it. See Event.stop_after: the Early Entry Pass is worthless from
-    # the 28th while the weekend tickets still matter, and searching for it
-    # spends real requests against a rate limit that has already blocked this
-    # connection nineteen times.
-    live = [e for e in events if not e.expired()]
+    # A page that is switched off, or past its own stop date, is not due — and
+    # cannot be rescued by the stall guard either, because "overdue" is
+    # meaningless for something nobody should be asking about. Filtered first
+    # so both paths below inherit it. See Event.searchable(): a search spends
+    # a real request against a rate limit that has already blocked this
+    # connection nineteen times, so a page nobody wants must cost nothing at
+    # all rather than merely being quiet about what it finds.
+    live = [e for e in events if e.searchable()]
     due = [e for e in live if event_due(state, e)]
     if due:
         return due
@@ -367,7 +367,12 @@ def event_summaries(state: dict) -> list:
     page's URL with nothing to signal the mismatch.
     """
     out = []
-    for event in config.EVENTS:
+    # Only pages being searched. A switched-off page's last reading is frozen
+    # at whatever it said when the switch was flipped, and a row saying
+    # "UNAVAILABLE, 3 days ago" beside two live ones reads as a page that has
+    # broken rather than one nobody is asking about. What IS off is said once,
+    # plainly, by config.paused_note() — see notify.heartbeat.
+    for event in (e for e in config.EVENTS if e.searchable()):
         ev = event_state(state, event.slug)
         out.append((
             event.name,

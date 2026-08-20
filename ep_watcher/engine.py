@@ -771,7 +771,7 @@ class ResaleSweep:
         """
         if not config.RESALE_SWEEP or self.stopped:
             return False
-        return any(not e.expired() and self.due(e, now) for e in config.EVENTS)
+        return any(e.searchable() and self.due(e, now) for e in config.EVENTS)
 
     def _schedule(self, event, now: float) -> None:
         self._next[event.slug] = now + config.RESALE_SWEEP_SECONDS
@@ -796,7 +796,7 @@ class ResaleSweep:
 
         now = time.monotonic()
         for event in config.EVENTS:
-            if event.expired() or not self.due(event, now):
+            if not event.searchable() or not self.due(event, now):
                 continue
             self._schedule(event, now)
             try:

@@ -116,13 +116,24 @@ check_true("the quiet hours really are quieter",
            config.searches_per_hour_at(3) < config.searches_per_hour_at(14))
 # The peak window is a REDISTRIBUTION, not a raise. The day must not cost
 # more than the flat 3-6 minute cadence it replaced (~274 searches).
-# Three pages now, so the day is dearer than the two-page flat cadence. The
-# binding constraint is the instantaneous rate above, not this; this exists so
-# that adding a fourth page cannot pass unnoticed.
+# The binding constraint is the instantaneous rate above, not this; this
+# exists so that adding a fourth page cannot pass unnoticed.
 check_true("a day stays within reach of the flat cadence it replaced",
            config.searches_per_day() <= 300)
+# The floor was 200 while three pages were searched. It came down with the
+# Early Entry Pass on 2026-08-20, and the number is re-baselined rather than
+# removed: its job is to catch a configuration that has quietly stopped
+# polling — a typo'd interval, a filter that excludes everything — and a floor
+# left at the old value would have failed for the one reason that is not a
+# fault. Two pages at this cadence cost ~159 a day.
 check_true("and is not so cheap that something has broken",
-           config.searches_per_day() >= 200)
+           config.searches_per_day() >= 120)
+
+# What switching the pass on and off does to this budget is checked in
+# test_page_budget.py, not here. Reloading config mid-file would undo the
+# credentials and the fake SMTP set up at the top of this one, and the
+# alerting checks below would then pass for the wrong reason — silently, since
+# "no email was sent" is what half of them are asserting.
 
 # Weighted by yield, not split evenly. Eight of the nine resale sightings
 # between 13 and 18 August were on the standard page and one on the instalment

@@ -33,6 +33,21 @@ from ep_watcher import buyer, config, engine, notify, state as st  # noqa: E402
 from ep_watcher.model import AVAILABLE, UNAVAILABLE, Listing, Reading  # noqa: E402
 from ep_watcher.sources import discovery, inventory_api  # noqa: E402
 
+# Every configured page, including the one that is switched off by default.
+#
+# This file is about the cycle handling N pages — that each is searched, each
+# gets its own reading, and none is silently skipped — not about which pages
+# David wants searched this week. The Early Entry Pass is off (see
+# config.WATCH_EARLY_ENTRY), so it is turned on here rather than dropped from
+# the test, for two reasons: the coverage is of the machinery and should not
+# shrink when a page is switched off, and the day that switch is flipped for
+# real, the three-page cycle needs to be already known to work.
+import importlib  # noqa: E402
+import os  # noqa: E402
+
+os.environ["EP_EARLY_ENTRY"] = "1"
+importlib.reload(config)
+
 failures = []
 sent = []
 

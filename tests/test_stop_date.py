@@ -134,17 +134,25 @@ print("\nAn expired page is dropped from the schedule, both ways in")
 class FakeEvent:
     """Minimum an event needs to be scheduled, with a stop date of its own."""
 
-    def __init__(self, slug, stop_after=""):
+    def __init__(self, slug, stop_after="", watch=True):
         self.slug = slug
         self.stop_after = stop_after
+        self.watch = watch
         self.poll_seconds = 600
         self.poll_max_seconds = 600
 
     expired = config.Event.expired
+    # Borrowed from the real class rather than reimplemented, so the fake
+    # cannot drift from the rule the scheduler actually applies. The two ways
+    # a page stops being searched — a date it has passed, and a switch
+    # somebody flipped — go through this one predicate precisely so a caller
+    # cannot honour one and forget the other.
+    searchable = config.Event.searchable
 
 
 gone = FakeEvent("expired-addon", stop_after="2020-01-01")
 alive = FakeEvent("weekend")
+off = FakeEvent("switched-off", watch=False)
 
 # Neither has ever been polled, so both would otherwise be due immediately.
 fresh = dict(st._defaults())
@@ -163,6 +171,25 @@ stale["events"] = {
 }
 check("and the stall guard does not resurrect the expired one",
       [e.slug for e in st.due_events(stale, [gone, alive])], [])
+
+# A page switched off is dropped by the same filter and for the same reason.
+# The difference between it and an expired one is only that somebody can
+# switch it back; to the scheduler, and to the request budget, they are
+# identical — neither may cost a single page load.
+fresh = dict(st._defaults())
+check("a switched-off page is not due either",
+      [e.slug for e in st.due_events(fresh, [off, alive])], ["weekend"])
+stale_off = dict(st._defaults())
+stale_off["events"] = {
+    "switched-off": {"last_polled_at": "2020-01-02T00:00:00+00:00",
+                     "next_gap_seconds": 600},
+    "weekend": {"last_polled_at": st.utc_now().isoformat(),
+                "next_gap_seconds": 600},
+}
+check("and the stall guard does not rescue it after days off",
+      [e.slug for e in st.due_events(stale_off, [off, alive])], [])
+check("but it is not 'expired' — that word means finished for good",
+      off.expired("2030-01-01"), False)
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
