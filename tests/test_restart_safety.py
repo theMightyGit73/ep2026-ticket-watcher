@@ -24,6 +24,7 @@ Run with:  .venv/bin/python tests/test_restart_safety.py
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,21 @@ print("\nThe dry run really is dry — measured, not asserted from output")
 # So ask launchd what is loaded, before and after. Output is what the script
 # says about itself; this is what actually happened.
 def loaded():
+    """Which ep2026 agents launchd currently has, or None where there is no
+    launchd at all.
+
+    None rather than an empty set, and the distinction is the point: "no
+    agents loaded" and "this machine cannot answer the question" must not
+    compare equal, or the check below would pass vacuously on CI and prove
+    nothing on the platform that matters.
+
+    launchctl is macOS-only. CI is Linux, and the first version of this
+    called it unconditionally — which is the same mistake as measuring a
+    file's size with `stat -f%z`, made the same day, in the test written to
+    catch the consequences of the first one.
+    """
+    if shutil.which("launchctl") is None:
+        return None
     out = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
     return {line.split()[-1] for line in out.stdout.splitlines()
             if "com.davidcoyne.ep2026" in line}
@@ -125,11 +141,16 @@ after = loaded()
 
 check("it exits cleanly", out.returncode, 0)
 check("and says it did nothing", "dry run" in combined, True)
-check("and launchd is in exactly the state it was", after, before)
-if before:
-    check("nothing that was loaded got unloaded", before - after, set())
+
+if before is None:
+    print("  NOTE  no launchctl on this platform — the launchd check is skipped, "
+          "not passed. It is the macOS run that proves this one.")
+elif not before:
+    print("  NOTE  launchctl is here but no ep2026 agents are loaded, so there "
+          "was nothing for a bad dry run to take down. Not proof either.")
 else:
-    print("  NOTE  no ep2026 agents loaded here, so the launchd check is vacuous")
+    check("launchd is in exactly the state it was", after, before)
+    check("nothing that was loaded got unloaded", before - after, set())
 
 for danger in ("Installing LaunchAgents", "Starting", "Checking it actually came up"):
     check(f"it never got as far as {danger!r}", danger in combined, False)
