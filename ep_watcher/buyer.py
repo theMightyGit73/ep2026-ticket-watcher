@@ -594,6 +594,22 @@ class HoldResult:
     #: How many goes it took. More than one only ever happens when the feed
     #: said the ticket had not really sold — see secure().
     attempts: int = 1
+    #: Did ANY attempt see the listing still in the feed after being refused?
+    #:
+    #: Separate from still_listed_after, which is cleared between attempts so
+    #: each probe answers for itself. This remembers across them, because the
+    #: sequence tells a different story than its last line does.
+    #:
+    #: Observed twice on 2026-08-21, at 12:20 and 12:25, in the same shape: the
+    #: first attempt is refused while the feed still lists the very id we
+    #: tried, and the second — twenty seconds later — finds it genuinely gone.
+    #: Reporting only the final answer calls that "the race being lost at the
+    #: last step", which is precisely wrong. We never had a race. The ticket
+    #: was already in somebody's basket when we first reached it, and that
+    #: somebody then paid. Those are different problems with different fixes:
+    #: one says be faster at the click, the other says the click was never
+    #: going to work and the lever is seeing the listing sooner.
+    ever_listed_after: bool = False
 
     def note(self, text: str) -> None:
         self.notes.append(text)
@@ -1258,6 +1274,32 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
     result = result or HoldResult()
     deadline = time.monotonic() + config.SECURE_TIMEOUT_SECONDS
 
+    def verdict(out):
+        """Correct the reason against what the EARLIER attempts learned.
+
+        Without this the record carries the message the LAST look earns on its
+        own — "the race being lost at the last step, not a fault in the
+        watcher" — about a listing an earlier look had already proved was
+        unsold and merely unavailable. Seen twice on 2026-08-21, at 12:20 and
+        12:25, in exactly that shape.
+
+        The distinction decides where the next day's work goes. "We lost a
+        race" points at shaving seconds off the click. "It was claimed before
+        we saw it" points at seeing it sooner, and says the click was never
+        going to succeed however fast it was.
+        """
+        if out.ever_listed_after and not out.secured and not out.still_listed_after:
+            out.reason = (
+                "this was not a race lost at the click. An earlier attempt was "
+                "refused while Ticketmaster's own feed still listed the very "
+                "same ticket — so it had not sold, it was already sitting in "
+                "somebody else's basket. By the time we came back they had "
+                "paid for it. Being faster at the last step would have changed "
+                "nothing; the listing was claimed before we ever saw it."
+            )
+            out.note(out.reason)
+        return out
+
     for attempt in range(1 + config.SECURE_RETRIES):
         if attempt:
             result.attempts = attempt + 1
@@ -1268,24 +1310,29 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # Genuinely sold, or the question could not be asked. Either way there
         # is nothing to come back for.
         if not out.still_listed_after:
-            return out
+            return verdict(out)
         if attempt >= config.SECURE_RETRIES:
             out.note(f"still listed, but {attempt + 1} attempts is the limit — "
                      f"the alert tells David to try it himself")
-            return out
+            return verdict(out)
         pause = config.SECURE_RETRY_PAUSE_SECONDS
         if time.monotonic() + pause >= deadline:
             out.note("still listed, but there is no time left in the window "
                      "to go back — the alert tells David to try it himself")
-            return out
+            return verdict(out)
         out.note(f"it is still in the feed, so it did not sell — waiting "
                  f"{pause:.0f}s for the basket holding it to lapse")
+        # Remembered across attempts before it is cleared. What the FIRST
+        # probe saw is the fact that explains the whole sequence, and the last
+        # attempt's answer overwrites it.
+        out.ever_listed_after = True
         # Cleared so the next attempt's probe answers for itself. A stale True
         # here would be read as evidence from a look that never happened.
         out.still_listed_after = None
         out.ids_after = []
         time.sleep(pause)
-    return out
+
+    return verdict(out)
 
 
 def _secure_once(session: BuySession, event, listing,

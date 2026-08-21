@@ -325,6 +325,30 @@ try:
     out = buyer.secure(FakeSession(page, feed=payload([])), EVENT, LISTING)
     check("but not for one that has genuinely gone", out.attempts, 1)
     check("and spends nothing waiting for it", pauses, [])
+
+    # The sequence tells a different story than its last line. Seen twice on
+    # 2026-08-21, at 12:20 and 12:25: refused while the feed still listed the
+    # very id we tried, then genuinely gone twenty seconds later. Reporting
+    # only the final answer calls that a race lost at the click, which is
+    # exactly backwards — we never had a race, the ticket was already in
+    # somebody's basket and they then paid for it.
+    class ThenSold(FakeSession):
+        """Still listed on the first ask, gone on every one after."""
+
+        def listings_now(self, event, qty):
+            self.feed_calls += 1
+            return payload(["lheld"]) if self.feed_calls == 1 else payload([])
+
+    pauses.clear()
+    out = buyer.secure(
+        ThenSold(FakePage(EVENT.url, rows_visible=False)), EVENT, LISTING)
+    check("it went back once", out.attempts, 2)
+    check("the last look says it has gone", out.still_listed_after, False)
+    check_true("but the sequence is remembered", out.ever_listed_after)
+    check_true("and the verdict says it was claimed before we saw it",
+               "claimed before we ever saw it" in (out.reason or ""))
+    check("not that we lost a race at the click",
+          "race being lost at the last step" in (out.reason or ""), False)
 finally:
     config.SECURE_RETRY_PAUSE_SECONDS = was_pause
     time.sleep = real_sleep
