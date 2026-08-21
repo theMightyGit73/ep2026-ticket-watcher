@@ -108,7 +108,7 @@ print("\nThe budget is weighted, and it is the same budget")
 # peak_searches_per_hour() and searches_per_day(), checked in
 # test_peak_hours.py.
 check("total nominal volume across the pages being searched",
-      round(config.searches_per_hour()), 15)
+      round(config.searches_per_hour()), 17)
 
 # The budget must FALL when a page is switched off, and by that page's share.
 # This is the point of the switch rather than a side effect of it: David
@@ -121,7 +121,7 @@ try:
     os.environ["EP_EARLY_ENTRY"] = "1"
     with_pass = importlib.reload(config)
     check("with the pass switched back on, all three are counted",
-          round(with_pass.searches_per_hour()), 17)
+          round(with_pass.searches_per_hour()), 19)
     check_true("and the busiest hour is still under the block line",
                with_pass.peak_searches_per_hour() < with_pass.BLOCK_RATE_PER_HOUR)
 finally:
@@ -146,11 +146,15 @@ for event in config.EVENTS:
         check(f"[{event.slug}] nominal range matches the peak window",
               (event.poll_min_seconds, event.poll_max_seconds),
               (event.peak_min_seconds, event.peak_max_seconds))
-check_true("the busy page is searched more often", A.poll_seconds < B.poll_seconds)
+# Equal, not ranked. See tests/test_multi_event.py for why the yield
+# weighting was dropped on 2026-08-21 — and note the invariant that replaces
+# it is the one below, which is about the block line rather than about which
+# page is favoured.
+check("the two weekend pages are searched alike", A.poll_seconds, B.poll_seconds)
 check_true("the tick is fine enough for the busiest page",
            config.poll_interval() <= A.poll_min_seconds)
-check_true("and the busy page carries most of the volume",
-           A.searches_per_hour > B.searches_per_hour * 3)
+check("and the two share the volume evenly",
+      round(A.searches_per_hour, 3), round(B.searches_per_hour, 3))
 
 print("\nA page is searched when it comes due, and not before")
 
@@ -183,7 +187,10 @@ st.note_event_polled(s, B.slug)
 aged(s, A, 7)
 aged(s, B, 7)
 due = [e.slug for e in st.due_events(s, [A, B])]
-check("after 7 minutes only the busy page is due", due, [A.slug])
+# Both, since 2026-08-21. The two weekend pages run the same clock now, so
+# ageing them equally must make them due together — a page that fell out here
+# would be one silently still on the old weighting.
+check("after 7 minutes both weekend pages are due", due, [A.slug, B.slug])
 
 # Derived from the page's own longest gap rather than a literal, so retuning
 # a cadence cannot silently turn this into a test of nothing.

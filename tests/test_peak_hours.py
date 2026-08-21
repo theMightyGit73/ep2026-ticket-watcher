@@ -94,9 +94,12 @@ check_true("off-peak too",
            all(off_lo <= BUSY.next_gap(at(22)) <= off_hi for _ in range(200)))
 check_true("the quiet page is weighted the same way",
            QUIET.gap_range(at(14))[1] <= QUIET.gap_range(at(22))[0])
-# The busy page must still outpace the quiet one within any window.
-check_true("and the busy page is always the faster of the two",
-           BUSY.gap_range(at(14))[1] < QUIET.gap_range(at(14))[0])
+# The two weekend pages are peers as of 2026-08-21. The standard page used to
+# be required to outpace the instalment one; that ranking came from supply and
+# was reversed by how long listings actually survive on each. See
+# tests/test_multi_event.py.
+check("the two weekend pages draw from the same window",
+      BUSY.gap_range(at(14)), QUIET.gap_range(at(14)))
 
 print("\nThe loop must tick fast enough to honour the fastest window")
 # Ticking at the ordinary range's floor would make the peak window's shorter
@@ -141,14 +144,17 @@ print("\nThe standard page has the budget the Early Entry Pass was spending")
 # for the pass.
 EARLY = next(e for e in config.EVENTS if e.slug == "early-entry")
 STANDARD = next(e for e in config.EVENTS if e.slug == "weekend-camping")
+INSTALMENT = next(e for e in config.EVENTS
+                  if e.slug == "weekend-camping-instalment")
 
 check("the pass is not searched at all", EARLY.searchable(), False)
 check("nor secured", EARLY.secure, False)
 check_true("while both weekend pages are searched and secured",
            all(e.searchable() and e.secure for e in config.EVENTS
                if e.slug != "early-entry"))
-check("the standard page is back on a 3-6 minute peak clock",
-      STANDARD.gap_range(at(14)), (180, 360))
+check("the standard page is on the shared weekend peak clock",
+      STANDARD.gap_range(at(14)),
+      (config.STANDARD_PEAK_MIN_SECONDS, config.STANDARD_PEAK_MAX_SECONDS))
 # The pass keeps a range for the day it is switched back on, and it is its own
 # rather than the standard page's. Inheriting the standard page's new speed
 # would put peak load at 28/hour the moment the switch was thrown — see
@@ -165,12 +171,25 @@ for event in config.EVENTS:
     check_true(f"[{event.slug}] has an id the resale endpoint can be keyed on",
                event.tm_event_id or "/event/" in event.url)
 
-# What the switch bought, stated so it cannot be quietly given back: the
-# standard page had slowed to a 420s mean to pay for parity, and is now at
-# 270s again. Anything that pushes it back out is spending the ticket's
-# budget on something else and should have to say so here.
-check_true("the standard page is on the fast clock it lost to parity",
-           STANDARD.poll_seconds <= 270)
+# What the current setting costs, stated so it cannot be quietly given back.
+#
+# This assertion has now been written twice in opposite directions, which is
+# the useful part. It first pinned the standard page at a 270s mean, on the
+# grounds that slowing it to pay for parity with the instalment page spent the
+# ticket's budget on something else.
+#
+# On 2026-08-21 David asked for the two weekend pages to be searched alike,
+# and the measurements supported it: a listing survives a median 2.1 minutes
+# on the standard page and 21.8 on the instalment one, so the page being
+# protected was the one we lose regardless and the page being starved was the
+# one we can win. Paying for that parity costs the standard page its 270s mean.
+#
+# The bound below is what keeps it honest. Both weekend pages at this cadence,
+# PLUS the Early Entry Pass when it is switched back on, must still fit under
+# the 20/hour that drew a real block — which is the only number here that was
+# ever measured rather than chosen.
+check("the two weekend pages run the same clock",
+      STANDARD.poll_seconds, INSTALMENT.poll_seconds)
 check_true("and the ceiling still holds", config.peak_searches_per_hour() < 20)
 # The tick has to keep up with the faster page or the gain is quantised away
 # — a page due at 180s that is not noticed for another 45s is not running at

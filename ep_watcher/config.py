@@ -300,10 +300,10 @@ PEAK_END_HOUR = int(os.environ.get("EP_PEAK_END_HOUR", "20"))
 # listing gone, so the minutes before detection are the whole game.
 #
 # To undo: EP_STANDARD_PEAK_MIN=300 / EP_STANDARD_PEAK_MAX=540 puts it back.
-STANDARD_PEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MIN", "180"))
-STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "360"))
-STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "480"))
-STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "840"))
+STANDARD_PEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MIN", "300"))
+STANDARD_PEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_PEAK_MAX", "560"))
+STANDARD_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MIN", "750"))
+STANDARD_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_STANDARD_OFFPEAK_MAX", "1300"))
 
 # The nominal range. Kept equal to the peak range by default so that
 # poll_seconds — and therefore searches_per_hour() — describes the cadence
@@ -349,10 +349,45 @@ EARLY_ENTRY_OFFPEAK_MIN_SECONDS = int(
 EARLY_ENTRY_OFFPEAK_MAX_SECONDS = int(
     os.environ.get("EP_EARLY_OFFPEAK_MAX", "3600"))
 
-INSTALMENT_PEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MIN", "1800"))
-INSTALMENT_PEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_PEAK_MAX", "3600"))
-INSTALMENT_OFFPEAK_MIN_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MIN", "3600"))
-INSTALMENT_OFFPEAK_MAX_SECONDS = int(os.environ.get("EP_INSTALMENT_OFFPEAK_MAX", "5400"))
+# The instalment plan, searched exactly as often as the standard page.
+#
+# It used to get a thirtieth of the attention: 30-60 minutes between searches
+# against the standard page's 3-6, on the reasoning that one of nine sightings
+# had ever appeared there. That reasoning judged the page by SUPPLY.
+#
+# What decides whether a page is winnable is how long a listing survives on
+# it, and on 2026-08-21 that was measured across both event logs:
+#
+#     weekend-camping               median  2.1 min visible  (n=14)
+#     early-entry                   median  7.3 min visible  (n=4)
+#     weekend-camping-instalment            21.8 min visible (n=1)
+#
+# It is the same ticket at the same price, paid in stages, and a listing sat
+# there untouched for twenty-two minutes — because hardly anyone thinks to
+# watch it. Meanwhile five securing attempts on the standard page that day all
+# reached a listing somebody else had already claimed, at attempt times from
+# 6.6s to 82.5s with identical outcomes. Rare and winnable beats frequent and
+# already gone.
+#
+# WHAT THIS COSTS, stated plainly because it crosses a line this project has
+# been careful about. Two pages at 13.3/hour is 26.6/hour at peak, against the
+# 20/hour that drew a 403 during development — about a third over. David asked
+# for the two pages to be searched alike on 2026-08-21 with that number in
+# front of him. EP_INSTALMENT_PEAK_MIN / _MAX are the dial if the blocks
+# return; widening both pages to 240-480s would bring the pair back to 20/hour
+# exactly, at the cost of a slower look at each.
+#
+# Note that the SWEEP already covers this page every ninety seconds and costs
+# one XHR rather than a page load, so most of the detection gain was already
+# in hand. These searches are what see primary stock, which the sweep cannot.
+INSTALMENT_PEAK_MIN_SECONDS = int(
+    os.environ.get("EP_INSTALMENT_PEAK_MIN", str(STANDARD_PEAK_MIN_SECONDS)))
+INSTALMENT_PEAK_MAX_SECONDS = int(
+    os.environ.get("EP_INSTALMENT_PEAK_MAX", str(STANDARD_PEAK_MAX_SECONDS)))
+INSTALMENT_OFFPEAK_MIN_SECONDS = int(
+    os.environ.get("EP_INSTALMENT_OFFPEAK_MIN", str(STANDARD_OFFPEAK_MIN_SECONDS)))
+INSTALMENT_OFFPEAK_MAX_SECONDS = int(
+    os.environ.get("EP_INSTALMENT_OFFPEAK_MAX", str(STANDARD_OFFPEAK_MAX_SECONDS)))
 
 
 def is_peak(now=None) -> bool:

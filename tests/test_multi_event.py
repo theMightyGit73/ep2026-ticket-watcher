@@ -135,11 +135,19 @@ check_true("and is not so cheap that something has broken",
 # alerting checks below would then pass for the wrong reason — silently, since
 # "no email was sent" is what half of them are asserting.
 
-# Weighted by yield, not split evenly. Eight of the nine resale sightings
-# between 13 and 18 August were on the standard page and one on the instalment
-# plan, so an even split spent half the budget for an eighth of the return.
-check_true("the productive page is searched more often",
-           A.poll_seconds < B.poll_seconds)
+# Weighted EVENLY between the two weekend pages as of 2026-08-21, which
+# reverses the yield weighting that stood before it.
+#
+# The old rule spent the budget in proportion to where listings had appeared:
+# eight of nine sightings on the standard page, so it got thirty times the
+# attention. That judged a page by SUPPLY. What decides whether a page is
+# winnable is how long a listing survives on it, and measured across both
+# event logs the standard page's median was 2.1 minutes against the instalment
+# page's 21.8 — the same ticket, the same price, paid in stages, sitting
+# untouched for twenty-two minutes because hardly anyone thinks to watch it.
+# Frequent and already claimed is worth less than rare and winnable.
+check("the two weekend pages are searched alike",
+      A.poll_seconds, B.poll_seconds)
 
 print("\nOne page going quiet cannot silence the other")
 
