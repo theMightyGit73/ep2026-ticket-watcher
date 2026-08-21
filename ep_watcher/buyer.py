@@ -1732,6 +1732,16 @@ def _secure_once(session: BuySession, event, listing,
             except Exception:
                 pass
         result.finished_at = time.monotonic()
+        # And write down how it failed, while the page that failed is still on
+        # screen. This is the only moment the evidence exists: the warm
+        # browser re-parks itself the instant the attempt returns, and every
+        # attempt before 2026-08-21 was reconstructed afterwards from prose.
+        if page is not None and not result.secured:
+            try:
+                capture_failure(page, result, event, result.attempts)
+            except Exception as exc:
+                print(f"[{_stamp()}] failure capture skipped: "
+                      f"{type(exc).__name__}: {exc}")
 
 
 #: Buttons this module is permitted to press, as whole-string matches.
@@ -1793,6 +1803,138 @@ LISTING_GONE_MARKERS = (
     "sold or removed from sale",
     "tickets you wanted have either been sold",
 )
+
+
+#: Markers that say "this is not the event page at all".
+#:
+#: Written from the 12:06 and 12:07 failures of 2026-08-21, which reported
+#: "no quantity stepper found" AND "the search button never became clickable",
+#: before and after a reload, forty seconds apart. Two controls that are
+#: always present on a real event page were both absent twice — which is not a
+#: stale page, it is a different page. The likeliest candidate is a bot check,
+#: and nothing in the record could confirm it because nothing wrote down where
+#: the browser actually was.
+INTERSTITIAL_MARKERS = (
+    "verify you are a human", "are you a robot", "unusual activity",
+    "access denied", "request blocked", "captcha", "press and hold",
+    "checking your browser", "please enable javascript", "rate limit",
+    "too many requests", "queue-it", "you are in line", "waiting room",
+)
+
+
+def capture_failure(page, result: "HoldResult", event, attempt: int = 1) -> str:
+    """Write down everything about an attempt that did not work.
+
+    David's instruction of 2026-08-21: "capture how we failed so the next time
+    we will succeed". This is that. Fourteen attempts had by then produced
+    fourteen prose reasons and almost no evidence — and the one failure mode
+    nobody could explain, a page with neither a quantity stepper nor a search
+    button on it, is precisely the one a single URL would have settled.
+
+    Deliberately thorough, and deliberately NOT on the critical path. The find
+    recorder dropped its screenshot in August because it sat between a live
+    listing and the click that might win it, where three seconds is the whole
+    product. Nothing here runs until an attempt has already failed, so the
+    ticket is lost either way and there is no clock left to protect. That is
+    the same reasoning _probe_after_gone uses to justify its extra call.
+
+    Never raises. A diagnostic that can break the thing it is diagnosing is
+    worse than no diagnostic.
+    """
+    import json
+
+    # The name must not be able to collide, and a timestamp alone cannot
+    # promise that.
+    #
+    # This began as second resolution, which silently overwrote the earlier
+    # record whenever two attempts failed in the same second — and the retries
+    # now run up to seven attempts against one listing, so that is the normal
+    # case rather than a rare one. Going to milliseconds made it rarer without
+    # making it impossible: writing this file is fast, and two captures landed
+    # inside the same millisecond on the very first test run.
+    #
+    # Losing the FIRST failure is the worst way to lose one. It is the attempt
+    # that saw the page in the state that caused everything after it, and it
+    # is the one an overwrite always takes. So the clock gets us an ordered,
+    # readable name and the loop below guarantees the rest.
+    config.DIAG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    base = config.DIAG_DIR / f"hold-{stamp}-{event.slug}-try{attempt}"
+    spare = 2
+    while base.with_suffix(".json").exists():
+        base = config.DIAG_DIR / f"hold-{stamp}-{event.slug}-try{attempt}-{spare}"
+        spare += 1
+    record = {
+        "when": _stamp(),
+        "event": event.slug,
+        "attempt": attempt,
+        "reason": result.reason,
+        "secured": result.secured,
+        "timings": dict(result.timings),
+        "wall_seconds": round(result.elapsed, 2),
+        "still_listed_after": result.still_listed_after,
+        "ever_listed_after": result.ever_listed_after,
+        "ids_after": list(result.ids_after),
+        "listing_id": result.listing_id,
+        "landed_url": result.landed_url,
+        "notes": list(result.notes),
+    }
+    text = ""
+    try:
+        record["url"] = page.url
+    except Exception:
+        record["url"] = ""
+    try:
+        record["title"] = page.title()
+    except Exception:
+        record["title"] = ""
+    try:
+        text = page.inner_text("body")
+    except Exception:
+        text = ""
+
+    # Which of the controls a real event page always has were actually there.
+    # This is the line that would have answered 12:06 in one glance.
+    low = " ".join((text or "").lower().split())
+    record["page"] = {
+        "text_chars": len(text or ""),
+        "has_find_tickets": "find tickets" in low,
+        "has_search_again": "search again" in low,
+        "has_resale_panel": "verified resale" in low,
+        "looks_like_interstitial": [m for m in INTERSTITIAL_MARKERS if m in low],
+    }
+    try:
+        record["page"]["has_quantity_stepper"] = (
+            page.get_by_role("spinbutton").first.is_visible(timeout=2_000))
+    except Exception:
+        record["page"]["has_quantity_stepper"] = False
+    # Truncated, because a Ticketmaster page is enormous and the first part is
+    # where the headline of a block page lives.
+    record["text_excerpt"] = (text or "")[:4000]
+
+    try:
+        config.DIAG_DIR.mkdir(parents=True, exist_ok=True)
+        base.with_suffix(".json").write_text(json.dumps(record, indent=2))
+    except Exception as exc:
+        print(f"[{_stamp()}] could not write the failure record: {exc}")
+        return ""
+
+    # And a picture, which is the one thing that settles "what page IS this".
+    # Bounded and optional: a failed screenshot must not turn a recorded
+    # failure into an unrecorded one.
+    if config.HOLD_SCREENSHOTS:
+        try:
+            page.screenshot(path=str(base.with_suffix(".png")),
+                            full_page=False, timeout=5_000)
+        except Exception:
+            pass
+
+    print(f"[{_stamp()}] how it failed is recorded: {base.with_suffix('.json')}")
+    if record["page"]["looks_like_interstitial"]:
+        print(f"[{_stamp()}] NOT THE EVENT PAGE — this looks like a block or "
+              f"challenge screen: "
+              f"{', '.join(record['page']['looks_like_interstitial'])}")
+    return str(base.with_suffix(".json"))
 
 
 def _probe_after_gone(session, event, listing, result: "HoldResult", page) -> None:

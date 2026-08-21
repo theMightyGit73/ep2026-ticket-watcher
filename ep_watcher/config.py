@@ -883,7 +883,28 @@ BUY_PROFILE_DIR = Path(
 #: environment variable.
 WARM_BUY_BROWSER = os.environ.get("EP_WARM_BUY_BROWSER", "1").lower() in ("1", "true", "yes")
 
-SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "120"))
+# Raised from 120 on 2026-08-21, because the first winnable chance this
+# project has ever had was thrown away by this number.
+#
+# At 15:07 a listing on the instalment page was refused three times in a row
+# while Ticketmaster's own feed kept returning THE SAME id — l1jwc8k6, never
+# sold, still advertised — and the attempt stopped at 74.7s because the retry
+# budget ran out, not because the ticket went. On a page whose listings
+# survive a median 21.8 minutes, we walked away after one minute.
+#
+# WHAT THIS COSTS, because it is not free and the cost lands somewhere
+# specific. BuyerWorker.submit() blocks the caller on done.wait(timeout_s),
+# and the caller is the poll loop — so while a securing attempt is patient,
+# the watcher is not polling or sweeping at all. At 300s plus the 60s margin
+# secure_in_thread adds, that is a six-minute blind window, against a watchdog
+# grace of 15 minutes. Safe from restart, but a real gap: another listing
+# appearing in it is missed.
+#
+# Six minutes chasing a ticket the feed says is STILL THERE beats six minutes
+# of looking for one that probably is not. That is the whole trade, and it is
+# only ever spent on a listing already confirmed present — see secure(), which
+# gives up at once when the feed agrees the ticket has gone.
+SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "300"))
 
 #: How many extra goes at a listing the feed says did not actually sell.
 #:
@@ -902,7 +923,12 @@ SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "120"))
 #: SECURE_TIMEOUT_SECONDS, which is what bounds the whole thing — the buying
 #: browser cannot be held any longer than a single attempt could hold it
 #: before, and a weekend ticket can still preempt the lot.
-SECURE_RETRIES = int(os.environ.get("EP_SECURE_RETRIES", "2"))
+# Six, not two. Ticketmaster baskets hold for minutes, so two goes twenty
+# seconds apart were never going to see one lapse — the mechanism existed but
+# the numbers made it decorative. Bounded by SECURE_TIMEOUT_SECONDS above, so
+# this is a ceiling on attempts rather than a promise of them; a slow
+# connection will spend the budget on fewer, longer tries.
+SECURE_RETRIES = int(os.environ.get("EP_SECURE_RETRIES", "6"))
 
 #: Seconds between those goes.
 #:
@@ -910,7 +936,11 @@ SECURE_RETRIES = int(os.environ.get("EP_SECURE_RETRIES", "2"))
 #: fit several inside the window. Not tuned against evidence yet — no retry
 #: has ever run — so it is a starting point that the `hold` records in the
 #: event log will settle.
-SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "20"))
+# Forty seconds between goes, up from twenty. Nothing observed suggests a
+# basket lapses in twenty seconds — the one measured case was still held after
+# seventy-five — so a short pause spent the budget on page loads instead of on
+# waiting, which is the thing that actually has to happen.
+SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "40"))
 
 #: The shortest gap between two securing attempts on the same page.
 #:
@@ -1115,6 +1145,18 @@ STATE_FILE = Path(
 )
 LOG_DIR = Path(os.environ.get("EP_LOG_DIR", Path.home() / ".ep2026-watcher" / "logs"))
 DIAG_DIR = Path(os.environ.get("EP_DIAG_DIR", Path.home() / ".ep2026-watcher" / "diagnostics"))
+
+#: Photograph a securing attempt that failed.
+#:
+#: The find recorder dropped its screenshot in August for good reasons: it sat
+#: on the critical path between a live listing and the click that might win
+#: it, it only succeeded on 6 of 17 tries, and the JSON answered the question
+#: anyway. None of that applies here. This fires only after an attempt has
+#: already failed, so the ticket is lost and there is no clock left to
+#: protect — and the question it answers, "what page was the browser actually
+#: looking at", is one no JSON field had been recording at all.
+HOLD_SCREENSHOTS = os.environ.get(
+    "EP_HOLD_SCREENSHOTS", "1").lower() in ("1", "true", "yes")
 
 # Consecutive bad runs before the watchdog says something.
 WATCHDOG_FAILURE_THRESHOLD = 4
