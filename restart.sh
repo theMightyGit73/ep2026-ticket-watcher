@@ -113,6 +113,26 @@ if pgrep -f "ep2026-watcher/chrome-profile-buy" >/dev/null 2>&1; then
 fi
 sleep 2
 
+say "Clearing stale bytecode"
+# macOS's system python3 does not write __pycache__ beside the source. It
+# writes to ~/Library/Caches/com.apple.python/<abs path>, and it decides the
+# cache is still good from the source file's mtime AND SIZE.
+#
+# That combination is not safe for this repo. An edit that changes a setting
+# without changing the file's length — "600" to "240", "7" to "6", any digit
+# swap — leaves the size identical, and if it lands in the same mtime second
+# as a previous edit the cache is served instead of the new source. It
+# happened on 2026-08-21: config.py read 240 on disk and the watcher ran with
+# 600, with nothing anywhere reporting a difference.
+#
+# That is the worst failure shape this project has. A restart that silently
+# relaunches the OLD code looks exactly like a restart that worked — the
+# process comes up, doctor is green, the logs are normal — and every later
+# question is answered against a version that is not running. Two seconds of
+# recompilation is not a price worth arguing about.
+rm -rf "$HOME/Library/Caches/com.apple.python$REPO"
+find "$REPO" -name '__pycache__' -type d -not -path '*/.venv/*' -exec rm -rf {} + 2>/dev/null
+
 say "Installing LaunchAgents"
 cp "$REPO/launchd/$WATCHER.plist"  "$AGENTS/"
 cp "$REPO/launchd/$WATCHDOG.plist" "$AGENTS/"

@@ -546,6 +546,10 @@ class HoldResult:
     started_at: float = field(default_factory=time.monotonic)
     #: The clock the next mark() measures from.
     _last_mark: float = field(default_factory=time.monotonic)
+    #: When the last attempt stopped, so `elapsed` freezes instead of counting
+    #: the time spent emailing about the failure afterwards. None while an
+    #: attempt is still running.
+    finished_at: Optional[float] = None
 
     # ── Forensics for a lost race ────────────────────────────────────────────
     #
@@ -612,8 +616,21 @@ class HoldResult:
 
     @property
     def elapsed(self) -> float:
-        """Total seconds from the start of the attempt to now."""
-        return time.monotonic() - self.started_at
+        """Wall-clock seconds the whole attempt took, retries included.
+
+        The honest total, and deliberately not the sum of `timings`. A step
+        that FAILS is never marked — mark() runs after the thing it measures —
+        so the step sum omits precisely the step worth timing. The attempt of
+        2026-08-21 05:57 summed to 10.01s and really ran about twenty-five:
+        ten seconds setting the quantity, then a fifteen-second timeout on a
+        search button that never appeared. Every attempt this project has ever
+        logged is a failed one, so every total it has ever printed was short.
+
+        Frozen at finished_at once the attempt is over, so the number does not
+        keep growing while the failure email is being written.
+        """
+        end = self.finished_at if self.finished_at is not None else time.monotonic()
+        return end - self.started_at
 
     def timing_line(self) -> str:
         """One line for the log and the email, slowest step called out.
@@ -624,9 +641,19 @@ class HoldResult:
         if not self.timings:
             return ""
         parts = " ".join(f"{k} {v:.1f}s" for k, v in self.timings.items())
+        measured = sum(self.timings.values())
         slowest = max(self.timings.items(), key=lambda kv: kv[1])
-        return (f"{parts} | total {sum(self.timings.values()):.1f}s "
+        line = (f"{parts} | total {self.elapsed:.1f}s "
                 f"| slowest: {slowest[0]} at {slowest[1]:.1f}s")
+        # Say so when the steps do not account for the time. The gap IS the
+        # diagnosis: it is a step that timed out rather than completed, and
+        # reporting only the measured seconds would hide the slowest thing
+        # that happened behind the fastest number available.
+        unmeasured = self.elapsed - measured
+        if unmeasured > 1.0:
+            line += (f" | {unmeasured:.1f}s unaccounted for — a step that "
+                     f"timed out rather than finished")
+        return line
 
 
 class BuySession:
@@ -730,6 +757,64 @@ class BuySession:
         a failure means the race was lost or the code looked too early.
         """
         return self._session.fetch_resale_json(event, qty)
+
+    def listings_from_origin(self, event, qty: int):
+        """The same question, asked from a page that can actually ask it.
+
+        `listings_now` fetches a relative URL from whatever page the browser is
+        standing on. That is deliberate and right on the event page — it is the
+        call the page makes for itself, carrying its cookies, its origin and
+        its TLS fingerprint, which is the whole reason it works where a Python
+        HTTP client gets a 403.
+
+        It is useless at the moment it is needed most. The dead-end screen a
+        refused listing lands on is served from `secure.ticketmaster.ie`, while
+        the endpoint is same-origin to `www.ticketmaster.ie`, so the relative
+        fetch resolves against the wrong host and cannot answer at all. EVERY
+        attempt that reaches that screen is in that position — which means the
+        forensic built to decide "did it sell, or was it never takeable" has
+        never once been able to run on the path it was built for. Four of the
+        fourteen recorded losses assert the feed agreed the ticket was gone,
+        and not one of them asked it.
+
+        That question is not a detail. It decides the whole strategy: if these
+        listings are real and we are simply slow, then every second is worth
+        chasing; if they are advertised but not purchasable, then chasing
+        seconds wins nothing at all and the answer is somewhere else entirely.
+        Two listings on 2026-08-21, at 11:19 and 11:33, were lost in 6.6s and
+        7.9s — fast enough that "we were slow" is starting to look like the
+        weaker explanation.
+
+        So this opens a second tab in the SAME browser context, which carries
+        the same cookies and the same signed-in session, parks it on the event
+        page and asks from there. It costs a page load, spent only on a path
+        where the ticket is already lost and nothing is racing any more.
+        """
+        page = None
+        try:
+            ctx = getattr(self._session, "_ctx", None)
+            if ctx is None:
+                return None
+            page = ctx.new_page()
+            page.goto(event.url, wait_until="domcontentloaded",
+                      timeout=config.PAGE_TIMEOUT_MS)
+            # Borrow the session's own fetch, pointed at this page. Same code
+            # path as every other resale read — a second implementation here
+            # is exactly the duplication that let the two readers of this
+            # endpoint disagree in the first place.
+            was, self._session._page = self._session._page, page
+            try:
+                return self._session.fetch_resale_json(event, qty)
+            finally:
+                self._session._page = was
+        except Exception:
+            return None
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     def set_quantity(self, qty: int, result: "HoldResult") -> None:
         """Drive the page's quantity stepper, reusing the watcher's logic.
@@ -1234,6 +1319,10 @@ def _secure_once(session: BuySession, event, listing,
         result.note(result.reason)
         return True
 
+    # Bound before the try so the finally can always ask where the page ended
+    # up, including when getting the page is itself what failed.
+    page = None
+
     try:
         # Navigate BEFORE asking whether we are signed in. A freshly started
         # BrowserSession is parked on about:blank, which contains neither
@@ -1291,14 +1380,62 @@ def _secure_once(session: BuySession, event, listing,
         # number manufactures a refusal against a listing that is really there.
         session.set_quantity(config.WANTED_QUANTITY, result)
         result.mark("quantity")
-        try:
-            page.get_by_role("button", name=SEARCH_BUTTONS).first.click(timeout=15_000)
-            result.mark("search")
+
+        # Press search, and if the button is not there, reload once and press
+        # again.
+        #
+        # The retry is not defensive padding. "Waiting for the search button
+        # to be visible" timing out is the single most common browser failure
+        # this project has — thirteen occurrences in the log — and on the
+        # watching side it costs one poll out of hundreds, which is why it was
+        # never worth handling there. On 2026-08-21 at 05:57 it happened HERE
+        # instead, on a real weekend listing, and the attempt simply returned:
+        # ten seconds setting a quantity, fifteen more waiting for a button,
+        # and a ticket lost to a page that had gone stale in a warm browser.
+        #
+        # A parked page is the likeliest cause and a reload is the obvious
+        # answer to it, which is what makes the omission galling rather than
+        # subtle. Bounded at one extra go and charged to the same deadline as
+        # everything else, so a page that is genuinely broken still fails
+        # inside the window instead of eating it.
+        pressed = False
+        for press_attempt in range(2):
+            try:
+                page.get_by_role(
+                    "button", name=SEARCH_BUTTONS).first.click(timeout=15_000)
+                pressed = True
+                break
+            except (PlaywrightTimeout, PlaywrightError) as exc:
+                # Second go, or no time left to make one: report and stop.
+                # mark() first, so the seconds spent failing are attributed to
+                # the step that failed rather than vanishing from the record.
+                if press_attempt or out_of_time():
+                    result.mark("search")
+                    result.reason = (
+                        f"could not press search in the buying browser"
+                        f"{' even after reloading' if press_attempt else ''}: {exc}"
+                    )
+                    result.note(result.reason)
+                    return result
+                result.note("the search button never became clickable — "
+                            "reloading the page and trying once more")
+                try:
+                    page.goto(event.url, wait_until="domcontentloaded")
+                    # The reload resets the stepper to the page default of 2,
+                    # and searching for the wrong number manufactures a
+                    # refusal against a listing that is really there.
+                    session.set_quantity(config.WANTED_QUANTITY, result)
+                except (PlaywrightTimeout, PlaywrightError) as reload_exc:
+                    result.mark("search")
+                    result.reason = (
+                        f"the search button never appeared and the page could "
+                        f"not be reloaded either: {reload_exc}"
+                    )
+                    result.note(result.reason)
+                    return result
+        result.mark("search")
+        if pressed:
             result.note(f"searched for {config.WANTED_QUANTITY}")
-        except (PlaywrightTimeout, PlaywrightError) as exc:
-            result.reason = f"could not press search in the buying browser: {exc}"
-            result.note(result.reason)
-            return result
 
         if out_of_time():
             return result
@@ -1325,24 +1462,32 @@ def _secure_once(session: BuySession, event, listing,
             # the other means this code looked too early and is fixable — and
             # for three attempts they were reported identically, as the former.
             # The endpoint that the panel is a drawing of can tell them apart.
-            still_there = None
-            try:
-                record = session.listings_now(event, config.WANTED_QUANTITY)
-                data = (record or {}).get("data")
-                if isinstance(data, dict):
-                    picks = data.get("picks") or data.get("listings") or []
-                    still_there = len(picks)
-            except Exception:
-                still_there = None
-
-            if still_there:
+            #
+            # Asked through _probe_after_gone rather than by a second reader
+            # written inline here, which is what this used to be. The inline
+            # version had two faults, and both were invisible because they
+            # only showed on the losing path.
+            #
+            # It read `data["picks"] or data["listings"]` where the probe
+            # reads `picks` alone — two answers to one question about one
+            # payload, one of which must be wrong. And it kept its finding in
+            # a local variable, so `still_listed_after` stayed None even when
+            # the feed had given a definite answer. That is not merely a gap
+            # in the record: secure() decides whether to go back by reading
+            # that field, so the branch below that concludes the ticket was
+            # THERE — the one case a retry can win — returned instead of
+            # retrying, every time. Fourteen attempts, and the retry has never
+            # once fired.
+            _probe_after_gone(session, event, listing, result, page)
+            if result.still_listed_after:
                 result.reason = (
-                    f"the resale endpoint still shows {still_there} listing(s), "
-                    f"but no row for them could be found on the page. That is a "
-                    f"rendering or selector problem in the buying browser, not a "
-                    f"lost race — the ticket was there and reachable by hand."
+                    f"the resale endpoint still shows "
+                    f"{len(result.ids_after) or 'some'} listing(s), but no row "
+                    f"for them could be found on the page. That is a rendering "
+                    f"or selector problem in the buying browser, not a lost "
+                    f"race — the ticket was there and reachable by hand."
                 )
-            elif still_there == 0:
+            elif result.still_listed_after is False:
                 result.reason = (
                     "the listing had genuinely sold — the resale endpoint "
                     "reports nothing left. The race was lost at the last step."
@@ -1403,13 +1548,40 @@ def _secure_once(session: BuySession, event, listing,
                         "likely sitting in somebody else's basket. Those "
                         "expire, so it is worth trying again in a few minutes."
                     )
-                else:
+                elif result.still_listed_after is False:
                     result.reason = (
                         "the listing was gone by the time we clicked into it — "
                         "Ticketmaster says it has been sold or withdrawn, and "
                         "the resale feed agrees it is no longer there. This is "
                         "the race being lost at the last step, not a fault in "
                         "the watcher."
+                    )
+                else:
+                    # The feed could not be asked, which is NOT the same as the
+                    # feed agreeing, and this branch used to claim the second
+                    # when only the first was true.
+                    #
+                    # It is the ordinary case rather than a rare one, and the
+                    # live attempt of 2026-08-21 11:19 is what showed it. The
+                    # dead end is served from secure.ticketmaster.ie while the
+                    # resale endpoint is same-origin to www.ticketmaster.ie —
+                    # so the probe's relative fetch has the wrong origin to
+                    # resolve against and cannot answer at all. Every attempt
+                    # that reaches this screen is in that position.
+                    #
+                    # Saying "the feed agrees it is gone" from there invents a
+                    # confirmation. It is the exact conflation this project
+                    # refuses everywhere else: "it sold" and "we could not
+                    # tell" call for different responses, and reporting the
+                    # first when the second is true is how a fixable problem
+                    # gets filed as bad luck.
+                    result.reason = (
+                        "the listing was gone by the time we clicked into it — "
+                        "Ticketmaster says it has been sold or withdrawn. The "
+                        "resale feed could NOT be asked to confirm that, "
+                        "because the dead end is served from a different "
+                        "origin than the endpoint, so whether it truly sold or "
+                        "was merely untakeable is unknown."
                     )
                 result.note(result.reason)
                 return result
@@ -1490,6 +1662,30 @@ def _secure_once(session: BuySession, event, listing,
         result.note(f"secure attempt failed — {result.reason}")
         return result
 
+    finally:
+        # Two things that must be true however this attempt ended, including
+        # the paths that end by raising.
+        #
+        # Where the page finished. _probe_after_gone records this too, but it
+        # runs on exactly one of the five ways an attempt can fail — and both
+        # attempts recorded since the field was added failed before reaching
+        # it, so the field it exists to fill has been "" for its whole life.
+        # That matters more than it sounds: the dead end's URL is the only
+        # place a direct link to a single listing has ever been visible, and a
+        # direct link is what would let a later attempt skip the
+        # navigate-quantity-search-panel sequence that costs three quarters of
+        # every attempt. Capturing it on one path in five is how a question
+        # stays open for want of a single line.
+        #
+        # And when it stopped, so `elapsed` reports the real duration rather
+        # than continuing to run while the failure email is written.
+        if page is not None:
+            try:
+                result.landed_url = (page.url or result.landed_url)
+            except Exception:
+                pass
+        result.finished_at = time.monotonic()
+
 
 #: Buttons this module is permitted to press, as whole-string matches.
 #:
@@ -1567,22 +1763,39 @@ def _probe_after_gone(session, event, listing, result: "HoldResult", page) -> No
     takeable in that moment, and the winning move is to come back when the
     other basket lapses.
 
-    Also captures the URL of the dead end, which is the only place a direct
-    link to a single listing has ever been observed. If that URL turns out to
-    carry the listing id, a later attempt can navigate straight to it and skip
-    the navigate-quantity-search-panel sequence that costs most of the
-    attempt.
+    Called from both failure paths that can ask it: the dead-end screen after
+    a click, and the panel that never drew the row. They are different
+    failures with the same question behind them, and they had two different
+    readers of one endpoint until 2026-08-21 — one of which quietly disagreed
+    with this one about which key to read, and kept its answer in a local.
+
+    Also captures the URL the attempt reached, which is the only place a
+    direct link to a single listing has ever been observed. If that URL turns
+    out to carry the listing id, a later attempt can navigate straight to it
+    and skip the navigate-quantity-search-panel sequence that costs most of
+    the attempt.
     """
     try:
         result.landed_url = page.url or ""
         if result.landed_url:
-            result.note(f"dead end at: {result.landed_url}")
+            result.note(f"stopped at: {result.landed_url}")
     except Exception:
         pass
 
     try:
+        # Ask from where we are standing first: on the no-row path that is the
+        # event page itself, and the answer costs nothing.
         record = session.listings_now(event, config.WANTED_QUANTITY)
         data = (record or {}).get("data")
+        if not isinstance(data, dict):
+            # The dead-end path always lands here, because the screen is on a
+            # different host than the endpoint. Open a tab that can ask.
+            asker = getattr(session, "listings_from_origin", None)
+            if asker is not None:
+                result.note("this screen cannot reach the resale endpoint — "
+                            "asking from a tab on the event page instead")
+                record = asker(event, config.WANTED_QUANTITY)
+                data = (record or {}).get("data")
         if not isinstance(data, dict):
             result.note("could not ask the resale feed whether it really sold")
             return
@@ -1618,6 +1831,9 @@ def _probe_after_gone(session, event, listing, result: "HoldResult", page) -> No
         else:
             result.note("the feed agrees: nothing left. It really did go.")
     except Exception as exc:
+        # Left as None deliberately: an exception here means the question was
+        # never answered, and the callers branch on True / False / None to
+        # tell "it sold" from "we could not tell".
         result.note(f"could not ask the resale feed: {type(exc).__name__}")
 
 

@@ -857,7 +857,7 @@ guess from a fixed threshold:
 `doctor`'s own staleness limit follows the cadence in force and says which it
 used (`last check 3 min ago (30 min cadence overnight)`). Deriving it from the
 daytime cycle alone meant it reported a perfectly healthy watcher as wedged
-every night between midnight and seven.
+every night between midnight and six.
 
 ### When something looks wrong
 
@@ -961,8 +961,14 @@ Environment variables, all optional:
 | `EP_INSTALMENT_OFFPEAK_MIN` / `_MAX` | `3600` / `5400` | |
 | `EP_BLOCK_RATE_PER_HOUR` | `20` | The rate that drew a 403 in development. `budget` and the test suite both check against it |
 | `EP_LOOP_TICK_SECONDS` | `45` | Ceiling on how often the loop wakes to ask if a page is due. Costs no requests. Must stay well under the shortest gap any page can draw, or it quantises the cadence upward |
+| `EP_RESALE_SWEEP` | `1` | The cheap resale check between searches — one same-origin XHR from the page already open. Every weekend listing found so far was found by this rather than by a search |
+| `EP_RESALE_SWEEP_SECONDS` | `90` | How often it asks, per swept page. The endpoint's own `cache-control` says `max-age=15`, so this is four times politer than the page's own behaviour |
+| `EP_RESALE_SWEEP_MAX` | `240` | The slowest it may become after refusals. Was `600`, which was slower than the 180–360s peak search it exists to beat — a detector that had quietly become the slowest thing in the system |
+| `EP_RESALE_SWEEP_RECOVER_AFTER` | `20` | Clean answers that win the speed back, halving the interval. Without this the ladder only went down: three refusal bursts overnight on 2026-08-20 left the sweep at ten-minute intervals for the morning, and only a restart undid it |
+| `EP_SWEEP_INSTALMENT` | `0` | Include the instalment page in the sweep. Off since 2026-08-21: refusals scale with how many pages are swept, and halving that buys latency on the page that matters. The instalment page is still searched, alerted on and secured as normal |
 | `EP_SECURE_ON_FIND` | `0` | Set `1` to let the buying browser hold a resale listing. Needs `login-buy` first |
 | `EP_SECURE_TIMEOUT_SECONDS` | `45` | Seconds to spend trying to secure before giving up |
+| `EP_SECURE_MIN_INTERVAL` | `60` | Shortest gap between two securing attempts on one page. Separate from the alerting re-nag on purpose: a repeat email is noise, a repeat attempt is the job. Before this they shared a clock, and on 2026-08-20 stock visible at 20:04 and 20:06 drew no attempt because David had been emailed at 20:02 |
 | `EP_HOLD_PAUSE_EXTRA` | `10` | Minutes added to the hold window during which nothing will restart the watcher |
 | `EP_PRIORITY_WEEKEND` | `100` | Securing precedence of the two weekend pages. Higher wins the buying browser |
 | `EP_PRIORITY_ADDON` | `10` | Securing precedence of the Early Entry Pass. Lower, so a weekend ticket preempts a held pass |
@@ -976,6 +982,8 @@ Environment variables, all optional:
 | `EP_WATCH_LABEL` | `Electric Picnic 2026` | What to call the watch in emails covering every page |
 | `EP_HEARTBEAT_HOURS` | `1` | How often to send the "still nothing" report |
 | `EP_NIGHT_POLL_SECONDS` | `1800` | Overnight cycle. `0` disables the slowdown |
+| `EP_NIGHT_START_HOUR` | `0` | When the overnight slowdown begins, local time |
+| `EP_NIGHT_END_HOUR` | `6` | When it ends. Was `7` until 2026-08-21, when a real weekend listing appeared at 06:57 local — inside the window, with the searches at half-hourly and only the sweep looking |
 | `EP_SEARCH_TIMEOUT` | `90` | Seconds to wait for a search to resolve. Raised from 45 after daytime timeouts on a tethered connection |
 | `EP_NIGHT_SEARCH_TIMEOUT` | `90` | The same, overnight. Equal to the daytime value now; it may never be lower |
 | `EP_GRACE_MINUTES` | `15` | How late a poll may be before the watchdog restarts it |
@@ -1185,7 +1193,7 @@ and what the finished session did.
 SETTINGS CHANGED
   Poll cycle                : every 10 min  →  every 30 min
   Search timeout            : 45s  →  90s
-  Next change               : 07:00 local (or the first poll after), back to daytime
+  Next change               : 06:00 local (or the first poll after), back to daytime
 
 DAYTIME SESSION JUST ENDED
   Ran for                   : 16.5 hours

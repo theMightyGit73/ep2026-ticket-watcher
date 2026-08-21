@@ -506,8 +506,9 @@ def cmd_watch(args) -> int:
 
     sweep = engine.ResaleSweep()
     if config.RESALE_SWEEP:
+        swept = ", ".join(e.slug for e in sweep.pages()) or "no pages"
         print(f"  Resale sweep: every ~{config.RESALE_SWEEP_SECONDS}s between "
-              f"searches (resale only, one XHR per page)")
+              f"searches (resale only, one XHR per page) — {swept}")
     try:
         while True:
             if _stop_if_past_date():
@@ -651,9 +652,18 @@ def _sleep_and_sweep(session, sweep, seconds: float) -> None:
             continue
         try:
             st = state_mod.load()
-            if sweep.run(session, st) is not None:
+            found = sweep.run(session, st)
+            # Mirror the live cadence out, but only when it has moved — a
+            # sweep running steadily costs no writes at all, and one that has
+            # just backed off or won its speed back costs exactly one. Without
+            # this, `status` and `budget` report the configured rate for ever
+            # and the degradation is invisible from outside the process.
+            published = sweep.publish(st)
+            if found is not None:
                 state_mod.save(st)
                 return
+            if published:
+                state_mod.save(st)
         except Exception as exc:
             # Never let the cheap extra look cost the expensive scheduled one.
             print(f"[{stamp()}] resale sweep skipped: {type(exc).__name__}: {exc}")
@@ -1595,11 +1605,43 @@ def budget_report() -> tuple:
     # request volume, and a budget report that omits a source of requests is
     # the kind of reassuring number this project exists to distrust.
     if config.RESALE_SWEEP:
-        live = [e for e in config.EVENTS if e.searchable()]
-        per_hour = 3600.0 / config.RESALE_SWEEP_SECONDS * len(live)
+        live = [e for e in config.EVENTS if e.searchable() and e.sweep]
+        # What the sweep is ACTUALLY doing, not what it was configured to do.
+        #
+        # This printed config.RESALE_SWEEP_SECONDS, which is the setting the
+        # sweep starts from and not the rate it is running at — it doubles on
+        # refusal and halves back down on clean answers. On the night of
+        # 2026-08-20 this line would have reported "every 90s" while the sweep
+        # ran every 600, which is precisely the question a budget report
+        # exists to answer. A running watcher mirrors its live cadence into
+        # state; see state.sweep_rate().
+        interval, backoffs, reported, resting = state_mod.sweep_rate(
+            state_mod.load())
+        per_hour = 3600.0 / interval * len(live) if live else 0.0
         lines.append(
             f"    Resale sweep   : {per_hour:5.1f} calls/hour  "
-            f"(every {config.RESALE_SWEEP_SECONDS}s x {len(live)} pages)")
+            f"(every {interval:.0f}s x {len(live)} page(s))")
+        if not reported:
+            lines.append(
+                "                     — the configured rate. No running watcher has")
+            lines.append(
+                "                     reported one, so this is the setting, not a fact.")
+        elif interval > config.RESALE_SWEEP_SECONDS:
+            lines.append(
+                f"                     SLOWED from {config.RESALE_SWEEP_SECONDS}s after "
+                f"{backoffs} refusal rest(s);")
+            lines.append(
+                f"                     {config.RESALE_SWEEP_RECOVER_AFTER} clean answers "
+                f"win the speed back.")
+        if resting > 0:
+            lines.append(
+                f"                     RESTING for another {resting / 60:.0f} min "
+                f"— searches unaffected.")
+        skipped = [e.slug for e in config.EVENTS if e.searchable() and not e.sweep]
+        if skipped:
+            lines.append(
+                f"                     Not swept: {', '.join(skipped)} "
+                f"(searched as normal).")
         lines.append(
             "                     one same-origin XHR each, from the page already")
         lines.append(
@@ -1744,7 +1786,22 @@ def cmd_status(_args) -> int:
     peak = config.peak_searches_per_hour()
     print(f"  Peak request rate       : {peak:.1f}/hour of "
           f"{config.BLOCK_RATE_PER_HOUR:.0f} "
-          f"({'OVER — see `budget`' if peak > config.BLOCK_RATE_PER_HOUR else 'ok'})\n")
+          f"({'OVER — see `budget`' if peak > config.BLOCK_RATE_PER_HOUR else 'ok'})")
+    # The sweep's LIVE cadence, which is not necessarily the configured one.
+    # It backs off when refused and only reports the difference here, so
+    # printing the setting instead — as this did — hides the one failure the
+    # sweep has that produces no other symptom: quietly running slower than
+    # the searches it exists to beat.
+    if config.RESALE_SWEEP:
+        interval, backoffs, reported, resting = state_mod.sweep_rate(st)
+        how = "configured, not yet reported by a running watcher" if not reported \
+            else (f"SLOWED from {config.RESALE_SWEEP_SECONDS}s after {backoffs} rest(s)"
+                  if interval > config.RESALE_SWEEP_SECONDS else "at the configured rate")
+        print(f"  Resale sweep            : every {interval:.0f}s ({how})"
+              + (f", RESTING {resting / 60:.0f} min" if resting > 0 else ""))
+    else:
+        print("  Resale sweep            : off (EP_RESALE_SWEEP=0)")
+    print()
     print(json.dumps(st, indent=2))
     healthy = st["consecutive_failures"] < config.WATCHDOG_FAILURE_THRESHOLD
     print(f"\n  Health: {'OK' if healthy else 'BROKEN — check the logs'}\n")

@@ -47,11 +47,26 @@ class Listing:
     #: an alert can point at the specific listing rather than at the event,
     #: which is the difference between one tap and a hand-driven search.
     #:
-    #: Deliberately NOT part of describe(). That string drives the
-    #: new-listing diff, and if these ids turn out to be regenerated per poll
-    #: the same ticket would look new on every check and re-alert on a
-    #: four-minute clock. Identity stays with the human-readable description
-    #: until we have enough sightings to know the id is stable.
+    #: Deliberately NOT part of describe(), and this is now settled rather
+    #: than cautious. That string drives the new-listing diff, and the worry
+    #: was that ids regenerated per poll would make the same ticket look new
+    #: on every check and re-alert on a four-minute clock.
+    #:
+    #: The event log has since answered it, and the answer is that the ids are
+    #: NOT stable. On 2026-08-20 the Early Entry page reported a resale
+    #: listing at 15:08:59 as `lfsqh34dh` and the same one at 15:15:25 as
+    #: `lhzrxpxk` — six and a half minutes apart, same section, same price,
+    #: and the second reading's own reason was "still available — reminder",
+    #: which is only reachable when resale never went UNAVAILABLE in between
+    #: and nothing looked new. One continuously-listed ticket, two ids.
+    #:
+    #: So keying identity on this field would re-alert on every poll for as
+    #: long as a listing sat unsold, which is precisely the failure this
+    #: comment was written to prevent. Identity stays with the description.
+    #: The id remains worth carrying — it is what lets an alert point at a
+    #: specific listing, and what _probe_after_gone compares against — but it
+    #: answers "which listing is this right now", never "have I seen this
+    #: before".
     listing_id: Optional[str] = None
     section: Optional[str] = None
 

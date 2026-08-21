@@ -40,10 +40,19 @@ def check_true(label, got):
 
 
 def timed(**steps):
-    """A HoldResult whose timings are set directly, without waiting."""
+    """A HoldResult whose timings are set directly, without waiting.
+
+    The wall clock is set to match the steps, because timing_line() reports
+    the WALL total rather than the sum of the steps — see HoldResult.elapsed.
+    A fixture that left started_at and finished_at alone would be describing
+    an attempt whose steps took a minute and which itself took no time, and
+    the assertions below would be measuring the fixture rather than the code.
+    """
     r = HoldResult()
     for name, seconds in steps.items():
         r.timings[name] = seconds
+    r.started_at = 0.0
+    r.finished_at = sum(steps.values())
     return r
 
 
@@ -121,6 +130,47 @@ r = HoldResult()
 time.sleep(0.05)
 check_true("elapsed advances without any mark being taken", r.elapsed >= 0.04)
 check("while nothing has been attributed to a step", list(r.timings), [])
+
+
+print("\nThe step sum is short by exactly the step that failed")
+# mark() runs AFTER the thing it measures, so a step that times out is never
+# marked and its seconds leave no trace. Every attempt in this project's log
+# is a failed one, so every total it ever printed was short: the attempt of
+# 2026-08-21 05:57 recorded 10.01s and really ran about twenty-five — ten
+# seconds setting a quantity, then a fifteen-second timeout on a search
+# button that never appeared. The wall clock is the honest number, and where
+# the two disagree the gap IS the diagnosis.
+r = HoldResult()
+r.started_at = 0.0
+r.timings["quantity"] = 10.0
+r.finished_at = 25.0
+check("the measured steps add up to what was measured",
+      sum(r.timings.values()), 10.0)
+check("but the attempt took as long as it took", r.elapsed, 25.0)
+line = r.timing_line()
+check_true("and the line reports the honest total", "total 25.0s" in line)
+check_true("naming the gap rather than hiding it",
+           "15.0s unaccounted for" in line)
+check_true("and saying what a gap means", "timed out" in line)
+
+# When everything completed, there is no gap and nothing is said about one —
+# the note is a diagnosis, not decoration on every email.
+r = timed(navigate=1.0, search=2.0)
+check("a complete attempt reports its total", "total 3.0s" in r.timing_line(), True)
+check("and says nothing about unaccounted time",
+      "unaccounted" in r.timing_line(), False)
+
+
+print("\nThe clock stops when the attempt does")
+# Otherwise `elapsed` keeps running while the failure email is composed and
+# sent, and the recorded duration of a lost race grows by however long the
+# postman took.
+r = HoldResult()
+time.sleep(0.02)
+r.finished_at = time.monotonic()
+frozen = r.elapsed
+time.sleep(0.05)
+check("elapsed is frozen once finished_at is set", r.elapsed, frozen)
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)

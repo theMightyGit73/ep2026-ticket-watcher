@@ -118,6 +118,26 @@ def _defaults():
         # every poll: the things worth saving change slowly, and the browser
         # session being copied is several megabytes.
         "last_backup_at": None,           # ISO8601
+        # What the resale sweep is ACTUALLY doing, as opposed to what it was
+        # configured to do.
+        #
+        # The sweep's interval lives in the running process, which is correct
+        # — it changes every few hours at most and writing it every ninety
+        # seconds would be churn against the one file a crash must not
+        # corrupt. But it left `status` and `budget` reporting
+        # RESALE_SWEEP_SECONDS, the configured value, with no way to know the
+        # sweep had backed off. On the night of 2026-08-20 both would have
+        # said "every 90s" while it ran every 600, which is the one question
+        # either command existed to answer.
+        #
+        # So it is mirrored here, written only when it CHANGES. That is a
+        # handful of writes a day, and it makes the degradation visible from
+        # outside the process. Deliberately NOT read back at startup: a fresh
+        # sweep starts at the configured rate and re-learns, so this is a
+        # report, never an input.
+        "sweep_interval": None,           # seconds, or None before the first sweep
+        "sweep_backoffs": 0,              # how many rests it has taken this run
+        "sweep_resting_until": None,      # ISO8601 while it is sitting out refusals
     }
 
 
@@ -248,6 +268,11 @@ def event_state(state: dict, slug: str) -> dict:
         # cycle for a fortnight while the watchdog never fired and the hourly
         # email reported everything fine. Reproduced before it was fixed.
         "consecutive_failures": 0,
+        # When the buying browser was last SENT at this page. Its own clock,
+        # separate from last_availability_alert, because how often David is
+        # emailed and how often a ticket is chased are different questions —
+        # see should_try_again().
+        "last_secure_attempt": None,
     })
 
 
@@ -451,6 +476,105 @@ def should_alert_availability(state: dict, reading, new_listings=()) -> tuple:
             )
 
     return False, ""
+
+
+def should_try_again(state: dict, reading) -> bool:
+    """Is another securing attempt on this page allowed right now?
+
+    Deliberately NOT the same question as should_alert_availability(), and
+    that separation is the whole point of this function.
+
+    Securing used to be reachable only from inside the alerting branch, so a
+    reading that did not earn an email could not earn an attempt either. The
+    two look similar and are not: a repeat email is noise David has to ignore,
+    while a repeat attempt is the machine doing the only job it has. Sharing
+    one clock meant the quieter concern silently governed the louder one.
+
+    The cost was measured. On 2026-08-20 the 20:02 attempt lost the race; the
+    sweep then saw Weekend Camping stock again at 20:04 and at 20:06 and the
+    watcher did nothing on either, because resale already read AVAILABLE (no
+    edge), the listing described identically to the one already known (no new
+    listing), and the four-minute re-nag had not elapsed. Live stock sat there
+    for four minutes against a single thirteen-second attempt.
+
+    The gates below are the ones that genuinely bear on trying again:
+
+      * there has to be something to take — resale reading good;
+      * securing has to be switched on at all;
+      * nothing may already be held, because the one buying browser is busy
+        and _maybe_secure's own priority rules own that decision;
+      * and not more often than SECURE_MIN_INTERVAL_SECONDS per page.
+
+    Note what is NOT here: whether the listing looks new, and whether David
+    has been emailed recently. Neither has any bearing on whether a ticket is
+    sitting there waiting to be taken.
+    """
+    if not config.SECURE_ON_FIND:
+        return False
+    if getattr(reading, "resale", UNKNOWN) not in GOOD_STATUSES:
+        return False
+    # A live hold owns the browser. Preemption is a real thing this project
+    # does, but it is _maybe_secure's decision and it is driven by page
+    # priority — not by a retry clock, which would let a page preempt itself.
+    if hold_remaining(state) > 0:
+        return False
+    ev = event_state(state, getattr(reading, "event_slug", ""))
+    since = _hours_since(ev.get("last_secure_attempt"))
+    if since is None:
+        return True
+    return since * 3600 >= config.SECURE_MIN_INTERVAL_SECONDS
+
+
+def note_secure_attempt(state: dict, event_slug: str) -> None:
+    """Stamp that a securing attempt has just been STARTED on this page.
+
+    Stamped at the start rather than at the end so that a long attempt cannot
+    be immediately followed by another: the interval is meant to bound how
+    often the browser is asked, and measuring from the finish would let a
+    two-minute attempt be followed a second later by the next one.
+    """
+    event_state(state, event_slug)["last_secure_attempt"] = utc_now().isoformat()
+
+
+def note_sweep_rate(state: dict, interval: float, backoffs: int,
+                    resting_until=None) -> bool:
+    """Mirror the live sweep cadence into state. True if anything changed.
+
+    The return value is what keeps this cheap: the caller only writes the
+    state file when this says something moved, so a sweep running steadily at
+    ninety seconds costs no writes at all, and one that has just backed off
+    or recovered costs exactly one.
+    """
+    resting = resting_until.isoformat() if hasattr(resting_until, "isoformat") \
+        else resting_until
+    before = (state.get("sweep_interval"), state.get("sweep_backoffs"),
+              state.get("sweep_resting_until"))
+    after = (interval, backoffs, resting)
+    if before == after:
+        return False
+    state["sweep_interval"] = interval
+    state["sweep_backoffs"] = backoffs
+    state["sweep_resting_until"] = resting
+    return True
+
+
+def sweep_rate(state: dict) -> tuple:
+    """(seconds, backoffs, resting) as last reported by a running sweep.
+
+    Falls back to the configured rate when no sweep has reported yet, so a
+    caller can always print a number — but the fallback is flagged, because
+    "the sweep says 90" and "nobody has told us anything, 90 is the setting"
+    are different claims and the second one is what a stopped watcher looks
+    like.
+    """
+    interval = state.get("sweep_interval")
+    reported = interval is not None
+    if not reported:
+        interval = float(config.RESALE_SWEEP_SECONDS)
+    until = _parse(state.get("sweep_resting_until"))
+    resting = 0.0 if until is None else max(
+        0.0, (until - utc_now()).total_seconds())
+    return float(interval), int(state.get("sweep_backoffs") or 0), reported, resting
 
 
 def should_alert_watchdog(state: dict) -> bool:

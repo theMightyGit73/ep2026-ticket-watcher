@@ -176,7 +176,8 @@ check_true("subject says which way it switched", "overnight" in sent[-1]["Subjec
 check_true("subject offers a summary", "summary" in sent[-1]["Subject"].lower())
 check_true("body says settings changed", "SETTINGS CHANGED" in text)
 check_true("...showing the before and the after", "→" in text)
-check_true("...and when it changes back", "07:00 local" in text)
+check_true("...and when it changes back",
+           f"{config.NIGHT_END_HOUR:02d}:00 local" in text)
 check_true("...honestly, since the switch lands on the next poll",
            "first poll after" in text)
 check_true("explains why overnight is slower", "asleep" in text)

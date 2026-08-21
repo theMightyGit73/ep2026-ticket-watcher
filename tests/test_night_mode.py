@@ -37,7 +37,13 @@ def at(hour):
 print(f"\nNight window is {config.NIGHT_START_HOUR:02d}:00-{config.NIGHT_END_HOUR:02d}:00 local")
 
 check("early hours are night", config.is_night(at(2)), True)
-check("just before the end is night", config.is_night(at(6)), True)
+check("just before the end is night", config.is_night(at(5)), True)
+# 06:00 is DAYTIME as of 2026-08-21. The window used to run to 07:00, and the
+# weekend listing of that morning was found at 06:57 local — inside it, with
+# the searches at half-hourly and only the sweep looking. It is the only
+# evidence anyone has about whether this market is awake before seven, and it
+# says yes. See config.NIGHT_END_HOUR.
+check("the hour before seven is not night any more", config.is_night(at(6)), False)
 check("the end hour itself is daytime", config.is_night(at(7)), False)
 check("mid-morning is daytime", config.is_night(at(10)), False)
 check("afternoon is daytime", config.is_night(at(15)), False)

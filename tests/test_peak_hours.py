@@ -75,7 +75,9 @@ print("\nNight always wins, so a peak window can never undo the slowdown")
 real_start, real_end = config.PEAK_START_HOUR, config.PEAK_END_HOUR
 try:
     config.PEAK_START_HOUR, config.PEAK_END_HOUR = 0, 24
-    for hour in (0, 3, 6):
+    # Hours inside the night window. 06:00 left it on 2026-08-21 —
+    # see config.NIGHT_END_HOUR — so 05:00 is the late boundary now.
+    for hour in (0, 3, 5):
         check(f"{hour:02d}:00 stays off-peak despite an all-day peak window",
               config.is_peak(at(hour)), False)
     check_true("but midday is peak", config.is_peak(at(12)))

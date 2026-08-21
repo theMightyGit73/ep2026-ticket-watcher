@@ -2,6 +2,7 @@
 
 import threading
 import time
+from datetime import timedelta
 from typing import List, Optional
 
 from . import config, events, liveness, network, notify, state as state_mod
@@ -245,7 +246,22 @@ def handle(reading: Reading, st: dict) -> None:
         st["outage_peak_failures"] = 0
 
     if not should:
-        print(f"[{stamp()}] nothing to report")
+        # Nothing to SAY. That is not the same as nothing to DO, and treating
+        # the two as one decision is what cost the chance at 20:04 and 20:06
+        # on 2026-08-20: the 20:02 attempt had lost, the sweep saw Weekend
+        # Camping stock twice more in the next four minutes, and neither
+        # sighting earned an email — no edge, no new description, inside the
+        # re-nag — so neither earned an attempt either.
+        #
+        # A ticket sitting on the page is worth chasing whether or not David
+        # needs telling about it again. should_try_again() is the securing
+        # clock, deliberately much shorter than the alerting one.
+        if state_mod.should_try_again(st, reading):
+            print(f"[{stamp()}] nothing new to report, but {reading.event_slug} "
+                  f"still shows resale — going back for it")
+            _record_hold(st, reading, _maybe_secure(reading, st, quiet=True))
+        else:
+            print(f"[{stamp()}] nothing to report")
         _maybe_heartbeat(reading, st)
         return
 
@@ -288,23 +304,7 @@ def handle(reading: Reading, st: dict) -> None:
         if alert.is_alive():
             print(f"[{stamp()}] the availability alert is still sending after "
                   f"{config.ALERT_JOIN_SECONDS}s — carrying on without it")
-        if hold is not None and hold.secured:
-            # The single most valuable line in this function. A basket lives
-            # in the browser this process launched, so anything that restarts
-            # the watcher throws the ticket away — and the watchdog restarts a
-            # watcher whose poll clock has stopped, which is exactly what a
-            # checkout looks like from outside. Writing the hold down is what
-            # tells it the difference. See state.note_hold().
-            minutes = config.hold_window_minutes(hold.minutes_hint)
-            event = next(
-                (e for e in config.EVENTS if e.slug == reading.event_slug), None)
-            state_mod.note_hold(
-                st, minutes,
-                event_slug=reading.event_slug,
-                priority=getattr(event, "secure_priority", 0),
-            )
-            print(f"[{stamp()}] hold recorded — nothing will restart the "
-                  f"watcher for {minutes:.0f} min")
+        _record_hold(st, reading, hold)
     # The find itself, with everything needed to reconstruct the race later:
     # which page, how it was seen, what it was, and its Ticketmaster id. Eight
     # finds had to be reassembled from prose on 2026-08-20 to establish that
@@ -488,8 +488,19 @@ def watchdog_reason(reading: Reading) -> str:
     return f"{cause}\n\n{coda}" if cause else coda
 
 
-def _maybe_secure(reading: Reading, st: dict = None):
+def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
     """Try to hold a resale listing, if that has been switched on.
+
+    `quiet` suppresses the FAILURE email only, and exists for the retry path.
+    Securing now runs on a one-minute clock while the alert runs on a
+    four-minute one, so a failed attempt that mailed every time would push a
+    "could not hold it" into David's inbox once a minute for as long as stock
+    was visible — reintroducing, through the back door, exactly the noise the
+    alerting clock exists to prevent, and worse than before.
+    He has already been told the listing is there; what he needs next is
+    either a held ticket or silence. A success is never quiet, because a live
+    basket with a countdown is the loudest thing this project has to say, and
+    the `hold` event is emitted either way, so the record stays complete.
 
     Returns the HoldResult when an attempt was made, or None when securing is
     off, the page is watch-only, or there was no resale listing to act on. The
@@ -563,6 +574,14 @@ def _maybe_secure(reading: Reading, st: dict = None):
         print(f"[{stamp()}] {event.slug} outranks the live hold on "
               f"{st.get('hold_event_slug')} — that hold will be dropped for this")
 
+    # Stamped before the attempt, not after, and stamped even though the
+    # attempt may fail. The clock this feeds bounds how often the buying
+    # browser is SENT at a page — see state.should_try_again — so measuring
+    # from the finish would let a two-minute attempt be followed a second
+    # later by the next one, which is the opposite of a floor.
+    if st is not None:
+        state_mod.note_secure_attempt(st, reading.event_slug)
+
     print(f"[{stamp()}] listing found — opening the signed-in browser to hold it")
     hold = buyer.secure_in_thread(event, listing, may_preempt=may_preempt,
                                   worker=buy_worker())
@@ -581,7 +600,24 @@ def _maybe_secure(reading: Reading, st: dict = None):
         preempted=hold.preempted,
         reason=hold.reason,
         timings=dict(getattr(hold, "timings", {}) or {}),
+        # Both totals, because they answer different questions and the step
+        # sum alone was quietly lying about the attempts that matter most.
+        #
+        # `seconds` is the sum of COMPLETED steps. A step that fails is never
+        # marked, so its time is missing — and the step that failed is exactly
+        # the one worth timing. The attempt of 2026-08-21 05:57 recorded 10.01s
+        # and actually ran about twenty-five: ten seconds setting quantity plus
+        # a fifteen-second timeout waiting for a search button that never came.
+        # Every attempt in the log is a failed one, so every total in the log
+        # was short.
+        #
+        # `wall_seconds` is the honest elapsed time from the start of the first
+        # attempt to the end of the last, retry pauses included. Use it for
+        # "how long did this take"; use the step sum only to see where the
+        # measured time went.
         seconds=round(sum((getattr(hold, "timings", {}) or {}).values()), 2),
+        wall_seconds=round(getattr(hold, "elapsed", 0.0), 2),
+        attempts=getattr(hold, "attempts", 1),
         # The forensics, so "why do we keep losing these" becomes a query
         # rather than a re-reading of prose. See HoldResult: still_listed is
         # the field that decides whether speed is even the right lever.
@@ -594,10 +630,64 @@ def _maybe_secure(reading: Reading, st: dict = None):
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")
         notify.secured_hold(reading, hold)
+    elif quiet:
+        # The retry path. See `quiet` above: David has already been told the
+        # listing is there, and a failure email per attempt would be noise on
+        # a one-minute clock. The log line and the `hold` event still record
+        # it in full.
+        print(f"[{stamp()}] could not hold it: {hold.reason} "
+              f"(retry — not emailing again)")
     else:
         print(f"[{stamp()}] could not hold it: {hold.reason}")
         notify.secure_failed(reading, hold)
     return hold
+
+
+def _record_hold(st: dict, reading: Reading, hold) -> None:
+    """Write a successful hold into state, so nothing restarts the watcher.
+
+    The single most valuable thing this module does after catching the ticket.
+    A basket lives in the browser this process launched, so anything that
+    restarts the watcher throws it away — and the watchdog restarts a watcher
+    whose poll clock has stopped, which is exactly what a checkout looks like
+    from outside. Writing the hold down is what tells it the difference. See
+    state.note_hold().
+
+    Factored out because there are now two routes to a hold: the availability
+    alert, and the plain "it is still there, go back for it" retry that runs
+    when nothing has earned an email. Both have to record it, and a hold that
+    the second route forgot to write down would be a ticket the watchdog
+    throws away twenty minutes later.
+    """
+    if hold is None or not hold.secured:
+        return
+    minutes = config.hold_window_minutes(hold.minutes_hint)
+    event = next((e for e in config.EVENTS if e.slug == reading.event_slug), None)
+    state_mod.note_hold(
+        st, minutes,
+        event_slug=reading.event_slug,
+        priority=getattr(event, "secure_priority", 0),
+    )
+    print(f"[{stamp()}] hold recorded — nothing will restart the "
+          f"watcher for {minutes:.0f} min")
+    # The one standing instruction with a trigger rather than a date on it.
+    #
+    # David switched the Early Entry Pass off on 2026-08-20 because the
+    # weekend ticket is the critical thing and he does not have one, and asked
+    # to be able to turn it back on easily once he does. This is that moment,
+    # and it is also the worst possible moment to expect anyone to remember a
+    # config flag: there is a live basket with a countdown on it.
+    #
+    # So it is said here, once, while it is true. Not acted on — the switch
+    # restores searching AND securing together and belongs to him — but it
+    # will never again depend on somebody recalling it unprompted.
+    if (not config.WATCH_EARLY_ENTRY
+            and getattr(event, "secure_priority", 0) >= config.SECURE_PRIORITY_WEEKEND):
+        print(f"[{stamp()}] NOTE: this is a weekend ticket, so the Early Entry "
+              f"Pass is worth having again — it is switched off. Turn it back "
+              f"on with:  echo 'export EP_EARLY_ENTRY=1' >> "
+              f"~/.ep2026-watcher/env  &&  ./restart.sh")
+        _safely("early entry reminder", notify.early_entry_worth_it, reading)
 
 
 def _maybe_watchdog(reading: Reading, st: dict, failures: int) -> None:
@@ -811,12 +901,32 @@ class ResaleSweep:
         #: answers ~60 calls, refuses, and answers again after a rest. So rest,
         #: then come back slower, and keep coming back slower until it holds.
         self._resume_at = 0.0
-        self._interval = config.RESALE_SWEEP_SECONDS
+        self._interval = float(config.RESALE_SWEEP_SECONDS)
+        #: Answered calls since the last rest, and the way back down.
+        #:
+        #: Backing off used to be one-way: this interval was set once here and
+        #: only ever doubled, so the sweep could get slower and never faster
+        #: and nothing but restarting the process undid it. That is the same
+        #: bug as the permanent stop this class already learned about, one
+        #: level down, and it fired the same night — three rests between 21:46
+        #: and 03:05 on 2026-08-20, at hours when nothing is on sale, left the
+        #: sweep at ten-minute intervals for the morning. The weekend listing
+        #: at 05:57 was found at that rate, and the only reason the sweep was
+        #: back at ninety seconds by nine was an unrelated watchdog restart.
+        #:
+        #: So a run of clean answers halves it back down. See _recover().
+        self._clean = 0
         #: How many times we have had to back off. Reported, because a sweep
-        #: that has quietly settled at ten-minute intervals is a different
+        #: that has quietly settled at four-minute intervals is a different
         #: thing from one running at ninety seconds, and the hourly numbers
         #: would otherwise look identical.
         self.backoffs = 0
+        #: Set when the live cadence above has been changed and state.json has
+        #: not been told yet. The caller writes the file and clears it; see
+        #: publish(). Kept as a flag rather than writing here so that the one
+        #: file a crash must not corrupt is still written in exactly one
+        #: place, by the code that owns it.
+        self._dirty = True
         #: Asked, answered, and came back with nothing to ask with.
         #:
         #: Counted because a sweep that is silently failing looks exactly like
@@ -839,6 +949,17 @@ class ResaleSweep:
     def due(self, event, now: float) -> bool:
         return now >= self._next.get(event.slug, 0.0)
 
+    def pages(self) -> list:
+        """The pages this sweep covers, which is not every page it watches.
+
+        `searchable()` is the whole watcher's switch; `sweep` is this one's.
+        A page can be worth a full search on its own cadence without being
+        worth an extra call every ninety seconds, and the difference matters
+        because the refusals scale with how many pages are swept rather than
+        with which — see config.SWEEP_INSTALMENT.
+        """
+        return [e for e in config.EVENTS if e.searchable() and e.sweep]
+
     def any_due(self, now: float) -> bool:
         """Cheap pre-check for the sleep loop.
 
@@ -848,10 +969,64 @@ class ResaleSweep:
         """
         if not config.RESALE_SWEEP or self.stopped or now < self._resume_at:
             return False
-        return any(e.searchable() and self.due(e, now) for e in config.EVENTS)
+        return any(self.due(e, now) for e in self.pages())
+
+    def publish(self, st: dict) -> bool:
+        """Mirror the live cadence into state, if it has moved. True if so.
+
+        The interval lives in this process on purpose — it changes a few times
+        a day at most, and writing state.json every ninety seconds would be
+        churn against the file a crash must not corrupt. But keeping it ONLY
+        here left `status` and `budget` reporting the configured rate with no
+        way to see that the sweep had slowed, which on the night of
+        2026-08-20 meant both would have said "every 90s" while it ran every
+        600. That is the one question either command exists to answer.
+        """
+        if not self._dirty:
+            return False
+        resting = None
+        left = self._resume_at - time.monotonic()
+        if left > 0:
+            resting = state_mod.utc_now() + timedelta(seconds=left)
+        changed = state_mod.note_sweep_rate(
+            st, self._interval, self.backoffs, resting)
+        self._dirty = False
+        return changed
 
     def _schedule(self, event, now: float) -> None:
         self._next[event.slug] = now + self._interval
+
+    def _recover(self, now: float) -> None:
+        """Earn the speed back after a run of clean answers.
+
+        The counterpart to _back_off, and the half that was missing. Halving
+        rather than jumping straight to the base rate for the same reason the
+        slowdown doubles rather than stopping dead: the endpoint's tolerance
+        is being probed, not known, and a ladder finds it from either
+        direction without oscillating.
+
+        Only ever called with the interval above the configured base, and it
+        floors there — the sweep is not permitted to talk itself into being
+        faster than it was asked to be.
+        """
+        was = self._interval
+        self._interval = max(float(config.RESALE_SWEEP_SECONDS),
+                             self._interval / 2)
+        self._clean = 0
+        self._dirty = True
+        # Re-drawn against the NEW interval, so the speed-up takes effect
+        # without waiting out one more old-length gap. Deliberately not
+        # cleared the way _back_off clears it: that is paired with a rest, so
+        # nothing is due until the rest ends, whereas clearing here would make
+        # every page due at once and fire a burst of calls at the exact moment
+        # we have decided to ask more often. The point is a higher rate, not a
+        # spike.
+        self._next = {e.slug: now + self._interval for e in self.pages()}
+        print(f"[{stamp()}] resale sweep back up to every {self._interval:.0f}s "
+              f"(was {was:.0f}s) after {config.RESALE_SWEEP_RECOVER_AFTER} "
+              f"clean answers")
+        events.emit("sweep_recover", interval=self._interval,
+                    was=was, backoffs=self.backoffs)
 
     def _back_off(self, now: float) -> None:
         """Rest after a run of refusals, and come back slower.
@@ -869,6 +1044,12 @@ class ResaleSweep:
         """
         self.backoffs += 1
         self._refusals = 0
+        # Progress towards a speed-up is forfeited, not carried. Twenty clean
+        # answers followed by a refusal is not nineteen-twentieths of the way
+        # to being trusted with a faster rate; it is evidence the current rate
+        # is already too fast.
+        self._clean = 0
+        self._dirty = True
         self._resume_at = now + config.RESALE_SWEEP_BACKOFF_SECONDS
         was = self._interval
         self._interval = min(self._interval * 2, config.RESALE_SWEEP_MAX_SECONDS)
@@ -878,7 +1059,9 @@ class ResaleSweep:
         print(f"[{stamp()}] resale sweep resting "
               f"{config.RESALE_SWEEP_BACKOFF_SECONDS / 60:.0f} min after "
               f"{config.RESALE_SWEEP_MAX_REFUSALS} refusals, then every "
-              f"{self._interval}s (was {was}s) — searches are unaffected")
+              f"{self._interval:.0f}s (was {was:.0f}s) — searches are "
+              f"unaffected, and {config.RESALE_SWEEP_RECOVER_AFTER} clean "
+              f"answers win the speed back")
         events.emit("sweep_backoff", seconds=config.RESALE_SWEEP_BACKOFF_SECONDS,
                     interval=self._interval, backoffs=self.backoffs)
 
@@ -907,8 +1090,8 @@ class ResaleSweep:
         if state_mod.backoff_remaining(st) > 0 or state_mod.hold_remaining(st) > 0:
             return None
 
-        for event in config.EVENTS:
-            if not event.searchable() or not self.due(event, now):
+        for event in self.pages():
+            if not self.due(event, now):
                 continue
             self._schedule(event, now)
             try:
@@ -928,20 +1111,27 @@ class ResaleSweep:
             if self._refused(status):
                 self._refusals += 1
                 # WHICH page was refused is the whole diagnosis, and the first
-                # version of this line did not say.
+                # version of this line did not say. It says now, and the
+                # nineteen refusals it recorded have settled the question it
+                # was added to settle.
                 #
-                # On 2026-08-20 the sweep drew three 403s within a minute and
-                # shut itself off, while the ordinary searches either side of
-                # it succeeded normally — so it was not an IP block, it was
-                # that endpoint refusing that call. The leading hypothesis is
-                # that the sweep asks for all three event ids from whichever
-                # page the browser happens to be parked on, and Ticketmaster
-                # objects to being asked about an event whose page you are not
-                # on. Two of every three calls are "foreign" in that sense.
+                # The hypothesis was that Ticketmaster objects to being asked
+                # about an event whose page the browser is not parked on —
+                # two of every three calls being "foreign" in that sense — and
+                # that the fix would therefore be to sweep only the parked
+                # page rather than to slow down.
                 #
-                # Recording the slug is what will confirm or kill that: if the
-                # refusals cluster on the pages we are NOT parked on, the fix
-                # is to sweep only the parked one rather than to slow down.
+                # That is not what happens. The refusals arrive in tight
+                # bursts across every page at once (on 2026-08-20 all three
+                # inside eleven seconds), and the page the browser IS parked
+                # on draws the most of them — eleven of nineteen. It is a
+                # volume threshold on the client, not an objection to any
+                # particular event id.
+                #
+                # Which is why the levers that exist are the two below:
+                # _back_off, for how often, and config.SWEEP_INSTALMENT, for
+                # how many pages. Sweeping only the parked page would change
+                # nothing except the coverage lost.
                 print(f"[{stamp()}] resale sweep refused (HTTP {status}) on "
                       f"{event.slug} — {self._refusals}/"
                       f"{config.RESALE_SWEEP_MAX_REFUSALS}")
@@ -959,6 +1149,16 @@ class ResaleSweep:
                 continue
             self._refusals = 0
             self.answers += 1
+            # A clean answer is progress towards getting the speed back. Only
+            # counted here, past every way a call can fail to be an answer: a
+            # refusal, a fetch that resolved against no origin, and a reply
+            # whose shape could not be read all mean the endpoint did not
+            # tell us anything, and none of them is evidence that the current
+            # rate is tolerated.
+            if self._interval > config.RESALE_SWEEP_SECONDS:
+                self._clean += 1
+                if self._clean >= config.RESALE_SWEEP_RECOVER_AFTER:
+                    self._recover(now)
 
             reading = Reading(
                 source="resale-sweep",

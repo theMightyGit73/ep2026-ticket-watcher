@@ -590,6 +590,48 @@ def secured_hold(reading: Reading, hold) -> None:
     )
 
 
+def early_entry_worth_it(reading: Reading) -> None:
+    """A weekend ticket is held, so the Early Entry Pass is worth having again.
+
+    The one standing instruction in this project with a trigger rather than a
+    date on it. David switched the pass off on 2026-08-20 — not watched, not
+    swept, not secured — on the reasoning that every request the watcher can
+    spend should go to finding a weekend ticket, and asked to be able to turn
+    it back on easily once he had one. Ticketmaster's own note is why:
+    "Early Entry passes are only valid with a Weekend Ticket".
+
+    That moment has just arrived, and it is the worst imaginable moment to
+    rely on anyone remembering a configuration flag — there is a live basket
+    with a countdown on it and he is being told to run to the laptop. So this
+    is a separate, quiet message that will still be in his inbox afterwards.
+
+    Deliberately does NOT flip the switch. It restores searching and securing
+    together, and turning either on is his call — the ticket in the basket is
+    not paid for yet, and a pass secured against a purchase that fell through
+    would be exactly the outcome the priority rules exist to prevent.
+    """
+    name, _url = _event_of(reading)
+    subject = f"Now worth turning the Early Entry Pass back on{_from_watcher()}"
+    body = (
+        f"Hi David,\n\n"
+        f"A weekend ticket is held ({name}), so the Early Entry Pass has\n"
+        f"stopped being a distraction and become the next thing worth having.\n"
+        f"Ticketmaster only honour a pass alongside a Weekend Ticket, which is\n"
+        f"why it was switched off while you had neither.\n\n"
+        f"Pay for the ticket first. Then, if you want the pass:\n\n"
+        f"    echo 'export EP_EARLY_ENTRY=1' >> ~/.ep2026-watcher/env\n"
+        f"    ./restart.sh\n\n"
+        f"That is the whole procedure. It restores searching AND holding for\n"
+        f"the pass together — deliberately, because a search that only emails\n"
+        f"you on the day you want one held would be a switch that looks like\n"
+        f"it worked and does half the job.\n\n"
+        f"Nothing about the pass was deleted when it was switched off: its\n"
+        f"page, cadence, priority and history are all still in place.\n\n"
+        f"Sent at: {stamp()}\n"
+    )
+    _safe("early-entry-email", _send_email, subject, body)
+
+
 def _timing_block(hold) -> str:
     """Where the seconds went, for an email about a race that was lost.
 

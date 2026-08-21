@@ -23,7 +23,7 @@ class Event:
                  poll_min_seconds: int = 0, poll_max_seconds: int = 0,
                  peak_min_seconds: int = 0, peak_max_seconds: int = 0,
                  offpeak_min_seconds: int = 0, offpeak_max_seconds: int = 0,
-                 watch: bool = True,
+                 watch: bool = True, sweep: bool = True,
                  secure: bool = True, secure_priority: int = 0,
                  stop_after: str = ""):
         self.peak_min_seconds, self.peak_max_seconds = peak_min_seconds, peak_max_seconds
@@ -43,6 +43,21 @@ class Event:
         #: requests are needed somewhere more important. Switching it back on
         #: must be one edit and a restart, not an archaeology exercise.
         self.watch = watch
+        #: Is this page included in the cheap resale sweep between searches?
+        #:
+        #: The middle rung of the ladder, and the only one that trades
+        #: coverage for LATENCY rather than for silence. A page with
+        #: sweep=False is still searched on its full cadence, still alerted
+        #: on and still secured — it is simply not asked about in the ninety
+        #: seconds between searches, so a listing on it is seen when the next
+        #: search comes round instead of within the sweep interval.
+        #:
+        #: Separate from `watch` because the sweep is the only part of the
+        #: watcher that has ever been rate-limited, and the refusals scale
+        #: with the number of pages swept rather than with which ones. That
+        #: makes "how many pages does the sweep cover" a dial worth having on
+        #: its own, without switching a page off entirely to turn it.
+        self.sweep = sweep
         #: May the buyer open a signed-in browser and hold this one?
         #:
         #: Per page, because "tell me about it" and "grab it for me" are not
@@ -432,6 +447,38 @@ SECURE_PRIORITY_ADDON = int(os.environ.get("EP_PRIORITY_ADDON", "10"))
 # like it worked and does half the job.
 WATCH_EARLY_ENTRY = os.environ.get("EP_EARLY_ENTRY", "0").lower() in ("1", "true", "yes")
 
+# Is the instalment-plan page included in the resale sweep?
+#
+#   echo 'export EP_SWEEP_INSTALMENT=1' >> ~/.ep2026-watcher/env
+#   ./restart.sh
+#
+# Off as of 2026-08-21, and this switches the SWEEP only — the page is still
+# searched, still alerted on and still secured on exactly the cadence it
+# always was. Nothing about it is deleted; see WATCH_EARLY_ENTRY above for the
+# same pattern applied harder.
+#
+# The reasoning is a straight trade of coverage for latency, and the evidence
+# is on both sides of it.
+#
+# Against sweeping it: the sweep is the only part of the watcher that has ever
+# drawn a 403, nineteen of them, and the refusals are a volume threshold
+# rather than an objection to any one page — they arrive in bursts across
+# every page at once, and the page the browser is parked on draws the most of
+# them. So the lever that works is fewer calls per hour, and dropping one of
+# two swept pages halves them at a stroke.
+#
+# For sweeping it: it is a genuinely separate inventory, and it HAS produced a
+# find — one, on 2026-08-20 at 18:30, against the standard page's four.
+#
+# It comes off because the listings this is chasing are gone inside two
+# minutes, so detection lag is the thing worth buying, and because the two
+# pages sell the same ticket with a payment plan attached: a weekend ticket
+# found on the standard page is the thing David actually wants. The searches
+# underneath still cover this page in full, which is what makes the trade
+# survivable rather than a hole.
+SWEEP_INSTALMENT = os.environ.get(
+    "EP_SWEEP_INSTALMENT", "0").lower() in ("1", "true", "yes")
+
 
 EVENTS = [
     Event(
@@ -465,6 +512,9 @@ EVENTS = [
         ),
         match_words=("electric picnic", "weekend", "instalment"),
         secure_priority=SECURE_PRIORITY_WEEKEND,
+        # Searched and secured as always; swept only if asked. See
+        # SWEEP_INSTALMENT above for the trade this represents.
+        sweep=SWEEP_INSTALMENT,
         poll_min_seconds=INSTALMENT_POLL_MIN_SECONDS,
         poll_max_seconds=INSTALMENT_POLL_MAX_SECONDS,
         peak_min_seconds=INSTALMENT_PEAK_MIN_SECONDS,
@@ -820,6 +870,27 @@ SECURE_RETRIES = int(os.environ.get("EP_SECURE_RETRIES", "2"))
 #: has ever run — so it is a starting point that the `hold` records in the
 #: event log will settle.
 SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "20"))
+
+#: The shortest gap between two securing attempts on the same page.
+#:
+#: Securing used to be reachable only through the availability alert, so
+#: "should David be told again" and "should we try again" were one decision
+#: on one four-minute clock. On 2026-08-20 that cost a real chance: the 20:02
+#: attempt lost, the sweep saw Weekend Camping stock again at 20:04 and 20:06,
+#: and nothing was attempted either time, because the reading carried no edge
+#: (resale already read AVAILABLE), no new listing by the description test,
+#: and the re-nag had not elapsed. Four minutes of visible stock, one
+#: thirteen-second attempt.
+#:
+#: They are separate questions now, on separate clocks. This is the securing
+#: one, and it is deliberately much shorter: a repeat email is noise, but a
+#: repeat attempt is the entire point of the machine. Sixty seconds is chosen
+#: against the shape of an attempt rather than against politeness — an
+#: attempt takes thirteen to seventeen seconds and the buying browser
+#: serialises them anyway, so this bounds the page to one try a minute while
+#: stock is visible without ever queueing them up.
+SECURE_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("EP_SECURE_MIN_INTERVAL", "60"))
 
 #: How long to wait for the availability alert once the hold attempt is done.
 #:
@@ -1227,7 +1298,17 @@ POLL_PHASE = max(0.0, min(1.0, float(os.environ.get("EP_POLL_PHASE", "0"))))
 # Local time, not UTC. Set EP_NIGHT_POLL_SECONDS=0 to disable.
 NIGHT_POLL_SECONDS = int(os.environ.get("EP_NIGHT_POLL_SECONDS", "1800"))
 NIGHT_START_HOUR = int(os.environ.get("EP_NIGHT_START_HOUR", "0"))
-NIGHT_END_HOUR = int(os.environ.get("EP_NIGHT_END_HOUR", "7"))
+#: Night ends at 06:00, not 07:00, because a real one appeared at 06:57.
+#:
+#: The weekend listing of 2026-08-21 was found at 05:57 UTC, which is 06:57
+#: local — inside the old window, with the searches at half-hourly and only
+#: the sweep looking. It is the single piece of evidence anyone has about
+#: whether this market is awake before seven, and it says yes.
+#:
+#: The hour this gives back is off-peak (480-840s, so about five searches
+#: rather than two), which is a small price for the hour immediately before
+#: David wakes up — the one where a listing can sit unclaimed longest.
+NIGHT_END_HOUR = int(os.environ.get("EP_NIGHT_END_HOUR", "6"))
 
 
 def is_night(now=None) -> bool:
@@ -1543,9 +1624,43 @@ RESALE_SWEEP_BACKOFF_SECONDS = float(
 #:
 #: Each rest doubles the interval, so a sweep that keeps being refused settles
 #: at a rate the endpoint tolerates instead of oscillating between too fast
-#: and off. At ten minutes it is still far faster than the searches, which is
-#: the whole reason it exists.
-RESALE_SWEEP_MAX_SECONDS = float(os.environ.get("EP_RESALE_SWEEP_MAX", "600"))
+#: and off.
+#:
+#: This was 600s, justified as "still far faster than the searches". That was
+#: simply wrong, and the night of 2026-08-20 proved it: the standard page's
+#: peak search window is STANDARD_PEAK_MIN..MAX — 180 to 360 seconds, a mean
+#: of 270 — so a sweep at ten minutes is SLOWER than the search it exists to
+#: beat. A detector that has quietly become the slowest thing in the system is
+#: worse than no detector, because the hourly numbers still report it working.
+#:
+#: 240 is the ceiling because it is below that 270-second mean: at its very
+#: slowest the sweep is still, on average, ahead of the searches, which is the
+#: minimum that makes it worth running at all. It is also 2.7x the base rate,
+#: so it remains a real reduction in volume for an endpoint that has refused
+#: us nineteen times.
+RESALE_SWEEP_MAX_SECONDS = float(os.environ.get("EP_RESALE_SWEEP_MAX", "240"))
+
+#: How many clean answers in a row earn the sweep its speed back.
+#:
+#: Backing off used to be one-way. `_interval` was set once at construction
+#: and only ever doubled, so the sweep could get slower and never faster, and
+#: the only thing that restored it was restarting the process.
+#:
+#: That is the same bug as the permanent stop above, one level down, and it
+#: fired the same night. Three refusal bursts between 21:46 and 03:05 — at
+#: hours when nothing is on sale and being slow costs nothing — walked the
+#: interval 90 -> 180 -> 360 -> 600 and left it there. The weekend listing at
+#: 05:57 was found by a sweep running every ten minutes, and the only reason
+#: it was back at ninety seconds by morning is that the watchdog happened to
+#: restart the watcher at 09:50 for an unrelated reason.
+#:
+#: So the ladder goes both ways. A run of answered calls halves the interval
+#: back down, floored at RESALE_SWEEP_SECONDS. Twenty is roughly fifteen
+#: minutes of clean sweeping at the base rate and forty at the ceiling: long
+#: enough that it is not reacting to a single lucky call, short enough that a
+#: quiet night cannot spend the following day.
+RESALE_SWEEP_RECOVER_AFTER = int(
+    os.environ.get("EP_RESALE_SWEEP_RECOVER_AFTER", "20"))
 
 PROFILE_MAX_AGE_MINUTES = float(os.environ.get("EP_PROFILE_MAX_AGE", "90"))
 
