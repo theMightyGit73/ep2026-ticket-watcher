@@ -75,9 +75,18 @@ def fresh_state():
     return dict(st._defaults())
 
 
-def sweep_n(sweep, session, n):
-    """Run n passes, making everything due each time."""
-    for _ in range(n):
+def sweep_calls(sweep, session, n):
+    """Drive the sweep until it has made n calls, making everything due.
+
+    Counts CALLS rather than passes on purpose. A pass asks once per swept
+    page, so a helper that counted passes silently measured something
+    different the moment a second page joined the sweep — which is exactly
+    what happened when config.SWEEP_INSTALMENT was turned back on, and it
+    broke the recovery assertions below without any of them being wrong.
+    """
+    guard = 0
+    while session.calls < n and guard < n * 20:
+        guard += 1
         sweep._next.clear()
         sweep._resume_at = 0.0
         sweep.run(session, fresh_state())
@@ -98,6 +107,16 @@ check_true("and the ceiling is above the base rate, or backing off does nothing"
            config.RESALE_SWEEP_MAX_SECONDS > config.RESALE_SWEEP_SECONDS)
 
 
+# The ladder assertions below count CALLS against the recovery threshold, and
+# a pass asks once per swept page — so with two pages a pass can step from
+# nineteen calls to twenty-one and skip the boundary being tested. The ladder
+# has nothing to do with page coverage, so it is measured against a single
+# swept page. The coverage rules get their own section further down, which
+# uses the real configuration.
+_restore = [(e, e.sweep) for e in config.EVENTS]
+for _e in config.EVENTS[1:]:
+    _e.sweep = False
+
 print("\nRefusals slow it down, to a bound")
 sweep = engine.ResaleSweep()
 check("it starts at the configured rate",
@@ -115,10 +134,10 @@ slowed = sweep._interval
 check_true("it is slower after a rest", slowed > config.RESALE_SWEEP_SECONDS)
 
 session = FakeSession(payload())
-sweep_n(sweep, session, config.RESALE_SWEEP_RECOVER_AFTER - 1)
+sweep_calls(sweep, session, config.RESALE_SWEEP_RECOVER_AFTER - 1)
 check("one short of the threshold changes nothing", sweep._interval, slowed)
 
-sweep_n(sweep, session, 1)
+sweep_calls(sweep, session, config.RESALE_SWEEP_RECOVER_AFTER)
 check("and the threshold halves it", sweep._interval, slowed / 2)
 check("the counter starts again", sweep._clean, 0)
 
@@ -129,7 +148,7 @@ for _ in range(6):
     sweep._back_off(time.monotonic())
 session = FakeSession(payload())
 for _ in range(40):
-    sweep_n(sweep, session, config.RESALE_SWEEP_RECOVER_AFTER)
+    sweep_calls(sweep, session, session.calls + config.RESALE_SWEEP_RECOVER_AFTER)
 check("it recovers to the configured rate",
       sweep._interval, float(config.RESALE_SWEEP_SECONDS))
 check("and floors there", sweep._interval, float(config.RESALE_SWEEP_SECONDS))
@@ -145,7 +164,7 @@ for label, answer in (("no answer at all", None),
     sweep = engine.ResaleSweep()
     sweep._back_off(time.monotonic())
     was = sweep._interval
-    sweep_n(sweep, FakeSession(answer), config.RESALE_SWEEP_RECOVER_AFTER * 2)
+    sweep_calls(sweep, FakeSession(answer), config.RESALE_SWEEP_RECOVER_AFTER * 2)
     check(f"{label} leaves the rate exactly where it was", sweep._interval, was)
 
 # A refusal is the one that moves in the other direction, so the property is
@@ -154,8 +173,8 @@ for label, answer in (("no answer at all", None),
 sweep = engine.ResaleSweep()
 sweep._back_off(time.monotonic())
 was = sweep._interval
-sweep_n(sweep, FakeSession(payload(status=403)),
-        config.RESALE_SWEEP_RECOVER_AFTER * 2)
+sweep_calls(sweep, FakeSession(payload(status=403)),
+             config.RESALE_SWEEP_RECOVER_AFTER * 2)
 check_true("a refusal never earns the speed back", sweep._interval >= was)
 check("it goes the other way, to the ceiling",
       sweep._interval, config.RESALE_SWEEP_MAX_SECONDS)
@@ -165,7 +184,7 @@ check("it goes the other way, to the ceiling",
 # it is evidence the current rate is already too fast.
 sweep = engine.ResaleSweep()
 sweep._back_off(time.monotonic())
-sweep_n(sweep, FakeSession(payload()), config.RESALE_SWEEP_RECOVER_AFTER - 1)
+sweep_calls(sweep, FakeSession(payload()), config.RESALE_SWEEP_RECOVER_AFTER - 1)
 check_true("progress towards recovery is real", sweep._clean > 0)
 sweep._back_off(time.monotonic())
 check("and a rest throws it away", sweep._clean, 0)
@@ -179,12 +198,15 @@ print("\nRecovering must not fire a burst of calls")
 # spike.
 sweep = engine.ResaleSweep()
 sweep._back_off(time.monotonic())
-sweep_n(sweep, FakeSession(payload()), config.RESALE_SWEEP_RECOVER_AFTER)
+sweep_calls(sweep, FakeSession(payload()), config.RESALE_SWEEP_RECOVER_AFTER)
 check("nothing is due the instant it speeds up",
       sweep.any_due(time.monotonic()), False)
 check_true("but everything is within the new interval",
            sweep.any_due(time.monotonic() + sweep._interval + 1))
 
+
+for _e, _was in _restore:
+    _e.sweep = _was
 
 print("\nThe sweep covers the pages it is told to, not every page watched")
 # Its own switch, one rung below `watch`. The refusals scale with how MANY
@@ -249,7 +271,7 @@ check("with no watcher running, the setting is used",
       interval, float(config.RESALE_SWEEP_SECONDS))
 check("but flagged as not reported", reported, False)
 
-sweep_n(sweep, FakeSession(payload()), config.RESALE_SWEEP_RECOVER_AFTER)
+sweep_calls(sweep, FakeSession(payload()), config.RESALE_SWEEP_RECOVER_AFTER)
 check_true("a recovery is published too", sweep.publish(state))
 check("with the faster interval", state["sweep_interval"], sweep._interval)
 

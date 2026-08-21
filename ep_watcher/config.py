@@ -449,35 +449,41 @@ WATCH_EARLY_ENTRY = os.environ.get("EP_EARLY_ENTRY", "0").lower() in ("1", "true
 
 # Is the instalment-plan page included in the resale sweep?
 #
-#   echo 'export EP_SWEEP_INSTALMENT=1' >> ~/.ep2026-watcher/env
+#   echo 'export EP_SWEEP_INSTALMENT=0' >> ~/.ep2026-watcher/env
 #   ./restart.sh
 #
-# Off as of 2026-08-21, and this switches the SWEEP only — the page is still
-# searched, still alerted on and still secured on exactly the cadence it
-# always was. Nothing about it is deleted; see WATCH_EARLY_ENTRY above for the
-# same pattern applied harder.
+# ON, and it was briefly off on 2026-08-21 for a reason the same day's data
+# then inverted. Both halves are recorded because the mistake is instructive.
 #
-# The reasoning is a straight trade of coverage for latency, and the evidence
-# is on both sides of it.
+# It was switched off on the argument that it had produced one find against
+# the standard page's four, so dropping it halved the sweep's call rate for
+# almost no loss of coverage. That treats a page's value as its supply.
 #
-# Against sweeping it: the sweep is the only part of the watcher that has ever
-# drawn a 403, nineteen of them, and the refusals are a volume threshold
-# rather than an objection to any one page — they arrive in bursts across
-# every page at once, and the page the browser is parked on draws the most of
-# them. So the lever that works is fewer calls per hour, and dropping one of
-# two swept pages halves them at a stroke.
+# What actually matters is how long a listing SURVIVES there, because that is
+# the window we have to win in. Measured over both event logs:
 #
-# For sweeping it: it is a genuinely separate inventory, and it HAS produced a
-# find — one, on 2026-08-20 at 18:30, against the standard page's four.
+#     weekend-camping               median  2.1 min visible  (n=14)
+#     early-entry                   median  7.3 min visible  (n=4)
+#     weekend-camping-instalment            21.8 min visible (n=1)
 #
-# It comes off because the listings this is chasing are gone inside two
-# minutes, so detection lag is the thing worth buying, and because the two
-# pages sell the same ticket with a payment plan attached: a weekend ticket
-# found on the standard page is the thing David actually wants. The searches
-# underneath still cover this page in full, which is what makes the trade
-# survivable rather than a hole.
+# The instalment page sells the identical ticket at the identical price, paid
+# in stages. When one appeared there it sat for twenty-two minutes. Against a
+# ninety-second sweep that is not a race at all — it is the one page we can
+# comfortably win, precisely BECAUSE hardly anyone knows to watch it.
+#
+# The standard page is the opposite. Five securing attempts on 2026-08-21 all
+# reached a listing that had already been claimed by somebody else and was
+# merely waiting to be paid for. We do not lose that page by being slow; we
+# lose it because whoever is taking those tickets is not polling at all — the
+# likeliest explanation is Ticketmaster's own ticket alerts, which push to a
+# waiting list from inside their system with no latency for us to beat.
+#
+# So the sweep's scarce calls are better spent covering a page we can win than
+# shaving seconds off one we cannot. n=1 on that 21.8 minutes, so this is the
+# better bet rather than a certainty — but the cost of being wrong is one
+# extra XHR every ninety seconds.
 SWEEP_INSTALMENT = os.environ.get(
-    "EP_SWEEP_INSTALMENT", "0").lower() in ("1", "true", "yes")
+    "EP_SWEEP_INSTALMENT", "1").lower() in ("1", "true", "yes")
 
 
 EVENTS = [
