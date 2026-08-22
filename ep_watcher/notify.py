@@ -660,14 +660,29 @@ def secure_failed(reading: Reading, hold) -> None:
     """
     name, _url = _event_of(reading)
     reason = getattr(hold, "reason", "") or "no reason recorded"
+    # A block is a different message from a lost race, and the subject line is
+    # the part he reads on a phone. "Could not hold it" invites a shrug; being
+    # told the watcher is shut out entirely is what makes him open the other
+    # email and click the link himself, which is the only thing that can work
+    # while this lasts.
+    blocked = bool(getattr(hold, "challenged", False))
+    subject = (f"BLOCKED — buy it yourself NOW: {name}{_from_watcher()}"
+               if blocked else
+               f"could not hold it — buy it yourself: {name}{_from_watcher()}")
     _safe(
         "secure-failed-email", _send_email,
-        f"could not hold it — buy it yourself: {name}{_from_watcher()}",
+        subject,
         f"Hi David,\n\n"
         f"A listing appeared and the watcher tried to put it in a basket for\n"
         f"you. It did not manage to.\n\n"
         f"Why: {reason}\n\n"
-        f"{_preempt_line(hold)}"
+        + ("Ticketmaster is refusing the watcher's buying browser, so it\n"
+           "cannot reach ANY listing until this clears. Nothing is wrong with\n"
+           "your account and nothing is wrong with the code — you are simply\n"
+           "the only one who can buy right now. Use the link in the\n"
+           "'TICKETS AVAILABLE' email, in your own browser.\n\n"
+           if blocked else "")
+        + f"{_preempt_line(hold)}"
         f"There is NO hold. The separate 'TICKETS AVAILABLE' email has the\n"
         f"link — if the listing is still there it is still yours to take.\n\n"
         f"What it saw:\n{_listing_block(reading.listings)}\n\n"

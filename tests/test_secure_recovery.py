@@ -88,8 +88,15 @@ class FakeLocator:
 
 
 class FakePage:
-    def __init__(self, url, search_fails=0, rows_visible=False):
+    def __init__(self, url, search_fails=0, rows_visible=False,
+                 title="", blocked_until_try=0):
         self.url = url
+        self._title = title
+        # Serves the block screen for the first N *attempts*, then relents —
+        # which is what a real challenge does, and the whole reason waiting it
+        # out is worth anything.
+        self.blocked_until_try = blocked_until_try
+        self.tries_seen = 0
         self.search_fails = search_fails
         self.search_clicks = 0
         self.searched = False
@@ -110,6 +117,9 @@ class FakePage:
 
     def inner_text(self, _sel="body"):
         return self.body
+
+    def title(self):
+        return self._title
 
 
 class FakeSession:
@@ -146,6 +156,60 @@ def payload(ids):
 # sign-in state, and letting it touch the filesystem would make these tests
 # depend on whether a browser profile happens to exist.
 buyer.session_evidence = lambda *a, **k: {"signed_in": None, "reason": "test"}
+
+
+print("\nA block screen is recognised as a block, not as a missing button")
+# 2026-08-22, three times: 11:23, 12:23 and 14:36. Ticketmaster served the
+# buying browser "Your Browsing Activity Has Been Paused" — correct event URL,
+# no readable text, no controls — and every one was reported as "could not
+# press search", which reads as a selector problem and is not. A challenge and
+# a slow page produce the identical Playwright timeout; only the page can tell
+# them apart.
+page = FakePage(EVENT.url, search_fails=9,
+                title="Your Browsing Activity Has Been Paused")
+result = buyer._secure_once(FakeSession(page, feed=payload([])), EVENT, LISTING)
+check_true("it is flagged as a block", result.challenged)
+check_true("and says so in words David can act on",
+           "block screen" in (result.reason or ""))
+check_true("naming what it matched",
+           "browsing activity" in (result.reason or ""))
+check("and does not blame the selector",
+      "could not press search" in (result.reason or ""), False)
+
+# An ordinary timeout on a real page is still an ordinary timeout.
+page = FakePage(EVENT.url, search_fails=9, title="Electric Picnic 2026")
+result = buyer._secure_once(FakeSession(page, feed=payload([])), EVENT, LISTING)
+check("a slow page is not called a block", result.challenged, False)
+check_true("and reports the timeout plainly",
+           "could not press search" in (result.reason or ""))
+
+
+print("\nA block is waited out — it used to end the attempt on the first try")
+# The block fails before the resale panel, so still_listed_after is never set,
+# and secure() read that as "nothing to come back for": one try, fifty
+# seconds, done. All three blocked attempts of 2026-08-22 show tries=1 while
+# the retry budget sat at six.
+pauses = []
+real_sleep = time.sleep
+time.sleep = lambda s: pauses.append(s)
+was = (config.SECURE_CHALLENGE_PAUSE_SECONDS, config.SECURE_RETRY_PAUSE_SECONDS)
+try:
+    config.SECURE_CHALLENGE_PAUSE_SECONDS = 0.0
+    config.SECURE_RETRY_PAUSE_SECONDS = 0.0
+
+    blocked = FakePage(EVENT.url, search_fails=99,
+                       title="Your Browsing Activity Has Been Paused")
+    out = buyer.secure(FakeSession(blocked, feed=payload([])), EVENT, LISTING)
+    check("it goes back for it", out.attempts,
+          1 + config.SECURE_CHALLENGE_RETRIES)
+    check_true("waiting in between", len(pauses) >= config.SECURE_CHALLENGE_RETRIES)
+    check_true("and stops rather than provoking it further",
+               any("provoking it further" in n for n in out.notes))
+    check_true("the wait is charged to itself", "waiting" in out.timings)
+finally:
+    (config.SECURE_CHALLENGE_PAUSE_SECONDS,
+     config.SECURE_RETRY_PAUSE_SECONDS) = was
+    time.sleep = real_sleep
 
 
 print("\nA search button that never appears is worth exactly one reload")

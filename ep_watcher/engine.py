@@ -626,6 +626,11 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
         still_listed=getattr(hold, "still_listed_after", None),
         ids_after=list(getattr(hold, "ids_after", []) or []),
         landed_url=getattr(hold, "landed_url", "") or "",
+        # Queryable, because "how often is the buying browser being blocked"
+        # is a question about the health of the whole approach, not about one
+        # attempt — and answering it from prose is what took two days last
+        # time.
+        challenged=bool(getattr(hold, "challenged", False)),
     )
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")

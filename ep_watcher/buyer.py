@@ -610,6 +610,17 @@ class HoldResult:
     #: one says be faster at the click, the other says the click was never
     #: going to work and the lever is seeing the listing sooner.
     ever_listed_after: bool = False
+    #: Ticketmaster served a block or challenge screen instead of the page.
+    #:
+    #: Its own field rather than a phrase in `reason`, because it decides
+    #: whether going back is worth anything. A challenge is transient — it is
+    #: the client being asked to wait, not the ticket being gone — so it is
+    #: the second condition worth retrying, alongside a listing the feed still
+    #: shows. Without this, three attempts on 2026-08-22 each stopped after a
+    #: single try: the block fails before the resale panel, so
+    #: still_listed_after was never set, and secure() read that as "nothing to
+    #: come back for".
+    challenged: bool = False
 
     def note(self, text: str) -> None:
         self.notes.append(text)
@@ -1273,6 +1284,9 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
     """
     result = result or HoldResult()
     deadline = time.monotonic() + config.SECURE_TIMEOUT_SECONDS
+    #: Blocks are counted separately from ordinary retries, so a challenge
+    #: cannot quietly spend the whole budget meant for waiting out a basket.
+    challenges = 0
 
     def verdict(out):
         """Correct the reason against what the EARLIER attempts learned.
@@ -1307,6 +1321,38 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         out = _secure_once(session, event, listing, result, deadline)
         if out.secured:
             return out
+
+        # A block is worth waiting out, and used to end the attempt at once.
+        #
+        # Ticketmaster showed the buying browser "Your Browsing Activity Has
+        # Been Paused" three times on 2026-08-22. Each of those failed before
+        # the resale panel, so still_listed_after was never set and the branch
+        # below read it as "nothing to come back for" — one try, fifty seconds,
+        # done. But a challenge is the client being asked to wait, not the
+        # ticket being gone; the listing may well still be there.
+        #
+        # Waited out more patiently and fewer times than an ordinary retry.
+        # Hammering a challenge screen is exactly what turns a pause into a
+        # ban, and this project has been blocked twenty-two times already.
+        if out.challenged:
+            if challenges >= config.SECURE_CHALLENGE_RETRIES:
+                out.note("still blocked after "
+                         f"{challenges + 1} tries — leaving it alone rather "
+                         f"than provoking it further")
+                return verdict(out)
+            pause = config.SECURE_CHALLENGE_PAUSE_SECONDS
+            if time.monotonic() + pause >= deadline:
+                out.note("blocked, and no time left in the window to wait it "
+                         "out — the alert tells David to buy it himself")
+                return verdict(out)
+            challenges += 1
+            out.note(f"blocked by a challenge screen — waiting {pause:.0f}s "
+                     f"for it to clear rather than retrying straight away")
+            out.challenged = False
+            time.sleep(pause)
+            out.mark("waiting")
+            continue
+
         # Genuinely sold, or the question could not be asked. Either way there
         # is nothing to come back for.
         if not out.still_listed_after:
@@ -1469,10 +1515,29 @@ def _secure_once(session: BuySession, event, listing,
                 # the step that failed rather than vanishing from the record.
                 if press_attempt or out_of_time():
                     result.mark("search")
-                    result.reason = (
-                        f"could not press search in the buying browser"
-                        f"{' even after reloading' if press_attempt else ''}: {exc}"
-                    )
+                    # WHY there was no button. A challenge screen and a slow
+                    # page produce the identical Playwright timeout, and they
+                    # call for opposite responses — one is worth waiting out,
+                    # the other is not — so for three failures on 2026-08-22
+                    # they were reported identically as "could not press
+                    # search", which reads as a selector problem and is not.
+                    hit = challenge_markers(page)
+                    if hit:
+                        result.challenged = True
+                        result.reason = (
+                            f"Ticketmaster is showing the buying browser a "
+                            f"block screen rather than the event page "
+                            f"({hit[0]}). This is not a selector problem and "
+                            f"not a lost race — the watcher cannot reach the "
+                            f"listing at all right now. Buy it by hand from "
+                            f"the link in the availability email."
+                        )
+                    else:
+                        result.reason = (
+                            f"could not press search in the buying browser"
+                            f"{' even after reloading' if press_attempt else ''}"
+                            f": {exc}"
+                        )
                     result.note(result.reason)
                     return result
                 result.note("the search button never became clickable — "
@@ -1839,6 +1904,31 @@ INTERSTITIAL_MARKERS = (
     "checking your browser", "please enable javascript", "rate limit",
     "too many requests", "queue-it", "you are in line", "waiting room",
 )
+
+
+def challenge_markers(page) -> list:
+    """Which challenge-screen markers this page matches, if any.
+
+    Reads the TITLE as well as the body, because the screen this most needs to
+    recognise has no body. Ticketmaster's block of 2026-08-22 arrived with the
+    correct event URL, zero characters of readable text, and the whole story
+    in the title: "Your Browsing Activity Has Been Paused".
+
+    One reader, used by the live attempt and by the post-mortem alike. The two
+    readers of the resale feed disagreed for a fortnight and neither was
+    noticed, because both only ran on the losing path.
+    """
+    title = text = ""
+    try:
+        title = page.title() or ""
+    except Exception:
+        pass
+    try:
+        text = page.inner_text("body") or ""
+    except Exception:
+        pass
+    low = " ".join(f"{text} {title}".lower().split())
+    return [m for m in INTERSTITIAL_MARKERS if m in low]
 
 
 def capture_failure(page, result: "HoldResult", event, attempt: int = 1) -> str:

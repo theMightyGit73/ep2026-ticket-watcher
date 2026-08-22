@@ -963,6 +963,22 @@ SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "40")
 SECURE_MIN_INTERVAL_SECONDS = float(
     os.environ.get("EP_SECURE_MIN_INTERVAL", "60"))
 
+#: How many times to wait out a block screen before leaving it alone.
+#:
+#: Deliberately fewer, and slower, than an ordinary retry. Ticketmaster showed
+#: the buying browser "Your Browsing Activity Has Been Paused" three times on
+#: 2026-08-22 — the first evidence of the SIGNED-IN browser being challenged
+#: rather than the watching one. A challenge is transient and worth waiting
+#: out, but hammering one is precisely how a pause becomes a ban, and this
+#: connection has already drawn twenty-two blocks.
+#:
+#: Two tries at sixty seconds, against six at forty for a basket. The
+#: asymmetry is the point: a basket lapsing is something we are waiting FOR,
+#: a challenge is something we caused.
+SECURE_CHALLENGE_RETRIES = int(os.environ.get("EP_SECURE_CHALLENGE_RETRIES", "2"))
+SECURE_CHALLENGE_PAUSE_SECONDS = float(
+    os.environ.get("EP_SECURE_CHALLENGE_PAUSE", "60"))
+
 #: How long to wait for the availability alert once the hold attempt is done.
 #:
 #: The alert is sent on its own thread so the buying browser does not queue
