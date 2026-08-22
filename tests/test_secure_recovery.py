@@ -354,6 +354,35 @@ finally:
     time.sleep = real_sleep
 
 
+print("\nThe wait between attempts is charged to itself, not to the next one")
+# mark() measures the gap since the previous mark, and after a retry pause the
+# previous mark belongs to the attempt BEFORE the sleep — so the whole pause
+# landed on the next attempt's `navigate`, which is the first step it marks.
+#
+# That is not cosmetic. It read as "navigate 22.5s" with a twenty-second pause
+# and "navigate 41.9s" with a forty-second one, on a home connection where a
+# single-attempt navigate measures 0.0s — and it was reported as evidence of a
+# slow connection for a day before the arithmetic gave it away.
+real_sleep = time.sleep
+time.sleep = lambda s: pauses.append(s)
+was_pause = config.SECURE_RETRY_PAUSE_SECONDS
+try:
+    config.SECURE_RETRY_PAUSE_SECONDS = 0.0
+    pauses.clear()
+    out = buyer.secure(
+        FakeSession(FakePage(EVENT.url, rows_visible=False),
+                    feed=payload(["lstillthere"])), EVENT, LISTING)
+    check_true("more than one attempt ran", out.attempts > 1)
+    check_true("the wait has a step of its own", "waiting" in out.timings)
+    # With navigation faked as instant, navigate must stay near zero however
+    # many pauses happened. Before the fix it accumulated one pause per retry.
+    check_true("and navigate is not carrying it",
+               out.timings.get("navigate", 0.0) < 1.0)
+finally:
+    config.SECURE_RETRY_PAUSE_SECONDS = was_pause
+    time.sleep = real_sleep
+
+
 print("\nWhere the attempt ended is recorded however it ended")
 # The dead-end URL is the only place a direct link to a single listing has
 # ever been observed, and a direct link would remove the

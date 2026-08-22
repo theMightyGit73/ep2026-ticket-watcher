@@ -1331,6 +1331,17 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         out.still_listed_after = None
         out.ids_after = []
         time.sleep(pause)
+        # Charge the wait to itself.
+        #
+        # mark() measures the gap since the previous mark, and the previous
+        # mark belongs to the attempt BEFORE this sleep — so without this the
+        # whole pause lands on the next attempt's `navigate`, which is the
+        # first step it marks. That is not a rounding error: it read as
+        # "navigate 22.5s" with a twenty-second pause and "navigate 41.9s"
+        # with a forty-second one, on a home connection where a single-attempt
+        # navigate measures 0.0s. It was reported as evidence of a slow
+        # connection for a day, and it was this.
+        out.mark("waiting")
 
     return verdict(out)
 
@@ -1815,6 +1826,14 @@ LISTING_GONE_MARKERS = (
 #: and nothing in the record could confirm it because nothing wrote down where
 #: the browser actually was.
 INTERSTITIAL_MARKERS = (
+    # Observed, verbatim, on 2026-08-22 at 11:23 UTC — the first hard
+    # evidence that the BUYING browser gets challenged rather than merely
+    # rate-limited. It arrived with the correct event URL, no controls, and an
+    # entirely empty body, so only the title gave it away.
+    "your browsing activity has been paused",
+    # The dead end a refused listing lands on. Not a block, but equally not
+    # the event page, and worth naming for the same reason.
+    "400 - error",
     "verify you are a human", "are you a robot", "unusual activity",
     "access denied", "request blocked", "captcha", "press and hold",
     "checking your browser", "please enable javascript", "rate limit",
@@ -1895,7 +1914,14 @@ def capture_failure(page, result: "HoldResult", event, attempt: int = 1) -> str:
 
     # Which of the controls a real event page always has were actually there.
     # This is the line that would have answered 12:06 in one glance.
-    low = " ".join((text or "").lower().split())
+    #
+    # Matched against the TITLE as well as the body, because the one page this
+    # most needs to recognise has no body at all. Ticketmaster's challenge
+    # screen of 2026-08-22 arrived with the right URL, zero characters of
+    # readable text and the title "Your Browsing Activity Has Been Paused" —
+    # so a body-only matcher, which is what this was, found nothing to report
+    # about the most important page it had ever been shown.
+    low = " ".join(f"{text or ''} {record.get('title') or ''}".lower().split())
     record["page"] = {
         "text_chars": len(text or ""),
         "has_find_tickets": "find tickets" in low,

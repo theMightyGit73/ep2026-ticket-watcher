@@ -156,6 +156,28 @@ check_true("naming what it matched",
 check("the attempt number distinguishes the retry", rec["attempt"], 2)
 
 
+print("\nA challenge page with no readable body is still recognised")
+# The real one, verbatim, from 2026-08-22 at 11:23 UTC. It is the reason this
+# check reads the title and not only the body: Ticketmaster served the correct
+# event URL, zero characters of text, and every control missing. A body-only
+# matcher — which is what this was when it shipped — reported nothing unusual
+# about the most important page it had ever been shown.
+page = FakePage(
+    "https://www.ticketmaster.ie/electric-picnic-2026-weekend-camping"
+    "-co-laois-28-08-2026/event/18006314BD813D3E",
+    "", title="Your Browsing Activity Has Been Paused", stepper=False)
+buyer.capture_failure(page, buyer.HoldResult(), EVENT)
+rec = latest()
+check("the body really is empty", rec["page"]["text_chars"], 0)
+check("the URL still looks like the event page",
+      "18006314BD813D3E" in rec["url"], True)
+check_true("but it is named as a challenge screen",
+           rec["page"]["looks_like_interstitial"])
+check_true("by the exact wording Ticketmaster used",
+           "your browsing activity has been paused"
+           in rec["page"]["looks_like_interstitial"])
+
+
 print("\nThe page text is kept, and bounded")
 # Enough to read the headline of a block page; not so much that a fortnight of
 # failures fills the disk with Ticketmaster markup.
