@@ -632,6 +632,45 @@ def early_entry_worth_it(reading: Reading) -> None:
     _safe("early-entry-email", _send_email, subject, body)
 
 
+def buyer_blocked(reading: Reading, minutes: float) -> None:
+    """Ticketmaster is refusing the buying browser. Only David can buy now.
+
+    Sent once when the block has survived enough finds to be called a block
+    rather than a challenge, and deliberately separate from the per-attempt
+    failure email — that one arrives beside every find and is easy to stop
+    reading. This says the thing that changes what he does: for the next while,
+    the watcher can tell him a ticket exists and nothing more.
+    """
+    name, _url = _event_of(reading)
+    _safe(
+        "buyer-blocked-email", _send_email,
+        f"the watcher cannot buy — only you can, for now{_from_watcher()}",
+        f"Hi David,\n\n"
+        f"Ticketmaster has started showing the watcher's buying browser a\n"
+        f"block screen instead of the ticket page, on {name}.\n\n"
+        f"WHAT THIS MEANS. Finding and alerting are completely unaffected —\n"
+        f"you will still get the loud email the moment a ticket appears, with\n"
+        f"the link. What has stopped is the watcher putting it in a basket for\n"
+        f"you. Until this clears, YOU are the only one who can buy.\n\n"
+        f"WHAT IT IS NOT. Nothing is wrong with your account, and nothing is\n"
+        f"wrong with the sign-in. This is bot detection objecting to the\n"
+        f"browser's traffic, not to you.\n\n"
+        f"The buying browser will stand down for {minutes:.0f} minutes rather\n"
+        f"than keep knocking — every blocked attempt costs the watcher several\n"
+        f"minutes of not looking, and gives whatever is unhappy another reason\n"
+        f"to stay unhappy. It will try again quietly after that.\n\n"
+        f"Sent at: {stamp()}\n"
+    )
+    _push(
+        "buyer-blocked-push",
+        title="Watcher can't buy — you must",
+        message=f"Ticketmaster is blocking the buying browser. Alerts still "
+                f"work; tap the ticket email and buy it yourself.",
+        priority="high",
+        tags=["no_entry"],
+    )
+
+
 def _timing_block(hold) -> str:
     """Where the seconds went, for an email about a race that was lost.
 

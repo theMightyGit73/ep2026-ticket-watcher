@@ -521,6 +521,16 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
         return None
     if reading.resale not in GOOD_STATUSES:
         return None
+    # Resting out a run of blocks. Checked here as well as in
+    # should_try_again(), because that guards only the retry route and this
+    # one is reachable from the ordinary availability alert — which is the
+    # path all fourteen blocked attempts of 2026-08-23 came in through.
+    resting = state_mod.secure_cooldown_remaining(st) if st is not None else 0
+    if resting > 0:
+        print(f"[{stamp()}] {reading.event_slug}: the buying browser is "
+              f"resting out a block for another {resting / 60:.0f} min — "
+              f"alerting only, so David can buy it himself")
+        return None
 
     # Which page is this, and may it be secured?
     #
@@ -632,6 +642,17 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
         # time.
         challenged=bool(getattr(hold, "challenged", False)),
     )
+    # Count it towards the circuit breaker, and say so once if this is the
+    # attempt that trips it.
+    if st is not None and state_mod.note_secure_block(
+            st, bool(getattr(hold, "challenged", False))):
+        print(f"[{stamp()}] the buying browser has been blocked "
+              f"{config.SECURE_BLOCK_STREAK} finds running — standing it down "
+              f"for {config.SECURE_BLOCK_COOLDOWN_MINUTES:.0f} min. Watching "
+              f"and alerting continue.")
+        _safely("blocked-buyer alert", notify.buyer_blocked,
+                reading, config.SECURE_BLOCK_COOLDOWN_MINUTES)
+
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")
         notify.secured_hold(reading, hold)

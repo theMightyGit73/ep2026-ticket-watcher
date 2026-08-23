@@ -975,9 +975,27 @@ SECURE_MIN_INTERVAL_SECONDS = float(
 #: Two tries at sixty seconds, against six at forty for a basket. The
 #: asymmetry is the point: a basket lapsing is something we are waiting FOR,
 #: a challenge is something we caused.
-SECURE_CHALLENGE_RETRIES = int(os.environ.get("EP_SECURE_CHALLENGE_RETRIES", "2"))
+SECURE_CHALLENGE_RETRIES = int(os.environ.get("EP_SECURE_CHALLENGE_RETRIES", "1"))
 SECURE_CHALLENGE_PAUSE_SECONDS = float(
     os.environ.get("EP_SECURE_CHALLENGE_PAUSE", "60"))
+
+#: Consecutive blocked attempts before the buyer stops trying for a while.
+#:
+#: On 2026-08-23 the buying browser was blocked from 10:21 to 19:00 — fourteen
+#: finds in a row, every one refused, each costing the poll loop several
+#: minutes because submit() blocks its caller for the whole attempt. Roughly an
+#: hour of not watching, spent entirely on a door that was never going to open.
+#:
+#: A block that survives three finds is not transient, and the correct
+#: response to it is to stop knocking: it frees the poll loop, it stops
+#: feeding whatever detection is unhappy, and it lets David be told once,
+#: clearly, that only he can buy right now.
+SECURE_BLOCK_STREAK = int(os.environ.get("EP_SECURE_BLOCK_STREAK", "3"))
+
+#: How long the buyer rests once that streak is reached. Alerting and watching
+#: are untouched throughout — only the buying browser stands down.
+SECURE_BLOCK_COOLDOWN_MINUTES = float(
+    os.environ.get("EP_SECURE_BLOCK_COOLDOWN", "45"))
 
 #: How long to wait for the availability alert once the hold attempt is done.
 #:

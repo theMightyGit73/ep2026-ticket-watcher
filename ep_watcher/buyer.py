@@ -1335,6 +1335,10 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # Hammering a challenge screen is exactly what turns a pause into a
         # ban, and this project has been blocked twenty-two times already.
         if out.challenged:
+            # Waiting it out was worth one try. It is not worth many: the
+            # block of 2026-08-23 held from 10:21 to 19:00, through fourteen
+            # attempts, and every extra go is both a wasted minute of the poll
+            # loop and another knock on a door that has been shut.
             if challenges >= config.SECURE_CHALLENGE_RETRIES:
                 out.note("still blocked after "
                          f"{challenges + 1} tries — leaving it alone rather "
@@ -1478,6 +1482,29 @@ def _secure_once(session: BuySession, event, listing,
                         f"— trying anyway, since that reading can be wrong")
         elif evidence["signed_in"] is None:
             result.note("cannot tell whether the buying session is signed in — trying")
+
+        # Is this the event page at all? Asked FIRST, and cheaply.
+        #
+        # A block screen has no stepper and no search button, so the attempt
+        # discovered it the slow way: ten seconds timing out on the quantity
+        # control, then fifteen on the search button, a reload, and fifteen
+        # more. With the challenge retry on top that came to 271 seconds per
+        # attempt — and on 2026-08-23 fourteen consecutive finds were blocked,
+        # which cost about an hour of the poll loop, because submit() blocks
+        # the caller for the whole attempt.
+        #
+        # Two page reads answer it in well under a second.
+        hit = challenge_markers(page)
+        if hit:
+            result.challenged = True
+            result.reason = (
+                f"Ticketmaster is showing the buying browser a block screen "
+                f"rather than the event page ({hit[0]}). The watcher cannot "
+                f"reach any listing until this clears. Buy it by hand from "
+                f"the link in the availability email."
+            )
+            result.note(result.reason)
+            return result
 
         # Same quantity discipline as the watcher: the page defaults to 2 and
         # resale results are filtered by quantity, so asking for the wrong

@@ -135,6 +135,10 @@ def _defaults():
         # outside the process. Deliberately NOT read back at startup: a fresh
         # sweep starts at the configured rate and re-learns, so this is a
         # report, never an input.
+        # The buying browser's own circuit breaker. See note_secure_block().
+        "secure_block_streak": 0,
+        "secure_cooldown_until": None,    # ISO8601
+        "secure_block_alerted": None,     # ISO8601, so it says so once
         "sweep_interval": None,           # seconds, or None before the first sweep
         "sweep_backoffs": 0,              # how many rests it has taken this run
         "sweep_resting_until": None,      # ISO8601 while it is sitting out refusals
@@ -518,11 +522,57 @@ def should_try_again(state: dict, reading) -> bool:
     # priority — not by a retry clock, which would let a page preempt itself.
     if hold_remaining(state) > 0:
         return False
+    # Resting out a run of blocks. The buying browser cannot reach a listing
+    # at all while Ticketmaster is refusing it, so sending it costs minutes of
+    # the poll loop and buys nothing. See note_secure_block().
+    if secure_cooldown_remaining(state) > 0:
+        return False
     ev = event_state(state, getattr(reading, "event_slug", ""))
     since = _hours_since(ev.get("last_secure_attempt"))
     if since is None:
         return True
     return since * 3600 >= config.SECURE_MIN_INTERVAL_SECONDS
+
+
+def note_secure_block(state: dict, challenged: bool) -> bool:
+    """Count a blocked attempt, and rest the buyer once they run together.
+
+    True when this call is the one that starts a rest, so the caller can say
+    so exactly once.
+
+    On 2026-08-23 the buying browser was blocked from 10:21 to 19:00 and the
+    watcher kept sending it at every find — fourteen in a row, each costing
+    the poll loop several minutes, because BuyerWorker.submit() blocks its
+    caller for the whole attempt. About an hour of not watching, spent on a
+    door that was never going to open, while every one of those attempts was
+    another knock for whatever detection had already objected.
+
+    A block that survives three finds is not a transient challenge. Standing
+    down frees the poll loop, stops feeding the thing that is unhappy, and
+    lets David be told once that only he can buy right now. Watching and
+    alerting continue throughout — this rests the BUYER, nothing else.
+    """
+    if not challenged:
+        state["secure_block_streak"] = 0
+        state["secure_cooldown_until"] = None
+        state["secure_block_alerted"] = None
+        return False
+    streak = int(state.get("secure_block_streak") or 0) + 1
+    state["secure_block_streak"] = streak
+    if streak < config.SECURE_BLOCK_STREAK or secure_cooldown_remaining(state) > 0:
+        return False
+    state["secure_cooldown_until"] = (
+        utc_now() + timedelta(minutes=config.SECURE_BLOCK_COOLDOWN_MINUTES)
+    ).isoformat()
+    return True
+
+
+def secure_cooldown_remaining(state: dict) -> float:
+    """Seconds until the buying browser may be used again, or 0.0."""
+    until = _parse(state.get("secure_cooldown_until"))
+    if until is None:
+        return 0.0
+    return max(0.0, (until - utc_now()).total_seconds())
 
 
 def note_secure_attempt(state: dict, event_slug: str) -> None:
