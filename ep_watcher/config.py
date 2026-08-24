@@ -977,6 +977,27 @@ SECURE_ACTIVE_TIMEOUT_SECONDS = int(
 SECURE_ACTIVE_RETRIES = int(os.environ.get("EP_SECURE_ACTIVE_RETRIES", "10"))
 
 
+#: Go straight to the listing's checkout URL instead of clicking its row.
+#:
+#: On by default, because clicking the row is what has been losing every
+#: ticket. The page builds its own offer link from its own quantity state, and
+#: all eighteen of those links ever traced — 2026-08-24, four separate
+#: listings — went out as `?qty=0`, which Ticketmaster 302s straight to the
+#: "sold or removed" error screen. Every securing attempt this project has
+#: ever made asked for zero tickets and was refused for it.
+#:
+#: buyer.offer_url() builds the same URL with the quantity we actually want,
+#: from the event id and the listing id the resale feed already gives us. The
+#: shortcut — skipping the quantity, the search and the panel wait, about
+#: twenty of an attempt's twenty-two seconds — is the smaller half of the
+#: benefit, and by now clearly the less important one: no amount of arriving
+#: sooner rescues a request for none.
+#:
+#: The switch exists because this changes the one path that reaches a
+#: checkout, and the old path stays underneath as the fallback. Set 0 to go
+#: back to clicking the row, with its known behaviour and its known result.
+DIRECT_OFFER = os.environ.get("EP_DIRECT_OFFER", "1").lower() in ("1", "true", "yes")
+
 #: How often to check the resale feed while waiting out a basket.
 #:
 #: The chase waits on the endpoint rather than on the clock — see

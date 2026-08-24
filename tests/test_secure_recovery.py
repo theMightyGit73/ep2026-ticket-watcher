@@ -105,7 +105,11 @@ class FakePage:
         self.reloads = 0
         self.body = ""
 
-    def goto(self, url, wait_until=None):
+    def goto(self, url, wait_until=None, timeout=None):
+        # `timeout` is part of Playwright's real signature. Without it here the
+        # double raised TypeError the moment production code passed one, and a
+        # TypeError from a test double reads as a failure in the code under
+        # test rather than as a gap in the fake.
         self.reloads += 1
         self.url = url
 
@@ -156,6 +160,15 @@ def payload(ids):
 # sign-in state, and letting it touch the filesystem would make these tests
 # depend on whether a browser profile happens to exist.
 buyer.session_evidence = lambda *a, **k: {"signed_in": None, "reason": "test"}
+
+# Every case below is about the search path — the button that will not appear,
+# the panel that draws no row, the probe on the dead end. Since 2026-08-24 that
+# path is the FALLBACK: an attempt now goes straight to the offer URL first,
+# because the page's own click built that link with qty=0 and lost every ticket
+# to it. The direct path is covered in test_offer_trace.py; switching it off
+# here keeps these tests exercising the thing they were written for, rather
+# than skipping it and quietly testing nothing.
+config.DIRECT_OFFER = False
 
 
 print("\nA block screen is recognised as a block, not as a missing button")

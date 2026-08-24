@@ -667,6 +667,10 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
         # line — but "was there an href at all" is the one bit worth having
         # queryable, because it decides whether a direct path can exist.
         row_href=getattr(hold, "row_href", "") or "",
+        # Which path this attempt took. The direct offer URL is the fix for
+        # the qty=0 refusal that lost every ticket to date, so "did it go
+        # direct" belongs beside "did it work".
+        used_direct=bool(getattr(hold, "used_direct", False)),
         traced=len(getattr(hold, "trace", []) or []),
         # Queryable, because "how often is the buying browser being blocked"
         # is a question about the health of the whole approach, not about one

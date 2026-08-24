@@ -407,6 +407,71 @@ def offer_id_for(listing_id: str) -> str:
     return base64.b32encode(f"9|{listing_id}".encode()).decode().rstrip("=")
 
 
+def offer_url(event, listing_id: str, qty: int = None) -> str:
+    """The checkout URL for one resale listing. "" if it cannot be built.
+
+        https://secure.ticketmaster.ie/{eventId}/{resaleListingId}?qty={n}
+
+    Not a guess. This is the request Ticketmaster's own page makes when a
+    resale row is clicked, observed eighteen times in the traces of
+    2026-08-24, and in every one of those the listing segment equals
+    `decode_offer_id(offerIds[0])` — so the two halves of the URL are exactly
+    the two things the resale feed already tells us.
+
+    ── Why this is a fix and not only a shortcut ────────────────────────────
+
+    All eighteen were `?qty=0`.
+
+    Ticketmaster 302s a zero-quantity offer straight to /error/q404, which is
+    the "sold or removed" screen this project has spent a fortnight
+    explaining. Every securing attempt ever made has asked for ZERO tickets,
+    been refused for it, and recorded the refusal as somebody else having
+    taken the listing.
+
+    That single field accounts for the whole picture and retires two theories
+    at once. Ten distinct listings refused, every one of them `"active": true`
+    in Ticketmaster's own error payload — of course they were; nothing was
+    wrong with the tickets. One of them was clicked 5.3 seconds after the
+    sweep saw it and refused identically — of course it was; speed cannot
+    rescue a malformed request. It was never a lost race and never somebody
+    else's basket. We were asking for none.
+
+    The page builds that URL from its own quantity state, and the stepper is
+    driven with arrow keys because an overlay eats real clicks there — so the
+    resale SEARCH goes out as qty=1 while the offer link is built from state
+    that never moved off zero. Rather than fight that, this constructs the URL
+    from values we already hold and are certain of.
+
+    Passing `qty` explicitly is the point of the function. WANTED_QUANTITY is
+    one and must stay one; it is named here so that the number in the URL is
+    something this project states rather than something it inherits from a
+    control it cannot reliably read.
+    """
+    from .sources.browser import _event_id_from_url
+
+    if not listing_id:
+        return ""
+    event_id = _event_id_from_url(getattr(event, "url", "") or "")
+    if not event_id:
+        return ""
+    wanted = config.WANTED_QUANTITY if qty is None else qty
+    # A zero here would rebuild the exact bug this exists to fix.
+    if not wanted or wanted < 1:
+        return ""
+    host = "secure.ticketmaster.ie"
+    try:
+        netloc = urllib.parse.urlsplit(event.url).netloc
+        # Follow the event's own domain, so an .ie event goes to the .ie
+        # checkout and a future .co.uk one does not silently cross countries.
+        if netloc.endswith("ticketmaster.co.uk"):
+            host = "secure.ticketmaster.co.uk"
+        elif netloc.endswith("ticketmaster.com"):
+            host = "secure.ticketmaster.com"
+    except Exception:
+        pass
+    return f"https://{host}/{event_id}/{listing_id}?qty={int(wanted)}"
+
+
 def describe_offer(listing: dict) -> str:
     """One line about the listing Ticketmaster refused, for an alert.
 
@@ -938,6 +1003,10 @@ class HoldResult:
     offer_type: str = ""
     #: The listing line as Ticketmaster describes it — type, section, price.
     offer_summary: str = ""
+    #: Did this attempt go straight to the offer URL rather than clicking the
+    #: row? Recorded so the first hold can be attributed, and so "the direct
+    #: path works" stops being a claim and becomes a column.
+    used_direct: bool = False
     #: Where the clicked row pointed, if it pointed anywhere. An href here is
     #: the direct path; an empty string after a click means the row was
     #: scripted and there is no URL to shortcut to.
@@ -2098,177 +2167,237 @@ def _secure_once(session: BuySession, event, listing,
             result.note(result.reason)
             return result
 
-        # Same quantity discipline as the watcher: the page defaults to 2 and
-        # resale results are filtered by quantity, so asking for the wrong
-        # number manufactures a refusal against a listing that is really there.
-        session.set_quantity(config.WANTED_QUANTITY, result)
-        result.mark("quantity")
-
-        # Press search, and if the button is not there, reload once and press
-        # again.
+        # Go straight to the offer, if we know which listing we are after.
         #
-        # The retry is not defensive padding. "Waiting for the search button
-        # to be visible" timing out is the single most common browser failure
-        # this project has — thirteen occurrences in the log — and on the
-        # watching side it costs one poll out of hundreds, which is why it was
-        # never worth handling there. On 2026-08-21 at 05:57 it happened HERE
-        # instead, on a real weekend listing, and the attempt simply returned:
-        # ten seconds setting a quantity, fifteen more waiting for a button,
-        # and a ticket lost to a page that had gone stale in a warm browser.
+        # This is the fix for the reason nothing has ever been held, and the
+        # shortcut is the smaller half of it — see offer_url(). Clicking the
+        # row makes the page build its own link, and the page has built that
+        # link with qty=0 on all eighteen attempts ever traced, which
+        # Ticketmaster redirects to the "sold or removed" screen. Constructing
+        # it here is what puts a 1 in the request.
         #
-        # A parked page is the likeliest cause and a reload is the obvious
-        # answer to it, which is what makes the omission galling rather than
-        # subtle. Bounded at one extra go and charged to the same deadline as
-        # everything else, so a page that is genuinely broken still fails
-        # inside the window instead of eating it.
-        pressed = False
-        for press_attempt in range(2):
+        # It also skips the quantity, the search and the panel wait — about
+        # twenty of the twenty-two seconds an attempt spends — which matters
+        # much less than it once seemed to, because a malformed request was
+        # never going to be rescued by arriving sooner.
+        #
+        # The old path stays underneath as the fallback. It has never secured
+        # anything, but it is the one that has met every shape this page can
+        # take, and a direct URL that turns out to be refused for some other
+        # reason must not leave the attempt with nowhere to go.
+        wanted_id = (getattr(listing, "listing_id", "") or "")
+        direct = offer_url(event, wanted_id) if config.DIRECT_OFFER else ""
+        if direct:
+            result.note(f"going straight to the offer: {direct}")
             try:
-                page.get_by_role(
-                    "button", name=SEARCH_BUTTONS).first.click(timeout=15_000)
-                pressed = True
-                break
+                page.goto(direct, wait_until="domcontentloaded",
+                          timeout=config.PAGE_TIMEOUT_MS)
+                result.used_direct = True
+                result.mark("direct")
             except (PlaywrightTimeout, PlaywrightError) as exc:
-                # Second go, or no time left to make one: report and stop.
-                # mark() first, so the seconds spent failing are attributed to
-                # the step that failed rather than vanishing from the record.
-                if press_attempt or out_of_time():
-                    result.mark("search")
-                    # WHY there was no button. A challenge screen and a slow
-                    # page produce the identical Playwright timeout, and they
-                    # call for opposite responses — one is worth waiting out,
-                    # the other is not — so for three failures on 2026-08-22
-                    # they were reported identically as "could not press
-                    # search", which reads as a selector problem and is not.
-                    hit = challenge_markers(page)
-                    if hit:
-                        result.challenged = True
-                        result.reason = (
-                            f"Ticketmaster is showing the buying browser a "
-                            f"block screen rather than the event page "
-                            f"({hit[0]}). This is not a selector problem and "
-                            f"not a lost race — the watcher cannot reach the "
-                            f"listing at all right now. Buy it by hand from "
-                            f"the link in the availability email."
-                        )
-                    else:
-                        result.reason = (
-                            f"could not press search in the buying browser"
-                            f"{' even after reloading' if press_attempt else ''}"
-                            f": {exc}"
-                        )
-                    result.note(result.reason)
-                    return result
-                result.note("the search button never became clickable — "
-                            "reloading the page and trying once more")
-                try:
-                    page.goto(event.url, wait_until="domcontentloaded")
-                    # The reload resets the stepper to the page default of 2,
-                    # and searching for the wrong number manufactures a
-                    # refusal against a listing that is really there.
-                    session.set_quantity(config.WANTED_QUANTITY, result)
-                except (PlaywrightTimeout, PlaywrightError) as reload_exc:
-                    result.mark("search")
-                    result.reason = (
-                        f"the search button never appeared and the page could "
-                        f"not be reloaded either: {reload_exc}"
-                    )
-                    result.note(result.reason)
-                    return result
-        result.mark("search")
-        if pressed:
-            result.note(f"searched for {config.WANTED_QUANTITY}")
-
-        if out_of_time():
-            return result
-
-        # Wait for the panel before looking for anything in it. Pressing
-        # search does not produce listings — a separate call has to answer and
-        # the panel has to paint. Skipping this is why the first three real
-        # attempts all reported the listing as gone. See await_listings().
-        session.await_listings(result, budget_s=max(5.0, deadline - time.monotonic()))
-        result.mark("panel")
-
-        if out_of_time():
-            return result
-
-        # Find the listing row. Matched on the section rather than on the
-        # listing id, because the id is an API field and has never been seen
-        # in the rendered page — and section plus price is what distinguishes
-        # one row from another when several are live.
-        row = _find_listing_row(page, listing, result)
-        result.mark("find_row")
-        if row is None:
-            # Do not guess at why. "Gone" and "not drawn" call for opposite
-            # responses — one means the race was lost and nothing can be done,
-            # the other means this code looked too early and is fixable — and
-            # for three attempts they were reported identically, as the former.
-            # The endpoint that the panel is a drawing of can tell them apart.
+                result.note(f"the direct offer link would not load ({type(exc).__name__})"
+                            f" — falling back to the search")
+                direct = ""
+        if direct:
+            # Carry on only with positive evidence of where we landed.
             #
-            # Asked through _probe_after_gone rather than by a second reader
-            # written inline here, which is what this used to be. The inline
-            # version had two faults, and both were invisible because they
-            # only showed on the losing path.
-            #
-            # It read `data["picks"] or data["listings"]` where the probe
-            # reads `picks` alone — two answers to one question about one
-            # payload, one of which must be wrong. And it kept its finding in
-            # a local variable, so `still_listed_after` stayed None even when
-            # the feed had given a definite answer. That is not merely a gap
-            # in the record: secure() decides whether to go back by reading
-            # that field, so the branch below that concludes the ticket was
-            # THERE — the one case a retry can win — returned instead of
-            # retrying, every time. Fourteen attempts, and the retry has never
-            # once fired.
-            _probe_after_gone(session, event, listing, result, page)
-            if result.still_listed_after:
-                result.reason = (
-                    f"the resale endpoint still shows "
-                    f"{len(result.ids_after) or 'some'} listing(s), but no row "
-                    f"for them could be found on the page. That is a rendering "
-                    f"or selector problem in the buying browser, not a lost "
-                    f"race — the ticket was there and reachable by hand."
-                )
-            elif result.still_listed_after is False:
-                result.reason = (
-                    "the listing had genuinely sold — the resale endpoint "
-                    "reports nothing left. The race was lost at the last step."
-                )
+            # A basket is the win. The listing's own page is a good sign and
+            # the loop below finishes the job. ANYTHING ELSE falls back — the
+            # refusal screens, and equally a page this does not recognise at
+            # all, because "the URL loaded" is not "the URL worked" and a
+            # silent unknown is how a shortcut turns into a dead end with no
+            # second chance. The search path is slower and has met every shape
+            # this site can take; it is the right thing to be behind us.
+            if _basket_is_live(page, BASKET_MARKERS):
+                result.note("the direct offer link went straight to a basket")
+            elif _page_says(page, LISTING_DETAIL_MARKERS, all_of=True):
+                result.note("the direct offer link reached the listing's own page")
             else:
-                result.reason = (
-                    "the listing could not be found on the page, and the resale "
-                    "endpoint could not be asked either, so whether it sold or "
-                    "simply never rendered is unknown"
-                )
-            result.note(result.reason)
-            return result
+                if _page_says(page, LISTING_GONE_MARKERS) or challenge_markers(page):
+                    result.note("the direct offer link hit a refusal — falling "
+                                "back to the search, which knows this screen")
+                else:
+                    result.note("the direct offer link landed somewhere "
+                                "unrecognised — falling back to the search")
+                direct = ""
+                try:
+                    page.goto(event.url, wait_until="domcontentloaded",
+                              timeout=config.PAGE_TIMEOUT_MS)
+                except (PlaywrightTimeout, PlaywrightError):
+                    pass
 
-        # What does this row actually point at?
-        #
-        # Recorded before the click, because after it the element is gone and
-        # the only evidence left is the error page it landed on. If the row is
-        # an anchor, its href IS the direct path the whole project has been
-        # guessing at; if it is a scripted div, that is worth knowing too,
-        # because it means no URL exists to shortcut to.
-        try:
-            for attr in ("href", "data-href", "data-url", "data-offer-id",
-                         "data-listing-id", "id"):
-                value = row.get_attribute(attr)
-                if value:
-                    result.note(f"row {attr}={value[:200]}")
-                    if attr in ("href", "data-href", "data-url"):
-                        result.row_href = value
-        except Exception:
-            pass
+        if not direct:
+            # Same quantity discipline as the watcher: the page defaults to 2 and
+            # resale results are filtered by quantity, so asking for the wrong
+            # number manufactures a refusal against a listing that is really there.
+            session.set_quantity(config.WANTED_QUANTITY, result)
+            result.mark("quantity")
 
-        try:
-            row.click(timeout=10_000)
-            result.mark("click")
-            result.note("clicked into the listing")
-        except (PlaywrightTimeout, PlaywrightError) as exc:
-            result.reason = f"could not click the listing: {exc}"
-            result.note(result.reason)
-            return result
+            # Press search, and if the button is not there, reload once and press
+            # again.
+            #
+            # The retry is not defensive padding. "Waiting for the search button
+            # to be visible" timing out is the single most common browser failure
+            # this project has — thirteen occurrences in the log — and on the
+            # watching side it costs one poll out of hundreds, which is why it was
+            # never worth handling there. On 2026-08-21 at 05:57 it happened HERE
+            # instead, on a real weekend listing, and the attempt simply returned:
+            # ten seconds setting a quantity, fifteen more waiting for a button,
+            # and a ticket lost to a page that had gone stale in a warm browser.
+            #
+            # A parked page is the likeliest cause and a reload is the obvious
+            # answer to it, which is what makes the omission galling rather than
+            # subtle. Bounded at one extra go and charged to the same deadline as
+            # everything else, so a page that is genuinely broken still fails
+            # inside the window instead of eating it.
+            pressed = False
+            for press_attempt in range(2):
+                try:
+                    page.get_by_role(
+                        "button", name=SEARCH_BUTTONS).first.click(timeout=15_000)
+                    pressed = True
+                    break
+                except (PlaywrightTimeout, PlaywrightError) as exc:
+                    # Second go, or no time left to make one: report and stop.
+                    # mark() first, so the seconds spent failing are attributed to
+                    # the step that failed rather than vanishing from the record.
+                    if press_attempt or out_of_time():
+                        result.mark("search")
+                        # WHY there was no button. A challenge screen and a slow
+                        # page produce the identical Playwright timeout, and they
+                        # call for opposite responses — one is worth waiting out,
+                        # the other is not — so for three failures on 2026-08-22
+                        # they were reported identically as "could not press
+                        # search", which reads as a selector problem and is not.
+                        hit = challenge_markers(page)
+                        if hit:
+                            result.challenged = True
+                            result.reason = (
+                                f"Ticketmaster is showing the buying browser a "
+                                f"block screen rather than the event page "
+                                f"({hit[0]}). This is not a selector problem and "
+                                f"not a lost race — the watcher cannot reach the "
+                                f"listing at all right now. Buy it by hand from "
+                                f"the link in the availability email."
+                            )
+                        else:
+                            result.reason = (
+                                f"could not press search in the buying browser"
+                                f"{' even after reloading' if press_attempt else ''}"
+                                f": {exc}"
+                            )
+                        result.note(result.reason)
+                        return result
+                    result.note("the search button never became clickable — "
+                                "reloading the page and trying once more")
+                    try:
+                        page.goto(event.url, wait_until="domcontentloaded")
+                        # The reload resets the stepper to the page default of 2,
+                        # and searching for the wrong number manufactures a
+                        # refusal against a listing that is really there.
+                        session.set_quantity(config.WANTED_QUANTITY, result)
+                    except (PlaywrightTimeout, PlaywrightError) as reload_exc:
+                        result.mark("search")
+                        result.reason = (
+                            f"the search button never appeared and the page could "
+                            f"not be reloaded either: {reload_exc}"
+                        )
+                        result.note(result.reason)
+                        return result
+            result.mark("search")
+            if pressed:
+                result.note(f"searched for {config.WANTED_QUANTITY}")
+
+            if out_of_time():
+                return result
+
+            # Wait for the panel before looking for anything in it. Pressing
+            # search does not produce listings — a separate call has to answer and
+            # the panel has to paint. Skipping this is why the first three real
+            # attempts all reported the listing as gone. See await_listings().
+            session.await_listings(result, budget_s=max(5.0, deadline - time.monotonic()))
+            result.mark("panel")
+
+            if out_of_time():
+                return result
+
+            # Find the listing row. Matched on the section rather than on the
+            # listing id, because the id is an API field and has never been seen
+            # in the rendered page — and section plus price is what distinguishes
+            # one row from another when several are live.
+            row = _find_listing_row(page, listing, result)
+            result.mark("find_row")
+            if row is None:
+                # Do not guess at why. "Gone" and "not drawn" call for opposite
+                # responses — one means the race was lost and nothing can be done,
+                # the other means this code looked too early and is fixable — and
+                # for three attempts they were reported identically, as the former.
+                # The endpoint that the panel is a drawing of can tell them apart.
+                #
+                # Asked through _probe_after_gone rather than by a second reader
+                # written inline here, which is what this used to be. The inline
+                # version had two faults, and both were invisible because they
+                # only showed on the losing path.
+                #
+                # It read `data["picks"] or data["listings"]` where the probe
+                # reads `picks` alone — two answers to one question about one
+                # payload, one of which must be wrong. And it kept its finding in
+                # a local variable, so `still_listed_after` stayed None even when
+                # the feed had given a definite answer. That is not merely a gap
+                # in the record: secure() decides whether to go back by reading
+                # that field, so the branch below that concludes the ticket was
+                # THERE — the one case a retry can win — returned instead of
+                # retrying, every time. Fourteen attempts, and the retry has never
+                # once fired.
+                _probe_after_gone(session, event, listing, result, page)
+                if result.still_listed_after:
+                    result.reason = (
+                        f"the resale endpoint still shows "
+                        f"{len(result.ids_after) or 'some'} listing(s), but no row "
+                        f"for them could be found on the page. That is a rendering "
+                        f"or selector problem in the buying browser, not a lost "
+                        f"race — the ticket was there and reachable by hand."
+                    )
+                elif result.still_listed_after is False:
+                    result.reason = (
+                        "the listing had genuinely sold — the resale endpoint "
+                        "reports nothing left. The race was lost at the last step."
+                    )
+                else:
+                    result.reason = (
+                        "the listing could not be found on the page, and the resale "
+                        "endpoint could not be asked either, so whether it sold or "
+                        "simply never rendered is unknown"
+                    )
+                result.note(result.reason)
+                return result
+
+            # What does this row actually point at?
+            #
+            # Recorded before the click, because after it the element is gone and
+            # the only evidence left is the error page it landed on. If the row is
+            # an anchor, its href IS the direct path the whole project has been
+            # guessing at; if it is a scripted div, that is worth knowing too,
+            # because it means no URL exists to shortcut to.
+            try:
+                for attr in ("href", "data-href", "data-url", "data-offer-id",
+                             "data-listing-id", "id"):
+                    value = row.get_attribute(attr)
+                    if value:
+                        result.note(f"row {attr}={value[:200]}")
+                        if attr in ("href", "data-href", "data-url"):
+                            result.row_href = value
+            except Exception:
+                pass
+
+            try:
+                row.click(timeout=10_000)
+                result.mark("click")
+                result.note("clicked into the listing")
+            except (PlaywrightTimeout, PlaywrightError) as exc:
+                result.reason = f"could not click the listing: {exc}"
+                result.note(result.reason)
+                return result
 
         # Then follow the flow only as far as a basket. Each of these is
         # optional — Ticketmaster's resale path has varied — and none of them
@@ -2645,6 +2774,7 @@ def capture_failure(page, result: "HoldResult", event, attempt: int = 1) -> str:
         # these answer whether a direct path exists at all — see
         # Listing.offer_ids and OfferTrace.
         "offer_ids": list(result.offer_ids),
+        "used_direct": result.used_direct,
         "row_href": result.row_href,
         "trace": list(result.trace),
         "notes": list(result.notes),

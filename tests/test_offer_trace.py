@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
-"""What the page does with a listing, recorded without asking it anything.
+"""Why no ticket has ever been held: we were asking for none.
 
-Ten distinct listings have now been refused, every one of them carrying
-`"active": true` in Ticketmaster's own error payload — including one clicked
-5.3 seconds after the sweep saw it. That rules out speed as the explanation
-and leaves two that this project cannot yet tell apart:
+OfferTrace was built to settle a question. Ten distinct listings had been
+refused, every one carrying `"active": true` in Ticketmaster's own error
+payload, one of them clicked 5.3 seconds after the sweep saw it — which ruled
+out speed and left two explanations that looked identical from outside: the
+ticket is in somebody else's basket, or this client may not make an offer at
+all. Rather than guess, it recorded the traffic the attempt was already
+making.
 
-  * the listing really is in somebody else's basket, or
-  * this client is not allowed to make an offer at all.
+It answered on the first listing, and the answer was neither. On 2026-08-24,
+across four listings and eighteen requests without exception, the page asked:
 
-They call for opposite responses — wait, or stop waiting and buy by hand — and
-the evidence that separates them is the request that produced the q404 and
-what it said. The landing page says "not found" and nothing more.
+    GET https://secure.ticketmaster.ie/{eventId}/{listingId}?qty=0
+        -> 302 -> /error/q404
 
-So OfferTrace listens to traffic the attempt was making anyway. The
-alternative — deriving an offer URL from `offerIds` and firing it — is
-guesswork against an endpoint never observed, on a connection blocked
-twenty-three times, and it is exactly how the next block gets earned.
+Zero tickets. Ticketmaster redirects a zero-quantity offer to the same "sold
+or removed" screen a genuinely gone listing produces, and every securing
+attempt this project has ever made has been refused for that and recorded as a
+lost race. The listings were `active: true` because nothing was ever wrong
+with them.
 
-The tests that matter most here are the redaction ones. This browser carries a
-live Ticketmaster session, and a trace written to disk must never be a file
-that lets its reader become David.
+So this file now covers both halves: the trace that found it, and offer_url(),
+which builds the same request with the quantity we actually want. The tests
+that must never be got wrong are the qty ones — a zero rebuilds the bug — and
+the redaction ones, because this browser carries a live Ticketmaster session
+and a trace written to disk must never be a file that lets its reader become
+David.
 
 Run with:  .venv/bin/python tests/test_offer_trace.py
 """
@@ -32,9 +38,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _sandbox  # noqa: F401  (isolates state, profiles and diagnostics)
 
-from ep_watcher import buyer
+from ep_watcher import buyer, config
 from ep_watcher.model import Listing
 from ep_watcher.sources.browser import _listing_from_pick
+
+
+class FakeEvent:
+    """The real Weekend Camping page, for its event id."""
+
+    slug = "weekend-camping"
+    url = ("https://www.ticketmaster.ie/electric-picnic-2026-weekend-"
+           "camping-co-laois-28-08-2026/event/18006314BD813D3E")
 
 FAILURES = []
 
@@ -214,6 +228,234 @@ r = buyer.HoldResult()
 check("trace starts empty", r.trace, [])
 check("row_href starts empty", r.row_href, "")
 check("offer_ids start empty", r.offer_ids, ())
+
+
+# ── The offer URL, and the qty=0 bug it exists to fix ────────────────────────
+#
+# The trace of 2026-08-24 caught the page requesting, on four separate
+# listings and eighteen times without exception:
+#
+#     GET https://secure.ticketmaster.ie/{eventId}/{listingId}?qty=0
+#         -> 302 -> /error/q404
+#
+# Zero. Every securing attempt this project has ever made asked Ticketmaster
+# for no tickets and was refused for it, and the refusal was recorded as
+# somebody else having taken the listing. That retires both standing theories:
+# the listings were always "active": true because nothing was wrong with them,
+# and the 5.3-second attempt failed like all the rest because speed cannot
+# rescue a malformed request.
+
+print("\noffer_url builds what the page builds, with the quantity we want")
+url = buyer.offer_url(FakeEvent(), "lp62f5thgs")
+check("the observed format, exactly",
+      url, "https://secure.ticketmaster.ie/18006314BD813D3E/lp62f5thgs?qty=1")
+
+print("\nthe quantity is never zero — that is the whole bug")
+falsy("no qty=0 by default", "qty=0" in buyer.offer_url(FakeEvent(), "lp62f5thgs"))
+check("an explicit zero refuses to build a URL at all",
+      buyer.offer_url(FakeEvent(), "lp62f5thgs", qty=0), "")
+check("and so does a negative one",
+      buyer.offer_url(FakeEvent(), "lp62f5thgs", qty=-1), "")
+truthy("the default follows WANTED_QUANTITY",
+       f"qty={config.WANTED_QUANTITY}" in buyer.offer_url(FakeEvent(), "lp62f5thgs"))
+check("WANTED_QUANTITY is still one", config.WANTED_QUANTITY, 1)
+
+print("\nit refuses rather than guesses when it lacks a part")
+check("no listing id", buyer.offer_url(FakeEvent(), ""), "")
+check("no listing id, none invented", buyer.offer_url(FakeEvent(), None), "")
+
+
+class NoIdEvent:
+    url = "https://www.ticketmaster.ie/some-page-with-no-event-id"
+
+
+check("no event id in the url", buyer.offer_url(NoIdEvent(), "lp62f5thgs"), "")
+
+
+class BustedEvent:
+    url = None
+
+
+check("no url at all", buyer.offer_url(BustedEvent(), "lp62f5thgs"), "")
+
+print("\nit follows the event's own country rather than crossing borders")
+class UKEvent:
+    url = "https://www.ticketmaster.co.uk/x/event/18006314BD813D3E"
+
+
+truthy("a .co.uk event goes to the .co.uk checkout",
+       buyer.offer_url(UKEvent(), "lp62f5thgs").startswith(
+           "https://secure.ticketmaster.co.uk/"))
+truthy("an .ie event stays on .ie",
+       buyer.offer_url(FakeEvent(), "lp62f5thgs").startswith(
+           "https://secure.ticketmaster.ie/"))
+
+print("\nthe URL agrees with what the feed already told us")
+# The listing segment must equal the offerId's own listing id, which is what
+# the eighteen traced requests showed in every case.
+for offer_id in ("HF6GYMRXOQ2GQMTE", "HF6GYMDXG44WUYZQMZWA"):
+    listing_id = buyer.decode_offer_id(offer_id).split("|", 1)[1]
+    truthy(f"{offer_id} points at its own listing",
+           f"/{listing_id}?" in buyer.offer_url(FakeEvent(), listing_id))
+
+
+
+# ── The attempt must actually take that path ─────────────────────────────────
+#
+# A correct URL builder that nothing calls is what the last fortnight already
+# had: `offerIds` sat parsed-and-discarded in the feed the whole time. These
+# drive _secure_once against a fake page and assert on the URL it navigates to.
+
+class DirectPage:
+    """Records where it is sent, and reports whatever body it is given."""
+
+    def __init__(self, body="", url="https://www.ticketmaster.ie/x/event/18006314BD813D3E"):
+        self.url = url
+        self.gotos = []
+        self.body = body
+        self.searched = False
+
+    def goto(self, url, wait_until=None, timeout=None):
+        self.gotos.append(url)
+        self.url = url
+
+    def inner_text(self, _sel="body"):
+        return self.body
+
+    def title(self):
+        return ""
+
+    def get_by_role(self, *a, **k):
+        self.searched = True
+        raise AssertionError("the direct path must not press search")
+
+    def get_by_text(self, *a, **k):
+        raise AssertionError("the direct path must not hunt for a row")
+
+
+class DirectSession:
+    def __init__(self, page):
+        self._page = page
+
+    @property
+    def page(self):
+        return self._page
+
+    def set_quantity(self, qty, result):
+        raise AssertionError("the direct path must not touch the stepper")
+
+    def await_listings(self, result, budget_s):
+        raise AssertionError("the direct path must not wait for the panel")
+
+    def listings_now(self, event, qty):
+        return None
+
+
+class RealListing:
+    listing_id = "lp62f5thgs"
+    offer_ids = ("HF6GY4BWGJTDK5DIM5ZQ",)
+    section = "STNDNG"
+
+
+buyer.session_evidence = lambda *a, **k: {"signed_in": True, "reason": "test"}
+
+print("\n_secure_once goes straight to the offer URL")
+page = DirectPage(body="Place Order Cancel Order")   # a live basket
+result = buyer._secure_once(DirectSession(page), FakeEvent(), RealListing())
+truthy("it navigated somewhere", page.gotos)
+target = page.gotos[-1]
+check("to the offer URL, with qty=1",
+      target, "https://secure.ticketmaster.ie/18006314BD813D3E/lp62f5thgs?qty=1")
+falsy("never with qty=0", "qty=0" in " ".join(page.gotos))
+truthy("and it recorded taking the direct path", result.used_direct)
+truthy("and reached the basket", result.secured)
+
+print("\nthe direct path is skippable, and then the old one runs")
+was = config.DIRECT_OFFER
+try:
+    config.DIRECT_OFFER = False
+    page = DirectPage(body="Place Order Cancel Order")
+
+    class TolerantSession(DirectSession):
+        def set_quantity(self, qty, result):
+            self.qty = qty
+
+        def await_listings(self, result, budget_s):
+            return True
+
+    sess = TolerantSession(page)
+    try:
+        buyer._secure_once(sess, FakeEvent(), RealListing())
+    except AssertionError:
+        pass   # it reached get_by_role, which is the old path — that is the point
+    falsy("no offer URL was built", any("secure.ticketmaster" in g for g in page.gotos))
+    check("and the stepper was used instead", getattr(sess, "qty", None), 1)
+finally:
+    config.DIRECT_OFFER = was
+
+print("\na listing with no id falls back rather than building a broken URL")
+page = DirectPage(body="Place Order Cancel Order")
+
+
+class NoIdListing:
+    listing_id = ""
+    offer_ids = ()
+    section = "STNDNG"
+
+
+class TolerantSession2(DirectSession):
+    def set_quantity(self, qty, result):
+        self.qty = qty
+
+    def await_listings(self, result, budget_s):
+        return True
+
+
+sess = TolerantSession2(page)
+try:
+    buyer._secure_once(sess, FakeEvent(), NoIdListing())
+except AssertionError:
+    pass
+falsy("no offer URL", any("secure.ticketmaster" in g for g in page.gotos))
+check("it used the stepper path", getattr(sess, "qty", None), 1)
+
+
+print("\nan unrecognised landing page falls back rather than pressing on")
+# "The URL loaded" is not "the URL worked". A shortcut that carries on into a
+# page it cannot identify is a dead end with no second chance, so anything
+# that is not a basket and not the listing's own page goes back to the search.
+page = DirectPage(body="some page we have never seen before")
+
+
+class CountingSession(DirectSession):
+    def set_quantity(self, qty, result):
+        self.qty = qty
+
+    def await_listings(self, result, budget_s):
+        return True
+
+
+sess = CountingSession(page)
+try:
+    buyer._secure_once(sess, FakeEvent(), RealListing())
+except AssertionError:
+    pass   # reaching get_by_role IS the fallback engaging
+truthy("it tried the offer URL first",
+       any("secure.ticketmaster" in g for g in page.gotos))
+truthy("then went back to the event page",
+       any("/event/18006314BD813D3E" in g for g in page.gotos[1:]))
+check("and used the stepper after all", getattr(sess, "qty", None), 1)
+
+print("\na refusal on the direct link also falls back")
+page = DirectPage(body="Sorry, these tickets are unavailable")
+sess = CountingSession(page)
+try:
+    buyer._secure_once(sess, FakeEvent(), RealListing())
+except AssertionError:
+    pass
+truthy("it fell back rather than giving up",
+       any("/event/18006314BD813D3E" in g for g in page.gotos[1:]))
+
 
 print()
 if FAILURES:

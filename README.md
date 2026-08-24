@@ -578,6 +578,58 @@ It was refused anyway.
 
 ---
 
+### The reason nothing was ever held: we were asking for zero tickets
+
+Settled on 2026-08-24 by recording what the page actually does. Across four
+listings and **eighteen requests without a single exception**, clicking a
+resale row made the browser ask:
+
+```http
+GET https://secure.ticketmaster.ie/{eventId}/{listingId}?qty=0
+    -> 302 -> /error/q404
+```
+
+`qty=0`. Ticketmaster redirects a zero-quantity offer to the same "sold or
+removed" screen that a genuinely gone listing produces — so **every securing
+attempt this project has ever made asked for no tickets, was refused for it,
+and recorded the refusal as somebody else having taken the listing.**
+
+That one field explains everything and retires both standing theories:
+
+- Ten distinct listings refused, every one `"active": true` — of course they
+  were. Nothing was ever wrong with the tickets.
+- One clicked **5.3 seconds** after the sweep saw it, refused identically —
+  of course it was. Speed cannot rescue a malformed request.
+- It was never a lost race, and never somebody else's basket.
+
+The page builds that link from its own quantity state, and the stepper has to
+be driven with arrow keys because an overlay eats real clicks on it. So the
+resale *search* goes out as `qty=1` while the *offer* link is built from state
+that never left zero.
+
+The fix is not to fight that state but to stop depending on it. The attempt
+now goes straight to the offer URL, built from two things the resale feed
+already hands us:
+
+- the **event id**, already parsed out of the event URL, and
+- the **listing id** — which is also what the feed's `offerIds` contain. They
+  are not opaque: base32-decoded, every one observed is `9|{resaleListingId}`
+  (`HF6GYMRXOQ2GQMTE` → `9|l27t4h2d`). In all eighteen traced requests the
+  listing segment of the URL equalled exactly that.
+
+Skipping the quantity, the search and the panel wait saves about twenty of an
+attempt's twenty-two seconds — which now looks like the *smaller* half of the
+benefit. `EP_DIRECT_OFFER=0` reverts to clicking the row.
+
+The old search path stays underneath as the fallback, and the attempt only
+carries on down the direct one with **positive** evidence of where it landed —
+a basket, or the listing's own page. A refusal screen or a page it cannot
+identify falls back, because "the URL loaded" is not "the URL worked".
+
+**Still unproven:** that `qty=1` completes. No listing has been live since the
+change. The evidence that it is the right request is strong — it is the page's
+own URL with the one field corrected — but treat the next find as the test.
+
 ### It was never a race, and the refusal page says so
 
 The single most useful thing this project has found, and it was sitting
@@ -1048,6 +1100,7 @@ Environment variables, all optional:
 | `EP_SECURE_TIMEOUT_SECONDS` | `300` | Seconds to spend trying to secure before giving up |
 | `EP_SECURE_ACTIVE_TIMEOUT` | `720` | The longer window used when Ticketmaster's own refusal page says the listing is still `active` — i.e. it did not sell, somebody is holding it, and a basket lapse is a real thing to wait for. Twelve minutes because a Ticketmaster basket holds for about ten, so anything shorter cannot see the event it is waiting for |
 | `EP_SECURE_ACTIVE_RETRIES` | `10` | Goes at a listing the refusal page calls active, against `EP_SECURE_RETRIES` for one the feed merely still shows. Not unlimited: if a basket has not lapsed in eight minutes, the buyer behind it is paying rather than dithering |
+| `EP_DIRECT_OFFER` | `1` | Go straight to `secure.ticketmaster.ie/{eventId}/{listingId}?qty=1` instead of clicking the resale row. On by default because clicking the row is what lost every ticket: the page built that same link with `qty=0` on all eighteen requests ever traced, and Ticketmaster 302s a zero-quantity offer to the "sold or removed" screen. Set `0` to go back to clicking |
 | `EP_SECURE_RELIST_POLL` | `10` | Seconds between resale-feed checks while waiting out a basket. The pause watches the endpoint rather than the clock — one XHR a look instead of a whole search a retry, which is what keeps a ten-go chase from becoming the ~55 searches/hour that draws a block |
 | `EP_SECURE_MIN_INTERVAL` | `60` | Shortest gap between two securing attempts on one page. Separate from the alerting re-nag on purpose: a repeat email is noise, a repeat attempt is the job. Before this they shared a clock, and on 2026-08-20 stock visible at 20:04 and 20:06 drew no attempt because David had been emailed at 20:02 |
 | `EP_HOLD_PAUSE_EXTRA` | `10` | Minutes added to the hold window during which nothing will restart the watcher |
