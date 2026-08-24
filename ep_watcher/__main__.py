@@ -221,10 +221,20 @@ def cmd_probe_offer(_args) -> int:
         dst = Path(tempfile.mkdtemp(prefix="ep-probe-signedin-"))
         shutil.copytree(
             config.BUY_PROFILE_DIR, dst, dirs_exist_ok=True,
-            # Lock files and sockets belong to the running Chrome and either
-            # refuse to copy or confuse the one we are about to start.
+            # These belong to the Chrome that is running right now, and every
+            # one of them either refuses to copy or confuses the browser we
+            # are about to start. `RunningChromeVersion` is the one that bit:
+            # it is a symlink pointing at a live process's version file, so it
+            # dangles the moment you read it from outside, and copytree fails
+            # the entire copy on it rather than skipping it.
             ignore=shutil.ignore_patterns(
-                "Singleton*", "*.lock", "lockfile", "*.sock"),
+                "Singleton*", "RunningChromeVersion", "*.lock", "lockfile",
+                "*.sock", "*.pid"),
+            # Belt and braces for anything else transient the live browser
+            # leaves lying about. A profile copy that dies on one volatile
+            # file is a diagnostic that only works when the thing being
+            # diagnosed is stopped, which is no diagnostic at all.
+            ignore_dangling_symlinks=True,
         )
         return dst
 
@@ -235,7 +245,15 @@ def cmd_probe_offer(_args) -> int:
               f"{type(exc).__name__}: {exc}\n")
         return 1
 
-    events = [e for e in config.EVENTS if getattr(e, "secure_priority", 0)]
+    # Only pages that are actually being watched.
+    #
+    # `secure_priority` alone would include the Early Entry Pass, which David
+    # switched off precisely so that every request goes at finding a weekend
+    # ticket. Spending one here on a page he has turned off would be a small
+    # betrayal of that, and the probe learns nothing from it either: the
+    # question is why weekend checkouts are refused.
+    events = [e for e in config.EVENTS
+              if e.searchable() and getattr(e, "secure_priority", 0)]
     listing_id = ""
     event = None
 
