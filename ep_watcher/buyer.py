@@ -198,6 +198,215 @@ def read_error_context(url: str) -> dict:
         return {}
 
 
+#: Query parameters that may carry something worth stealing. Their values are
+#: replaced with a length, never recorded.
+#:
+#: An allowlist would be safer still and is not possible here: the whole point
+#: of the capture is that we do not yet know which parameters the offer flow
+#: uses, so we cannot enumerate the harmless ones in advance. This is the
+#: other half of that bargain — anything that smells of a credential is
+#: redacted by name, and the trace is written to a directory that already
+#: holds page captures from the signed-in browser.
+SECRET_PARAM_RE = re.compile(
+    r"(token|auth|session|sid|password|passwd|secret|signature|sig|key|"
+    r"bearer|jwt|cookie|csrf|nonce|otp|card|cvv|cvc)", re.I)
+
+#: Headers never written to disk. The buying browser carries David's live
+#: Ticketmaster session; a trace that recorded these would be a file on the
+#: laptop that lets anyone who reads it become him.
+SECRET_HEADERS = frozenset({
+    "cookie", "set-cookie", "authorization", "proxy-authorization",
+    "x-csrf-token", "x-xsrf-token", "x-api-key", "api-key",
+})
+
+#: Hosts worth recording. Analytics and ad traffic is most of the volume and
+#: none of the answer, and leaving it in makes a trace nobody reads.
+TRACE_HOSTS = ("ticketmaster.", "livenation.", "ticketweb.")
+
+
+def _redact_url(url: str) -> str:
+    """A URL safe to write down: same shape, no credentials."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if not parts.query:
+            return url
+        kept = []
+        for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+            if SECRET_PARAM_RE.search(key):
+                kept.append((key, f"<redacted:{len(value)}>"))
+            elif len(value) > 200:
+                # Long blobs are the ctx-style payloads. Keep the head so the
+                # shape is recognisable; the decoder can be pointed at the
+                # real URL if one is ever needed.
+                kept.append((key, value[:200] + f"<+{len(value) - 200}>"))
+            else:
+                kept.append((key, value))
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, parts.path,
+             urllib.parse.urlencode(kept), parts.fragment))
+    except Exception:
+        return "<unparseable url>"
+
+
+class OfferTrace:
+    """Record what the page does when a listing is clicked. Observe only.
+
+    The question this exists to answer is the one everything else in this
+    module is now blocked on: **which endpoint refuses us, and what does it
+    actually say?**
+
+    What we have is the q404 landing page, which is Ticketmaster's error
+    screen and says nothing beyond "not found" plus the listing it was not
+    found for. What produced it — a navigation, an XHR, a redirect chain, and
+    with what status and body — is invisible, so "the listing is in somebody's
+    basket" and "this client is not allowed to make offers" remain
+    indistinguishable after ten refusals that were all `active: true`.
+
+    A trace settles it, and settles it without a single extra request: this
+    listens to traffic the attempt was making anyway. That distinction is the
+    whole design. The tempting alternative — construct an offer URL from the
+    `offerIds` we can now derive and fire it — would be faster to write and is
+    the wrong thing to do twice over: it is guesswork against an endpoint we
+    have never seen, and probing unknown URLs on a connection already blocked
+    twenty-three times is how the next block gets earned.
+
+    Nothing sensitive is written. Headers in SECRET_HEADERS are dropped
+    entirely, credential-shaped query values are replaced by their length, and
+    only Ticketmaster-family hosts are recorded at all.
+    """
+
+    #: Beyond this many entries, stop recording. A checkout page can make
+    #: hundreds of calls, and a diagnostics file nobody can read is a
+    #: diagnostics file nobody reads.
+    LIMIT = 60
+
+    def __init__(self):
+        self.entries = []
+        self._attached = None
+
+    def _interesting(self, url: str) -> bool:
+        return any(h in (url or "") for h in TRACE_HOSTS)
+
+    def attach(self, page) -> None:
+        """Start listening. Never raises — a broken trace must not cost a hold."""
+        try:
+            page.on("request", self._on_request)
+            page.on("response", self._on_response)
+            page.on("framenavigated", self._on_nav)
+            self._attached = page
+        except Exception:
+            self._attached = None
+
+    def detach(self) -> None:
+        page, self._attached = self._attached, None
+        if page is None:
+            return
+        for event, handler in (("request", self._on_request),
+                               ("response", self._on_response),
+                               ("framenavigated", self._on_nav)):
+            try:
+                page.remove_listener(event, handler)
+            except Exception:
+                pass
+
+    def _add(self, entry: dict) -> None:
+        if len(self.entries) < self.LIMIT:
+            entry["at"] = round(time.monotonic(), 3)
+            self.entries.append(entry)
+
+    def _on_request(self, request) -> None:
+        try:
+            if not self._interesting(request.url):
+                return
+            # Navigations and form posts are the ones that carry an offer.
+            if request.method == "GET" and request.resource_type in (
+                    "image", "stylesheet", "font", "media", "script"):
+                return
+            self._add({"kind": "request", "method": request.method,
+                       "resource": request.resource_type,
+                       "url": _redact_url(request.url)})
+        except Exception:
+            pass
+
+    def _on_response(self, response) -> None:
+        try:
+            if not self._interesting(response.url):
+                return
+            status = response.status
+            # Everything that failed, plus the documents that succeeded. A
+            # 200 on an image tells us nothing; a 4xx on anything is the point.
+            if status < 400 and response.request.resource_type != "document":
+                return
+            entry = {"kind": "response", "status": status,
+                     "url": _redact_url(response.url)}
+            if status >= 400:
+                # The body of a failure is where the real error code lives —
+                # the q404 PAGE says "not found", but whatever the page called
+                # to get there may well say why.
+                try:
+                    body = response.text()
+                    entry["body"] = body[:1500] if isinstance(body, str) else ""
+                except Exception:
+                    entry["body"] = "<unreadable>"
+            self._add(entry)
+        except Exception:
+            pass
+
+    def _on_nav(self, frame) -> None:
+        try:
+            if frame.parent_frame is not None:
+                return
+            self._add({"kind": "navigated", "url": _redact_url(frame.url)})
+        except Exception:
+            pass
+
+    def summary(self) -> list:
+        return list(self.entries)
+
+
+def decode_offer_id(offer_id: str) -> str:
+    """What Ticketmaster's `offerIds` actually contain. "" if it will not decode.
+
+    Every one observed is unpadded base32 of `9|{resaleListingId}`:
+
+        HF6GYMRXOQ2GQMTE      -> 9|l27t4h2d       (2026-08-18)
+        HF6GYMDXG44WUYZQMZWA  -> 9|l0w79jc0fl     (2026-08-23)
+
+    Which means the handle is not opaque and not something we have to be given
+    — it is a pure function of the listing id the sweep already reads.
+    """
+    if not offer_id:
+        return ""
+    try:
+        # Base32 wants a length that is a multiple of eight; the feed ships it
+        # unpadded. Pad up rather than guessing at the exact count.
+        pad = (-len(offer_id)) % 8
+        return base64.b32decode(offer_id + "=" * pad).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def offer_id_for(listing_id: str) -> str:
+    """The offer handle for a listing id, derived rather than waited for.
+
+    The inverse of decode_offer_id(), and the reason both are here: this is
+    available the instant the resale feed answers, roughly twenty seconds
+    before the current path arrives at the same fact by loading the page,
+    setting a quantity, pressing search and waiting for a panel to draw.
+
+    Deliberately unused by the securing flow as it stands. Knowing the handle
+    is not knowing the URL that accepts it, and the way to learn that is to
+    watch what the page does with it — see OfferTrace — not to guess at
+    endpoints. Probing invented URLs would be both a fabricated answer and,
+    on a connection already blocked twenty-three times, a good way to earn the
+    next block. When the trace shows the real request, this is the piece that
+    makes skipping the search possible.
+    """
+    if not listing_id:
+        return ""
+    return base64.b32encode(f"9|{listing_id}".encode()).decode().rstrip("=")
+
+
 def describe_offer(listing: dict) -> str:
     """One line about the listing Ticketmaster refused, for an alert.
 
@@ -729,6 +938,18 @@ class HoldResult:
     offer_type: str = ""
     #: The listing line as Ticketmaster describes it — type, section, price.
     offer_summary: str = ""
+    #: Where the clicked row pointed, if it pointed anywhere. An href here is
+    #: the direct path; an empty string after a click means the row was
+    #: scripted and there is no URL to shortcut to.
+    row_href: str = ""
+    #: What the page did between the click and the dead end — see OfferTrace.
+    #: Observation only, and the reason it exists: the q404 screen says "not
+    #: found" and nothing else, so the endpoint that refused us and its real
+    #: error body have never once been seen.
+    trace: List[dict] = field(default_factory=list)
+    #: Ticketmaster's own offer handles for the listing we went after, from
+    #: the resale feed. Base32-decoded these read `9|{resaleListingId}`.
+    offer_ids: tuple = ()
     #: Did ANY attempt see Ticketmaster call this listing active?
     #:
     #: The counterpart of ever_listed_after, and it exists for the same reason:
@@ -1786,8 +2007,13 @@ def _secure_once(session: BuySession, event, listing,
         return True
 
     # Bound before the try so the finally can always ask where the page ended
-    # up, including when getting the page is itself what failed.
+    # up, including when getting the page is itself what failed. The trace is
+    # bound here for the same reason and a sharper one: it is READ in the
+    # finally, so a failure before it was constructed would turn any error on
+    # this path into a NameError raised from the cleanup — losing the real
+    # exception and the attempt's own account of itself.
     page = None
+    trace = OfferTrace()
 
     try:
         # Navigate BEFORE asking whether we are signed in. A freshly started
@@ -1797,6 +2023,14 @@ def _secure_once(session: BuySession, event, listing,
         # have reported a login problem on the first real listing. Caught by
         # reading the flow back on 2026-08-19, before any listing tested it.
         page = session.page
+        # Listen from here, so the trace covers the whole attempt rather than
+        # only the click. What the page requests while searching is part of
+        # the answer too — if the offer is refused before the click ever
+        # happens, that shows up here and nowhere else.
+        trace.attach(page)
+        result.offer_ids = tuple(getattr(listing, "offer_ids", ()) or ())
+        if result.offer_ids:
+            result.note(f"offer id(s) from the feed: {', '.join(result.offer_ids)}")
         # Don't reload a page we are already standing on.
         #
         # The warm browser parks on the event page precisely so an attempt can
@@ -2009,6 +2243,24 @@ def _secure_once(session: BuySession, event, listing,
             result.note(result.reason)
             return result
 
+        # What does this row actually point at?
+        #
+        # Recorded before the click, because after it the element is gone and
+        # the only evidence left is the error page it landed on. If the row is
+        # an anchor, its href IS the direct path the whole project has been
+        # guessing at; if it is a scripted div, that is worth knowing too,
+        # because it means no URL exists to shortcut to.
+        try:
+            for attr in ("href", "data-href", "data-url", "data-offer-id",
+                         "data-listing-id", "id"):
+                value = row.get_attribute(attr)
+                if value:
+                    result.note(f"row {attr}={value[:200]}")
+                    if attr in ("href", "data-href", "data-url"):
+                        result.row_href = value
+        except Exception:
+            pass
+
         try:
             row.click(timeout=10_000)
             result.mark("click")
@@ -2192,6 +2444,15 @@ def _secure_once(session: BuySession, event, listing,
                 result.landed_url = (page.url or result.landed_url)
             except Exception:
                 pass
+        # Harvest the trace and stop listening. Detaching matters: the buying
+        # browser is warm and long-lived, so a listener left attached would
+        # accumulate across every attempt for the life of the process and
+        # attribute one attempt's traffic to the next.
+        try:
+            result.trace = trace.summary()
+            trace.detach()
+        except Exception:
+            pass
         result.finished_at = time.monotonic()
         # And write down how it failed, while the page that failed is still on
         # screen. This is the only moment the evidence exists: the warm
@@ -2380,6 +2641,12 @@ def capture_failure(page, result: "HoldResult", event, attempt: int = 1) -> str:
         "ever_active": result.ever_active,
         "offer_type": result.offer_type,
         "offer_summary": result.offer_summary,
+        # The offer handles from the feed, and where the row pointed. Together
+        # these answer whether a direct path exists at all — see
+        # Listing.offer_ids and OfferTrace.
+        "offer_ids": list(result.offer_ids),
+        "row_href": result.row_href,
+        "trace": list(result.trace),
         "notes": list(result.notes),
     }
     text = ""

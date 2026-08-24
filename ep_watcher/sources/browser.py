@@ -191,12 +191,20 @@ def _listing_from_pick(pick) -> Listing:
     # is meant to be the listing's identity.
     listing_id = first("resaleListingId", "id")
 
+    # Ticketmaster's own offer handles, kept rather than discarded. See
+    # Listing.offer_ids: base32-decoded these read `9|{resaleListingId}`, so
+    # the offer identity is available the instant the feed answers instead of
+    # twenty seconds later at the end of a search.
+    offers = pick.get("offerIds")
+    offers = tuple(str(o) for o in offers) if isinstance(offers, list) else ()
+
     return Listing(
         name=" ".join(str(b) for b in bits),
         price=price,
         kind="resale",
         listing_id=str(listing_id) if listing_id is not None else None,
         section=str(section) if section is not None else None,
+        offer_ids=offers,
     )
 
 

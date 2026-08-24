@@ -662,6 +662,12 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
         listing_active=getattr(hold, "listing_active", None),
         ever_active=bool(getattr(hold, "ever_active", False)),
         offer_type=getattr(hold, "offer_type", "") or "",
+        # Where the row pointed, and how many calls the trace caught. The
+        # trace itself goes to the diagnostics file — it is too big for a log
+        # line — but "was there an href at all" is the one bit worth having
+        # queryable, because it decides whether a direct path can exist.
+        row_href=getattr(hold, "row_href", "") or "",
+        traced=len(getattr(hold, "trace", []) or []),
         # Queryable, because "how often is the buying browser being blocked"
         # is a question about the health of the whole approach, not about one
         # attempt — and answering it from prose is what took two days last

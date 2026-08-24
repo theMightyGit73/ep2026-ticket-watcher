@@ -69,6 +69,26 @@ class Listing:
     #: before".
     listing_id: Optional[str] = None
     section: Optional[str] = None
+    #: Ticketmaster's own offer handles for this listing, from the resale
+    #: feed's `offerIds`. Carried because of what they turned out to be.
+    #:
+    #: They are not opaque. Base32-decoded, every one observed is the string
+    #: `9|{resaleListingId}`:
+    #:
+    #:     HF6GYMRXOQ2GQMTE      -> 9|l27t4h2d
+    #:     HF6GYMDXG44WUYZQMZWA  -> 9|l0w79jc0fl
+    #:
+    #: So the offer identity is DERIVABLE, and derivable at the moment the
+    #: sweep first sees a listing — which is roughly twenty seconds before the
+    #: current path reaches the same fact by loading the page, setting a
+    #: quantity, searching and waiting for a panel to draw.
+    #:
+    #: That does not yet make a direct path possible: knowing the handle is
+    #: not knowing the URL that accepts it, and guessing at endpoints is both
+    #: how you generate q404s and how you get a connection blocked. The
+    #: capture in buyer.py records what the page does with these for itself.
+    #: Until that answers, this is carried and logged, not used.
+    offer_ids: tuple = ()
 
     def describe(self) -> str:
         bits = [self.name]
