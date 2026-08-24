@@ -1534,11 +1534,30 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
                     f"is something real to wait for"
                 )
                 deadline = grown
-        worth_returning = bool(out.still_listed_after) or bool(out.listing_active)
+        # `ever_active` counts, not just this attempt's reading.
+        #
+        # The first live chases, on 2026-08-24 at 12:21 and 12:28, stopped
+        # after six goes and four instead of the ten they were given. The
+        # sequence explains itself: the opening refusal proves the listing is
+        # active, the basket holding it then takes the listing out of the
+        # resale feed, so the next attempt finds no row, never clicks, never
+        # reaches an error page — and is judged on an empty feed and no error
+        # payload, which reads exactly like "it sold".
+        #
+        # That is the one state this chase exists for. A ticket in somebody's
+        # basket is INVISIBLE in the feed by definition; treating its absence
+        # as proof of sale abandons the wait at the moment the wait is the
+        # whole strategy. What was established minutes ago does not stop being
+        # true because the last look could not re-establish it, so the memory
+        # is what governs, bounded by the retry cap and the deadline below.
+        worth_returning = (bool(out.still_listed_after)
+                           or bool(out.listing_active)
+                           or bool(out.ever_active))
         # Genuinely sold, or the question could not be asked either way.
         if not worth_returning:
             return verdict(out)
-        limit = (config.SECURE_ACTIVE_RETRIES if out.listing_active
+        limit = (config.SECURE_ACTIVE_RETRIES
+                 if (out.listing_active or out.ever_active)
                  else config.SECURE_RETRIES)
         if attempt >= limit:
             out.note(f"still there, but {attempt + 1} attempts is the limit — "
@@ -1549,7 +1568,7 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
             out.note("still there, but there is no time left in the window "
                      "to go back — the alert tells David to try it himself")
             return verdict(out)
-        if out.listing_active:
+        if out.listing_active or out.ever_active:
             out.note(f"the listing is still active, so it did not sell — "
                      f"waiting {pause:.0f}s for the basket holding it to lapse")
         else:
@@ -1571,7 +1590,34 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # Watch the feed through the pause rather than sleeping blind. Costs
         # one XHR per check instead of a whole search, and returns the instant
         # the ticket comes back — see _wait_for_relist().
-        _wait_for_relist(session, event, listing, out, pause, deadline)
+        came_back = _wait_for_relist(session, event, listing, out, pause, deadline)
+        # Do not spend a search on a ticket the feed still says is held.
+        #
+        # A full attempt is a page load, a quantity set, a search and a panel
+        # render — the request shape of a poll — and while the listing is in
+        # somebody's basket it can only end one way: no row, no click, nothing
+        # learned. The chases of 2026-08-24 spent four and six of those, which
+        # is both the block risk this budget is trying to avoid and a pointless
+        # fifteen seconds each time.
+        #
+        # So keep waiting instead, and go only when there is something to go
+        # for. This costs no retries — the cap counts attempts, and waiting is
+        # not one — so the shape of a chase becomes "watch cheaply until it
+        # comes free, then pounce", bounded by the deadline rather than by how
+        # many times we were willing to knock on a locked door.
+        if not came_back and (out.listing_active or out.ever_active):
+            # One further wait, for whatever is left of the window minus the
+            # room an attempt needs. Deliberately a single sized call rather
+            # than a loop around the short one: a loop whose only brake is the
+            # clock spins the instant a sleep stops costing time, and
+            # _wait_for_relist is bounded by its own poll count as well.
+            left = deadline - time.monotonic() - pause
+            if left > 0:
+                came_back = _wait_for_relist(
+                    session, event, listing, out, left, deadline)
+        if not came_back:
+            out.note("the window is up and it never came free — going back "
+                     "once more to see the page for itself")
         # Charge the wait to itself.
         #
         # mark() measures the gap since the previous mark, and the previous
@@ -1651,8 +1697,25 @@ def _wait_for_relist(session, event, listing, result: HoldResult,
             time.sleep(remaining)
         return False
 
+    # Bounded by a count as well as by the clock.
+    #
+    # The clock alone is not a bound. This loop's only brake is time passing,
+    # and time passing here is `time.sleep` — so anything that makes a sleep
+    # cheap (a stubbed clock, a suspended machine resuming, a sleep that
+    # returns early) turns a patient wait into a spin that pegs a core and
+    # never checks out. A ceiling on looks costs nothing when the clock
+    # behaves and is the difference between a wait and a hang when it does
+    # not.
     polls = 0
-    while time.monotonic() < end:
+    looks = 0
+    budget = max(1, int(pause_s / max(config.SECURE_RELIST_POLL_SECONDS, 0.001)) + 1)
+    # `looks` counts iterations and `polls` counts answers, and the ceiling is
+    # on the former. Counting only answers would leave the loop unbounded on
+    # exactly the failure it is most likely to meet — a feed that keeps
+    # replying with something unreadable, which `continue`s without ever
+    # incrementing an answer count.
+    while time.monotonic() < end and looks < budget:
+        looks += 1
         nap = min(config.SECURE_RELIST_POLL_SECONDS, end - time.monotonic())
         if nap > 0:
             time.sleep(nap)

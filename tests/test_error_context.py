@@ -297,6 +297,31 @@ print("\nthe chase does not spend a search per pause")
 truthy("feed checks are cheaper than the retry pause",
        config.SECURE_RELIST_POLL_SECONDS < config.SECURE_RETRY_PAUSE_SECONDS)
 
+
+# ── The chase must survive the listing going invisible ───────────────────────
+#
+# The first live chases, 2026-08-24 12:21 and 12:28, stopped after six goes
+# and four instead of ten. A ticket in somebody's basket is absent from the
+# resale feed BY DEFINITION, so every attempt after the opening refusal finds
+# no row, never clicks, never reaches an error page — and used to be judged on
+# an empty feed as "it sold". That is the one state the chase exists for.
+
+print("\nthe chase survives the listing going invisible mid-chase")
+out, n = run_secure([
+    # Opening refusal: Ticketmaster says the listing is live.
+    {"listing_active": True, "still_listed_after": None},
+    # Every look after that sees nothing at all — the basket hides it.
+    {"listing_active": None, "still_listed_after": False},
+])
+check("keeps going to the active limit", n, config.SECURE_ACTIVE_RETRIES + 1)
+truthy("and still remembers why", out.ever_active)
+truthy("and never calls it sold", "sold" not in out.reason.lower()
+       or "had not sold" in out.reason.lower())
+
+print("\nbut an unproven listing that vanishes still ends at once")
+out, n = run_secure([{"listing_active": None, "still_listed_after": False}])
+check("one attempt only", n, 1)
+
 print()
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s): {', '.join(FAILURES)}\n")
