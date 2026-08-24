@@ -139,6 +139,10 @@ def _defaults():
         "secure_block_streak": 0,
         "secure_cooldown_until": None,    # ISO8601
         "secure_block_alerted": None,     # ISO8601, so it says so once
+        # While the buyer is working and the poll clock has stopped for it.
+        # Read by watchdog.sh, which would otherwise mistake a twelve-minute
+        # chase for a wedged process — see note_securing().
+        "securing_until": None,           # ISO8601
         "sweep_interval": None,           # seconds, or None before the first sweep
         "sweep_backoffs": 0,              # how many rests it has taken this run
         "sweep_resting_until": None,      # ISO8601 while it is sitting out refusals
@@ -892,6 +896,57 @@ def clear_hold(state: dict) -> None:
     state["hold_until"] = None
     state["hold_event_slug"] = None
     state["hold_priority"] = 0
+
+
+def note_securing(state: dict) -> None:
+    """A securing attempt is under way, and the poll clock has stopped for it.
+
+    The same trap note_hold() above exists for, one step earlier in the story,
+    and reopened on 2026-08-24 by the change that lets the buyer chase a
+    listing Ticketmaster's error page says is still active. That chase may run
+    for EP_SECURE_ACTIVE_TIMEOUT — twelve minutes — and BuyerWorker.submit()
+    blocks the poll loop for the whole of it, so `next_poll_due` goes twelve
+    minutes stale while nothing at all is wrong.
+
+    The watchdog's grace is fifteen. That is a margin of about two minutes
+    between the longest legitimate chase and `launchctl kickstart -k`, and the
+    thing it would kill is the buying browser mid-chase — the exact failure
+    note_hold() was written to prevent, arrived at from the other side.
+
+    Raising the grace instead was the tempting fix and the wrong one: it would
+    delay detection of a genuinely wedged watcher by the same fifteen minutes
+    on every ordinary poll, to cover a case that arises a few times a day. A
+    marker says precisely what is true — "not polling, on purpose, until this
+    time" — and says nothing the rest of the time.
+
+    Bounded by the buyer's own budget plus a minute, because the one thing
+    this project refuses is ambiguous silence: if the process dies mid-chase
+    the marker lapses on its own and the watchdog takes over again, rather
+    than the chase silencing the watch for the rest of the fortnight.
+    """
+    from . import config
+
+    seconds = config.secure_budget_seconds() + 60
+    state["securing_until"] = (utc_now() + timedelta(seconds=seconds)).isoformat()
+
+
+def clear_securing(state: dict) -> None:
+    """The attempt is over — hand the watchdog back its job immediately.
+
+    Called in a finally, so it runs whether the attempt held a ticket, was
+    refused, or raised. Leaving it to expire on its own would keep the
+    watchdog quiet for the remainder of the budget after a five-second
+    refusal, which is most of them.
+    """
+    state["securing_until"] = None
+
+
+def securing_remaining(state: dict) -> float:
+    """Seconds the buyer may still legitimately be working, or 0.0."""
+    until = _parse(state.get("securing_until"))
+    if until is None:
+        return 0.0
+    return max(0.0, (until - utc_now()).total_seconds())
 
 
 def held_priority(state: dict) -> int:

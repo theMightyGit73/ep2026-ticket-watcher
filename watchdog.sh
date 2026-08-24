@@ -170,6 +170,40 @@ if [ -n "$HOLDING" ] && [ "$HOLDING" -gt 0 ] 2>/dev/null; then
     exit 0
 fi
 
+# Is the buyer mid-attempt? Same trap as the hold above, one step earlier.
+#
+# Since 2026-08-24 the buyer chases a listing that Ticketmaster's own error
+# page says is still active — it has not sold, somebody is holding it in a
+# basket, and those lapse — for up to EP_SECURE_ACTIVE_TIMEOUT, twelve
+# minutes. submit() blocks the poll loop for the whole of that, so the poll
+# clock goes twelve minutes stale while nothing whatever is wrong, against a
+# GRACE of fifteen. Two minutes is not a margin, and what a restart would kill
+# is the buying browser mid-chase.
+#
+# The marker is written when the attempt starts and cleared when it ends, so
+# it is silent except during an actual attempt, and it is bounded by the
+# buyer's own budget so a process that dies mid-chase cannot mute this script.
+SECURING=$(/usr/bin/python3 - "$STATE" <<'PY' 2>/dev/null
+import json, sys
+from datetime import datetime, timezone
+try:
+    with open(sys.argv[1]) as f:
+        until = json.load(f).get("securing_until")
+    if not until:
+        print(0)
+    else:
+        left = (datetime.fromisoformat(until) - datetime.now(timezone.utc)).total_seconds()
+        print(int(max(0, left) // 60))
+except Exception:
+    print(0)
+PY
+)
+
+if [ -n "$SECURING" ] && [ "$SECURING" -gt 0 ] 2>/dev/null; then
+    say "the buyer is mid-attempt for up to another ${SECURING} min — leaving it alone"
+    exit 0
+fi
+
 # Age of the last poll, in minutes.
 LAST=$(/usr/bin/python3 - "$STATE" <<'PY' 2>/dev/null
 import json, sys

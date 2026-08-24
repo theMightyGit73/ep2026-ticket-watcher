@@ -99,6 +99,35 @@ check("and neither does a null marker",
 check("nor a corrupt one — it must fail towards restarting, not towards silence",
       run_watchdog({"last_check_at": WEDGED, "hold_until": "not a timestamp"}), True)
 
+print("\nThe same protection covers an attempt still in progress")
+# The trap arrived at from the other side, on 2026-08-24. The buyer now chases
+# a listing Ticketmaster's error page calls active for up to twelve minutes,
+# and submit() blocks the poll loop throughout — so the clock goes twelve
+# minutes stale against a GRACE of fifteen, and what a restart kills is the
+# buying browser mid-chase. Two minutes is not a margin.
+check("a watcher mid-attempt is left alone",
+      run_watchdog({"last_check_at": WEDGED, "securing_until": SOON}), False)
+check("an attempt whose budget has passed protects nothing",
+      run_watchdog({"last_check_at": WEDGED, "securing_until": LAPSED}), True)
+check("nor does a null marker",
+      run_watchdog({"last_check_at": WEDGED, "securing_until": None}), True)
+check("nor a corrupt one — fail towards restarting, never towards silence",
+      run_watchdog({"last_check_at": WEDGED,
+                    "securing_until": "not a timestamp"}), True)
+
+print("\nThe marker is bounded by the buyer's own budget")
+fresh = dict(st.DEFAULTS) if hasattr(st, "DEFAULTS") else {}
+st.note_securing(fresh)
+left = st.securing_remaining(fresh)
+check_true = lambda label, got: check(label, bool(got), True)
+check_true("it outlasts the longest legitimate chase",
+           left > config.secure_budget_seconds() - 1)
+check_true("but not by much — a dead process must not mute the watchdog",
+           left <= config.secure_budget_seconds() + 120)
+st.clear_securing(fresh)
+check("and clearing it hands the watchdog back its job at once",
+      st.securing_remaining(fresh), 0.0)
+
 print("\nIt does not interfere with the checks that were already there")
 healthy = st.utc_now().isoformat()
 check("a healthy watcher is still left alone",

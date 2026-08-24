@@ -591,10 +591,26 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
     # later by the next one, which is the opposite of a floor.
     if st is not None:
         state_mod.note_secure_attempt(st, reading.event_slug)
+        # Tell the watchdog the poll clock has stopped on purpose, and write
+        # it out NOW rather than at the end of the poll. A chase can run for
+        # twelve minutes and submit() blocks this thread throughout, so a
+        # marker that is only flushed afterwards is written after the window
+        # it was meant to cover — see state.note_securing().
+        state_mod.note_securing(st)
+        state_mod.save(st)
 
     print(f"[{stamp()}] listing found — opening the signed-in browser to hold it")
-    hold = buyer.secure_in_thread(event, listing, may_preempt=may_preempt,
-                                  worker=buy_worker())
+    try:
+        hold = buyer.secure_in_thread(event, listing, may_preempt=may_preempt,
+                                      worker=buy_worker())
+    finally:
+        # Hand the watchdog back its job the moment the buyer is done, however
+        # it finished. Most attempts end in seconds; letting the marker run to
+        # its full bound would silence the watch for the rest of the budget
+        # after every one of them.
+        if st is not None:
+            state_mod.clear_securing(st)
+            state_mod.save(st)
 
     # A dropped hold is news whether or not the swap paid off, and if it did
     # not pay off the record must not keep claiming a ticket is held.
