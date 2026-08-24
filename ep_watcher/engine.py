@@ -636,6 +636,16 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
         still_listed=getattr(hold, "still_listed_after", None),
         ids_after=list(getattr(hold, "ids_after", []) or []),
         landed_url=getattr(hold, "landed_url", "") or "",
+        # Ticketmaster's own verdict on the listing at the moment it refused
+        # us, decoded from that landed_url at no cost. `still_listed` above
+        # can only say whether the ticket was offerable to us; this says
+        # whether it existed, which is the difference between a race lost and
+        # a ticket we were never allowed to take. Queryable for the same
+        # reason the rest of this is: the answer decides where the next fix
+        # goes, and it should not need re-reading fifteen JSON captures.
+        listing_active=getattr(hold, "listing_active", None),
+        ever_active=bool(getattr(hold, "ever_active", False)),
+        offer_type=getattr(hold, "offer_type", "") or "",
         # Queryable, because "how often is the buying browser being blocked"
         # is a question about the health of the whole approach, not about one
         # attempt — and answering it from prose is what took two days last

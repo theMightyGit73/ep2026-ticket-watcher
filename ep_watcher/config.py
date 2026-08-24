@@ -942,6 +942,72 @@ SECURE_RETRIES = int(os.environ.get("EP_SECURE_RETRIES", "6"))
 # waiting, which is the thing that actually has to happen.
 SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "40"))
 
+#: The budget when Ticketmaster's own error page says the listing is ACTIVE.
+#:
+#: A longer window than SECURE_TIMEOUT_SECONDS above, spent only on the one
+#: case where we have a positive statement from Ticketmaster that the ticket
+#: still exists — see buyer.read_error_context().
+#:
+#: The evidence for it is the strongest this project has. Every one of the
+#: fifteen refusals captured between 2026-08-21 and 2026-08-24 carries
+#: `"active": true` in the error payload, including the attempt of 2026-08-24
+#: 10:07 that reached the click 5.3 seconds after the listing was seen. Those
+#: tickets had not sold. They were spoken for, and a listing in somebody's
+#: basket drops out of the resale feed — which is exactly the signal the old
+#: give-up rule read as "it sold", so the chase stopped after two or three
+#: goes on a ticket that was still there.
+#:
+#: Twelve minutes because that is the shape of the thing being waited for: a
+#: Ticketmaster basket holds for about ten (see HOLD_MINUTES_HINT), so a
+#: window shorter than that cannot see one lapse, which is the entire event
+#: this is waiting for. The cost is real and worth stating: the poll loop is
+#: blocked for the duration, so another page's listing could be missed. It is
+#: spent against a ticket already confirmed present rather than against the
+#: hope of a better one, and a weekend ticket can still preempt the lot.
+SECURE_ACTIVE_TIMEOUT_SECONDS = int(
+    os.environ.get("EP_SECURE_ACTIVE_TIMEOUT", "720"))
+
+#: How many goes at a listing the error page says is still active.
+#:
+#: Ten at a forty-second pause is about eight minutes of knocking, which fits
+#: the window above with room for the attempts themselves. Deliberately not
+#: unlimited: every go is another request against a connection that has been
+#: blocked twenty-three times, and if a basket has not lapsed in eight minutes
+#: the buyer behind it is probably paying rather than dithering.
+SECURE_ACTIVE_RETRIES = int(os.environ.get("EP_SECURE_ACTIVE_RETRIES", "10"))
+
+
+#: How often to check the resale feed while waiting out a basket.
+#:
+#: The chase waits on the endpoint rather than on the clock — see
+#: buyer._wait_for_relist(). Ten seconds is chosen against what is being
+#: waited for rather than against politeness: the moment a basket lapses is
+#: contested, so the cost of a long interval is measured in the seconds
+#: somebody else gets to claim it first.
+#:
+#: Cheap enough to justify. One XHR per check, same-origin, from a page
+#: already open — the identical call the sweep makes every ninety seconds. Six
+#: an hour of chase-time against a sweep already doing forty is a rounding
+#: error on the request budget, and it replaces a full search per pause, which
+#: is not.
+SECURE_RELIST_POLL_SECONDS = float(
+    os.environ.get("EP_SECURE_RELIST_POLL", "10"))
+
+
+def secure_budget_seconds() -> int:
+    """The longest a single securing job can run, whatever path it takes.
+
+    One source of truth for two callers that must agree. secure() sets its own
+    deadline and BuyerWorker.submit() waits on the job with a timeout; if the
+    second is shorter than the first, the worker abandons a chase that was
+    still inside its budget and reports the browser as hung. That is exactly
+    what would happen the moment the active-listing window above extended past
+    SECURE_TIMEOUT_SECONDS, and it would look like a bug in the browser rather
+    than an arithmetic mismatch between two constants.
+    """
+    return max(SECURE_TIMEOUT_SECONDS, SECURE_ACTIVE_TIMEOUT_SECONDS)
+
+
 #: The shortest gap between two securing attempts on the same page.
 #:
 #: Securing used to be reachable only through the availability alert, so

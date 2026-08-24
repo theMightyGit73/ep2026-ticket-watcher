@@ -374,8 +374,16 @@ pauses = []
 real_sleep = time.sleep
 time.sleep = lambda s: pauses.append(s)
 was_pause = config.SECURE_RETRY_PAUSE_SECONDS
+was_poll = config.SECURE_RELIST_POLL_SECONDS
 try:
-    config.SECURE_RETRY_PAUSE_SECONDS = 0.0
+    # A tiny but NON-ZERO pause. The wait is no longer a blind sleep — it
+    # watches the resale feed and returns the moment the listing comes back
+    # (see buyer._wait_for_relist), which costs one XHR per look instead of a
+    # whole search per retry. A zero pause therefore correctly does nothing at
+    # all, so asking for one and then asserting that time was spent tests the
+    # opposite of what it reads as.
+    config.SECURE_RETRY_PAUSE_SECONDS = 0.02
+    config.SECURE_RELIST_POLL_SECONDS = 0.01
     page = FakePage(EVENT.url, rows_visible=False)
     session = FakeSession(page, feed=payload(["lstillthere"]))
     out = buyer.secure(session, EVENT, LISTING)
@@ -415,6 +423,7 @@ try:
           "race being lost at the last step" in (out.reason or ""), False)
 finally:
     config.SECURE_RETRY_PAUSE_SECONDS = was_pause
+    config.SECURE_RELIST_POLL_SECONDS = was_poll
     time.sleep = real_sleep
 
 

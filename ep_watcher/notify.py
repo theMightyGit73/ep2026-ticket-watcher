@@ -745,6 +745,31 @@ def _verdict_block(hold) -> str:
     confident wrong answer here sends him either to a dead page or away from a
     live one.
     """
+    # Ticketmaster's own error page, before either of the feed answers below.
+    #
+    # It outranks them because it is a statement by the party that refused us,
+    # made at the instant of refusal, about the thing that matters: whether
+    # the listing still exists. The feed can only say whether the ticket is
+    # offerable right now, and one in somebody's basket is not — which is why
+    # "the feed agrees it is gone" has told David a ticket sold on occasions
+    # when Ticketmaster's own payload said it was live.
+    active = getattr(hold, "listing_active", None)
+    if active is None:
+        active = getattr(hold, "ever_active", False) or None
+    if active:
+        offer = getattr(hold, "offer_summary", "") or ""
+        return (
+            "IT DID NOT SELL. TICKETMASTER SAYS SO ITSELF.\n"
+            "The refusal page carries Ticketmaster's own record of the\n"
+            "listing, and it says the listing is still ACTIVE. So this was\n"
+            "not a race lost by a second — the ticket exists, and somebody\n"
+            "else is holding it in a basket. Those lapse, usually within\n"
+            "about ten minutes.\n"
+            + (f"The listing: {offer}\n" if offer else "")
+            + "THE WATCHER IS STILL GOING BACK FOR IT and will keep trying\n"
+            "while the window lasts. Try the link yourself too — two of us\n"
+            "refreshing is strictly better than one.\n\n"
+        )
     still = getattr(hold, "still_listed_after", None)
     if still is None:
         return ""

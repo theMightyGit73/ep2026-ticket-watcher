@@ -33,15 +33,19 @@ what it expects records why and returns `secured=False`, and the ordinary
 alert still goes out. Treat the first real find as the test.
 """
 
+import base64
+import gzip
 import json
 import os
 import queue
+import re
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
@@ -128,6 +132,94 @@ def _stamp() -> str:
     from .state import stamp
 
     return stamp()
+
+
+#: The dead end a refused listing lands on, e.g.
+#: https://secure.ticketmaster.ie/error/q404?cid=<uuid>&ctx=<blob>
+ERROR_URL_RE = re.compile(r"secure\.ticketmaster\.[a-z.]+/error/", re.I)
+
+
+def read_error_context(url: str) -> dict:
+    """Decode the `ctx` blob Ticketmaster puts in its own error URL.
+
+    The single most valuable thing this project has found, and it was sitting
+    in a field the code already captured and never read.
+
+    When a click into a listing is refused, the browser lands on
+    `secure.ticketmaster.ie/error/q404?cid=…&ctx=…`. That `ctx` is a
+    URL-encoded, base64'd, gzipped JSON document, and it contains
+    Ticketmaster's own record of the listing it just refused:
+
+        {"event": {...},
+         "listing": {"id": 41966773, "urlId": "lw09yvzt", "active": true,
+                     "offerType": "Three+ Presale Ticket", "section": "STNDNG",
+                     "sellPrice": 310.5, "isGeneralAdmission": true, ...}}
+
+    `active` is the field that matters, and it changes what this project
+    believes about itself. Every one of the fifteen refusals recorded between
+    2026-08-21 and 2026-08-24 carries `"active": true` — including the attempt
+    of 2026-08-24 10:07, which reached the click 5.3 seconds after the sweep
+    saw the listing. A listing that is still active is a listing that has not
+    sold. So the dominant verdict in the log — "the race being lost at the
+    last step" — is wrong about most of the tickets it was written for, and
+    the conclusion it invites (shave seconds off the click) is chasing a
+    problem that was never there. Five seconds was not fast enough because
+    speed was not what refused us.
+
+    Reading it costs nothing. No request, no origin problem, no race: the
+    answer is in the URL bar of a page already open, at a moment when the
+    resale endpoint CANNOT be asked because the dead end is served from a
+    different host. That is precisely the moment the question matters, and
+    until now it was the moment nothing could answer it.
+
+    Never raises. Returns {} for a URL that is not an error page, or one whose
+    blob does not decode — a diagnostic that throws on the losing path would
+    turn a lost ticket into a crash.
+    """
+    if not url or "ctx=" not in url:
+        return {}
+    try:
+        raw = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("ctx")
+        if not raw:
+            return {}
+        blob = raw[0]
+        # Ticketmaster uses the standard alphabet, but the value travels
+        # through URL encoding and has been seen with '-' and '_' surviving;
+        # accept both rather than losing the payload to an alphabet.
+        blob = blob.replace("-", "+").replace("_", "/")
+        # Padding is stripped in the URL. Adding too much is harmless —
+        # b64decode stops at the first complete quantum — and guessing the
+        # exact amount is a needless way to fail.
+        data = base64.b64decode(blob + "===")
+        text = gzip.decompress(data).decode("utf-8", "replace")
+        out = json.loads(text)
+        return out if isinstance(out, dict) else {}
+    except Exception:
+        return {}
+
+
+def describe_offer(listing: dict) -> str:
+    """One line about the listing Ticketmaster refused, for an alert.
+
+    Kept beside the decoder because the vocabulary is Ticketmaster's, not
+    ours, and both readers of it should see the same words.
+    """
+    if not listing:
+        return ""
+    bits = []
+    kind = listing.get("offerType")
+    if kind:
+        bits.append(str(kind))
+    section = listing.get("section")
+    row = listing.get("row")
+    if section:
+        bits.append(f"section {section}" + (f" row {row}" if row else ""))
+    price = listing.get("sellPrice")
+    if isinstance(price, (int, float)):
+        fee = listing.get("buyerFeeValue")
+        total = price + fee if isinstance(fee, (int, float)) else None
+        bits.append(f"€{price:.2f}" + (f" (€{total:.2f} with fees)" if total else ""))
+    return " · ".join(bits)
 
 
 def _is_analytics(name: str) -> bool:
@@ -610,6 +702,42 @@ class HoldResult:
     #: one says be faster at the click, the other says the click was never
     #: going to work and the lever is seeing the listing sooner.
     ever_listed_after: bool = False
+    # ── What Ticketmaster's own error page says ──────────────────────────────
+    #
+    # Decoded from the `ctx` blob on the dead end, at no cost — see
+    # read_error_context(). This is a statement by Ticketmaster about the
+    # listing it has just refused, made at the moment of refusal, and it
+    # outranks every inference this module makes from the feed:
+    #
+    #   * The feed answers "is this listing OFFERABLE to me right now", and a
+    #     ticket in somebody else's basket drops out of it. So a listing
+    #     vanishing from the feed has always been read here as "it sold", and
+    #     for a basket that is exactly wrong — the ticket is still for sale,
+    #     it is merely spoken for, and it comes back when the basket lapses.
+    #   * `active` answers "does this listing still exist", which is the
+    #     question the retry actually turns on.
+    #
+    #: True when the error page says the listing is still active — i.e. it did
+    #: NOT sell, whatever the feed says. None when there was no error context
+    #: to read (no click, or a failure before one).
+    listing_active: Optional[bool] = None
+    #: Ticketmaster's own name for what kind of ticket this is, e.g.
+    #: "Three+ Presale Ticket" or "General Admission Tier 2 - 3rd and Final
+    #: Payment .BO". Recorded because the refusals are not evenly spread
+    #: across it, and a type that is never honoured is worth knowing about
+    #: before spending the buying browser on it again.
+    offer_type: str = ""
+    #: The listing line as Ticketmaster describes it — type, section, price.
+    offer_summary: str = ""
+    #: Did ANY attempt see Ticketmaster call this listing active?
+    #:
+    #: The counterpart of ever_listed_after, and it exists for the same reason:
+    #: listing_active is cleared between attempts so each refusal answers for
+    #: itself, but the sequence tells a story its last line does not. A ticket
+    #: that was active when we first reached it and inactive twenty minutes
+    #: later was never a race we lost by being slow — it was one somebody else
+    #: was allowed to complete while we were told no.
+    ever_active: bool = False
     #: Ticketmaster served a block or challenge screen instead of the page.
     #:
     #: Its own field rather than a phrase in `reason`, because it decides
@@ -1174,7 +1302,7 @@ def secure_in_thread(event, listing, timeout_s: int = None,
     """
     from .state import stamp as state_stamp
 
-    budget = timeout_s or (config.SECURE_TIMEOUT_SECONDS + 60)
+    budget = timeout_s or (config.secure_budget_seconds() + 60)
 
     # The warm path, when there is one. See BuyerWorker: the browser is
     # already open and already on the page, so the attempt starts at the
@@ -1283,7 +1411,8 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
     preempt the whole thing.
     """
     result = result or HoldResult()
-    deadline = time.monotonic() + config.SECURE_TIMEOUT_SECONDS
+    start = time.monotonic()
+    deadline = start + config.SECURE_TIMEOUT_SECONDS
     #: Blocks are counted separately from ordinary retries, so a challenge
     #: cannot quietly spend the whole budget meant for waiting out a basket.
     challenges = 0
@@ -1302,6 +1431,24 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         we saw it" points at seeing it sooner, and says the click was never
         going to succeed however fast it was.
         """
+        # Ticketmaster's own word first. When the error payload called this
+        # listing active, "it sold" is not a conclusion available to us — it
+        # is contradicted by the party that would know, at the moment of
+        # refusal. Saying it anyway is how the log came to file fifteen
+        # refusals of live tickets as lost races, which pointed a fortnight of
+        # work at shaving seconds off a click that was never the problem.
+        if out.ever_active and not out.secured:
+            out.reason = (
+                f"this was never a race. Ticketmaster refused the listing and "
+                f"its own error page said, at that moment, that the listing "
+                f"was still ACTIVE — so it had not sold; it was spoken for, "
+                f"most likely sitting in somebody else's basket. We went back "
+                f"{out.attempts} time(s) over "
+                f"{out.elapsed / 60:.0f} min and it never came free."
+                + (f" Offer: {out.offer_summary}." if out.offer_summary else "")
+            )
+            out.note(out.reason)
+            return out
         if out.ever_listed_after and not out.secured and not out.still_listed_after:
             out.reason = (
                 "this was not a race lost at the click. An earlier attempt was "
@@ -1314,7 +1461,14 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
             out.note(out.reason)
         return out
 
-    for attempt in range(1 + config.SECURE_RETRIES):
+    # The widest of the ceilings, because the loop bound must not be the thing
+    # that stops a chase. Which ceiling actually applies is decided per attempt
+    # below, against what that attempt learned — a listing Ticketmaster calls
+    # active is worth more goes than one the feed merely still shows. Capping
+    # the range at SECURE_RETRIES instead made the active limit unreachable
+    # and silently reinstated the shorter chase.
+    for attempt in range(1 + max(config.SECURE_RETRIES,
+                                 config.SECURE_ACTIVE_RETRIES)):
         if attempt:
             result.attempts = attempt + 1
             result.note(f"attempt {attempt + 1}: going back for it")
@@ -1357,21 +1511,50 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
             out.mark("waiting")
             continue
 
-        # Genuinely sold, or the question could not be asked. Either way there
-        # is nothing to come back for.
-        if not out.still_listed_after:
+        # Is there anything to come back for?
+        #
+        # Two independent reasons to say yes, and the second is the one that
+        # was missing. The feed can only answer "is this offerable to me right
+        # now", so a ticket sitting in somebody's basket drops out of it and
+        # reads here as sold. Ticketmaster's own error page answers the
+        # question the retry actually turns on — does the listing still exist
+        # — and it said yes on all fifteen refusals captured to 2026-08-24,
+        # including the ones this loop then abandoned as gone.
+        if out.listing_active:
+            out.ever_active = True
+            # Positive evidence the ticket exists buys a longer window, once.
+            # Extended rather than replaced, so a chase already under way
+            # keeps its remaining time instead of restarting it.
+            grown = start + config.SECURE_ACTIVE_TIMEOUT_SECONDS
+            if grown > deadline:
+                out.note(
+                    f"extending the window to "
+                    f"{config.SECURE_ACTIVE_TIMEOUT_SECONDS // 60} min — "
+                    f"Ticketmaster says this listing is still active, so there "
+                    f"is something real to wait for"
+                )
+                deadline = grown
+        worth_returning = bool(out.still_listed_after) or bool(out.listing_active)
+        # Genuinely sold, or the question could not be asked either way.
+        if not worth_returning:
             return verdict(out)
-        if attempt >= config.SECURE_RETRIES:
-            out.note(f"still listed, but {attempt + 1} attempts is the limit — "
+        limit = (config.SECURE_ACTIVE_RETRIES if out.listing_active
+                 else config.SECURE_RETRIES)
+        if attempt >= limit:
+            out.note(f"still there, but {attempt + 1} attempts is the limit — "
                      f"the alert tells David to try it himself")
             return verdict(out)
         pause = config.SECURE_RETRY_PAUSE_SECONDS
         if time.monotonic() + pause >= deadline:
-            out.note("still listed, but there is no time left in the window "
+            out.note("still there, but there is no time left in the window "
                      "to go back — the alert tells David to try it himself")
             return verdict(out)
-        out.note(f"it is still in the feed, so it did not sell — waiting "
-                 f"{pause:.0f}s for the basket holding it to lapse")
+        if out.listing_active:
+            out.note(f"the listing is still active, so it did not sell — "
+                     f"waiting {pause:.0f}s for the basket holding it to lapse")
+        else:
+            out.note(f"it is still in the feed, so it did not sell — waiting "
+                     f"{pause:.0f}s for the basket holding it to lapse")
         # Remembered across attempts before it is cleared. What the FIRST
         # probe saw is the fact that explains the whole sequence, and the last
         # attempt's answer overwrites it.
@@ -1380,7 +1563,15 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # here would be read as evidence from a look that never happened.
         out.still_listed_after = None
         out.ids_after = []
-        time.sleep(pause)
+        # Same discipline for the error payload. `ever_active` above is what
+        # remembers across attempts; this must answer for the next one only,
+        # or a single active reading would keep the chase alive long after
+        # Ticketmaster stopped saying so.
+        out.listing_active = None
+        # Watch the feed through the pause rather than sleeping blind. Costs
+        # one XHR per check instead of a whole search, and returns the instant
+        # the ticket comes back — see _wait_for_relist().
+        _wait_for_relist(session, event, listing, out, pause, deadline)
         # Charge the wait to itself.
         #
         # mark() measures the gap since the previous mark, and the previous
@@ -1394,6 +1585,110 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         out.mark("waiting")
 
     return verdict(out)
+
+
+def _wait_for_relist(session, event, listing, result: HoldResult,
+                     pause_s: float, deadline: float) -> bool:
+    """Wait out the basket holding a listing, watching the feed rather than the clock.
+
+    Returns True when the listing came back and the caller should go NOW.
+
+    This exists because the obvious version of the chase is dangerous. A full
+    attempt costs a page load, a quantity set, a search and a panel render —
+    the same request shape as a poll — and the active-listing window allows
+    eleven of them in twelve minutes. That is roughly fifty-five searches an
+    hour sustained, against a budget of 16.7 that is already deliberately
+    under the twenty that first drew a block. Chasing a live ticket by
+    hammering the search is how you turn one refusal into the block screen
+    that caused half of all the refusals in the first place.
+
+    So the waiting is done on the resale endpoint instead: one same-origin
+    XHR, the identical call the sweep already makes every ninety seconds, from
+    a page that is already open. A chase then costs one page load and a
+    handful of XHRs per pause instead of a search per pause, and the expensive
+    attempt is only spent when the feed says there is something to spend it
+    on.
+
+    It is also faster at the thing that matters. Sleeping a flat forty seconds
+    means a basket that lapses one second after the sleep starts is not acted
+    on for thirty-nine of them — and the whole premise of the chase is that
+    the moment of lapse is contested. Polling turns that worst case into the
+    poll interval.
+
+    Falls back to sleeping when there is no usable session, so the retry loop
+    keeps its old behaviour rather than losing a chase to a missing browser.
+    """
+    end = min(time.monotonic() + pause_s, deadline)
+    wanted = (getattr(listing, "listing_id", "") or result.listing_id or "")
+
+    page = None
+    try:
+        page = session.page if session is not None else None
+    except Exception:
+        page = None
+
+    if page is None:
+        remaining = end - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        return False
+
+    # Get back onto the event's own origin once, and only if we are not there.
+    # The refusal leaves the browser on secure.ticketmaster.ie, where the
+    # resale endpoint cannot be reached at all — the origin problem that has
+    # kept the forensics blind on this exact path.
+    try:
+        here = (page.url or "").split("?")[0].rstrip("/")
+        if here != event.url.split("?")[0].rstrip("/"):
+            page.goto(event.url, wait_until="domcontentloaded",
+                      timeout=config.PAGE_TIMEOUT_MS)
+            result.note("back on the event page to watch for the basket lapsing")
+    except Exception as exc:
+        result.note(f"could not get back to the event page to watch: "
+                    f"{type(exc).__name__}")
+        remaining = end - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        return False
+
+    polls = 0
+    while time.monotonic() < end:
+        nap = min(config.SECURE_RELIST_POLL_SECONDS, end - time.monotonic())
+        if nap > 0:
+            time.sleep(nap)
+        if time.monotonic() >= deadline:
+            break
+        try:
+            record = session.listings_now(event, config.WANTED_QUANTITY)
+            data = (record or {}).get("data")
+            if not isinstance(data, dict):
+                continue
+            polls += 1
+            picks = data.get("picks")
+            picks = picks if isinstance(picks, list) else []
+            ids = [str(p.get("resaleListingId") or p.get("id"))
+                   for p in picks if isinstance(p, dict)
+                   and (p.get("resaleListingId") or p.get("id"))]
+            # The one we were refused, or — failing that — anything at all.
+            # The ids have been observed to change between polls for what is
+            # plainly the same ticket, so an exact match is the strong signal
+            # and any listing at all is the weak one worth acting on.
+            if wanted and wanted in ids:
+                result.note(f"the listing is back in the feed after {polls} "
+                            f"check(s) — going for it now")
+                return True
+            if ids and not wanted:
+                result.note(f"a listing is back in the feed after {polls} "
+                            f"check(s) — going for it now")
+                return True
+        except Exception:
+            # A failed check is not a reason to abandon the chase; it is one
+            # missed look out of many, and the pause continues.
+            continue
+    if polls:
+        result.note(f"still held after {polls} check(s) of the feed — "
+                    f"going back anyway")
+    return False
 
 
 def _secure_once(session: BuySession, event, listing,
@@ -2013,6 +2308,15 @@ def capture_failure(page, result: "HoldResult", event, attempt: int = 1) -> str:
         "ids_after": list(result.ids_after),
         "listing_id": result.listing_id,
         "landed_url": result.landed_url,
+        # Decoded from landed_url rather than stored twice — see
+        # read_error_context(). Recorded because "Ticketmaster said this was
+        # live when it refused us" is the fact that distinguishes a lost race
+        # from a listing we were never going to be allowed to take, and it was
+        # sitting unread in the URL above for fifteen attempts.
+        "listing_active": result.listing_active,
+        "ever_active": result.ever_active,
+        "offer_type": result.offer_type,
+        "offer_summary": result.offer_summary,
         "notes": list(result.notes),
     }
     text = ""
@@ -2113,6 +2417,40 @@ def _probe_after_gone(session, event, listing, result: "HoldResult", page) -> No
             result.note(f"stopped at: {result.landed_url}")
     except Exception:
         pass
+
+    # Read the refusal itself before asking anyone else about it.
+    #
+    # Ordered first deliberately. The feed call below is the expensive,
+    # failure-prone half of this function — it needs a second tab because the
+    # dead end is on the wrong origin — while this is a string parse of a URL
+    # already in hand. It also answers a better question: the feed can only
+    # say whether the listing is offerable to us this second, and a ticket in
+    # somebody's basket is not, which is why a vanished listing has been
+    # recorded as sold fifteen times when Ticketmaster's own payload said it
+    # was still active.
+    context = read_error_context(result.landed_url)
+    offer = context.get("listing") if isinstance(context, dict) else None
+    if isinstance(offer, dict):
+        active = offer.get("active")
+        result.listing_active = bool(active) if isinstance(active, bool) else None
+        result.offer_type = str(offer.get("offerType") or "")
+        result.offer_summary = describe_offer(offer)
+        # Prefer Ticketmaster's own id for the listing over ours. `urlId` is
+        # the same short string the feed calls resaleListingId, and having it
+        # from the refusal proves which listing was refused — the ids have
+        # been observed to change between polls for what is plainly the same
+        # ticket, so the one in the error payload is the one to trust.
+        url_id = str(offer.get("urlId") or "")
+        if url_id:
+            result.listing_id = url_id
+        if result.listing_active:
+            result.note(
+                f"Ticketmaster's own error page says this listing is STILL "
+                f"ACTIVE — it has not sold. {result.offer_summary or 'no detail'}"
+            )
+        elif result.listing_active is False:
+            result.note("Ticketmaster's error page says the listing is no "
+                        "longer active — this one really did go")
 
     try:
         # Ask from where we are standing first: on the no-row path that is the

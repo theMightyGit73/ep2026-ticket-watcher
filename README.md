@@ -570,13 +570,91 @@ actually says, which is "Place Order" and "Cancel Order" and **none** of the
 three phrases previously guessed at. That last one mattered most: a
 successful hold would have been reported as a failure.
 
-**Still not proven:** the click-through on *this* event, end to end. Nobody
-has driven a real Electric Picnic resale listing into a basket, because none
-has been live while this code was running. The flow is written to fail loudly
-— every step that cannot find what it expects records why and returns
-`secured=False`, and the ordinary availability alert goes out regardless. Treat
-the first real find as the test, and read the failure email: it now
-distinguishes "never reached the listing" from "reached it and it was gone".
+**Now proven, and it changes the answer:** the click-through works. The
+attempt of 2026-08-24 at 10:07 reached the listing's own page and clicked
+into it **5.3 seconds** after the sweep saw it — 0.08s to set the quantity,
+0.73s to search, 3.48s for the panel, 0.02s to find the row, 0.96s to click.
+It was refused anyway.
+
+---
+
+### It was never a race, and the refusal page says so
+
+The single most useful thing this project has found, and it was sitting
+unread in a field the code already captured.
+
+A refused click lands on `secure.ticketmaster.ie/error/q404?cid=…&ctx=…`.
+That `ctx` is a URL-encoded, gzipped JSON document, and it is Ticketmaster's
+own record of the listing it has just refused:
+
+```json
+{"listing": {"urlId": "lw09yvzt", "active": true, "sellPrice": 310.5,
+             "offerType": "Three+ Presale Ticket", "section": "STNDNG",
+             "row": "GA6", "buyerFeeValue": 55.89}}
+```
+
+`active: true`. **Every one of the fifteen refusals captured between
+2026-08-21 and 2026-08-24 carries it**, including the 5.3-second attempt
+above. Those tickets had not sold. They existed, they were live, and
+Ticketmaster refused to sell them to us anyway — which means somebody else
+was holding them in a basket.
+
+Three conclusions follow, and the first two are corrections:
+
+- **"The race being lost at the last step" was the wrong verdict** on most of
+  the tickets it was written for. It is the single most common reason in the
+  log, and it pointed a fortnight of work at shaving seconds off a click that
+  was already fast enough. Five seconds was not enough because speed was not
+  what refused us.
+- **A listing vanishing from the resale feed is not proof that it sold.** The
+  feed answers "is this offerable to me right now", and a ticket in somebody
+  else's basket is not — so it drops out while remaining perfectly for sale.
+  The old give-up rule read that as "it sold" and abandoned the chase after
+  two or three goes, on tickets Ticketmaster's own payload called active.
+- **Waiting is the winning move, not hurrying.** Baskets lapse, usually
+  inside ten minutes. The buyer now chases a listing the error page calls
+  active for up to `EP_SECURE_ACTIVE_TIMEOUT` (12 min) across
+  `EP_SECURE_ACTIVE_RETRIES` (10) goes, instead of the 5 minutes and 6 goes
+  it gets for a listing it merely still sees in the feed.
+
+Reading it costs nothing: no request, no race, and — critically — no origin
+problem. The dead end is served from `secure.ticketmaster.ie` while the resale
+endpoint is same-origin to `www.ticketmaster.ie`, so at the exact moment the
+question matters most, the feed **cannot be asked at all**. The answer was in
+the URL bar the whole time.
+
+### The chase watches the feed, it does not hammer the search
+
+Ten extra goes at a full attempt would be about 55 searches an hour against a
+budget of 16.7 that is already deliberately under the 20 that first drew a
+block — and the block screen causes half of all refusals. Chasing a live
+ticket that way would manufacture the very thing that loses them.
+
+So the pause between goes watches the resale endpoint instead: one
+same-origin XHR every `EP_SECURE_RELIST_POLL` (10s), the identical call the
+sweep already makes every ninety seconds, from a page already open. A whole
+chase costs one page load and a handful of XHRs per pause, and the expensive
+attempt is spent only when the feed says there is something to spend it on.
+It is also faster at the thing that matters: a basket that lapses one second
+into a flat forty-second sleep used to go unnoticed for thirty-nine of them.
+
+### The offer types are worth watching
+
+Recorded on every `hold` event now, because the refusals are not evenly
+spread across them:
+
+| `offerType` | Refusals |
+| --- | --- |
+| `Three+ Presale Ticket` | 6 |
+| `General Admission Tier 2 - 3rd and Final Payment .BO` | 6 |
+| `General Admission Tier 2 Ticket` | 3 |
+
+Two of those three are not ordinary single tickets — one is a group presale,
+the other an instalment plan mid-payment. It is worth knowing whether a type
+is *never* honoured at quantity 1, because that would be a listing the feed
+advertises and the offer flow will not sell, and no amount of chasing wins
+it. There is not enough data to say yet; the field is now in the event log so
+that the next few refusals can settle it.
 
 ---
 
@@ -967,7 +1045,10 @@ Environment variables, all optional:
 | `EP_RESALE_SWEEP_RECOVER_AFTER` | `20` | Clean answers that win the speed back, halving the interval. Without this the ladder only went down: three refusal bursts overnight on 2026-08-20 left the sweep at ten-minute intervals for the morning, and only a restart undid it |
 | `EP_SWEEP_INSTALMENT` | `0` | Include the instalment page in the sweep. Off since 2026-08-21: refusals scale with how many pages are swept, and halving that buys latency on the page that matters. The instalment page is still searched, alerted on and secured as normal |
 | `EP_SECURE_ON_FIND` | `0` | Set `1` to let the buying browser hold a resale listing. Needs `login-buy` first |
-| `EP_SECURE_TIMEOUT_SECONDS` | `45` | Seconds to spend trying to secure before giving up |
+| `EP_SECURE_TIMEOUT_SECONDS` | `300` | Seconds to spend trying to secure before giving up |
+| `EP_SECURE_ACTIVE_TIMEOUT` | `720` | The longer window used when Ticketmaster's own refusal page says the listing is still `active` — i.e. it did not sell, somebody is holding it, and a basket lapse is a real thing to wait for. Twelve minutes because a Ticketmaster basket holds for about ten, so anything shorter cannot see the event it is waiting for |
+| `EP_SECURE_ACTIVE_RETRIES` | `10` | Goes at a listing the refusal page calls active, against `EP_SECURE_RETRIES` for one the feed merely still shows. Not unlimited: if a basket has not lapsed in eight minutes, the buyer behind it is paying rather than dithering |
+| `EP_SECURE_RELIST_POLL` | `10` | Seconds between resale-feed checks while waiting out a basket. The pause watches the endpoint rather than the clock — one XHR a look instead of a whole search a retry, which is what keeps a ten-go chase from becoming the ~55 searches/hour that draws a block |
 | `EP_SECURE_MIN_INTERVAL` | `60` | Shortest gap between two securing attempts on one page. Separate from the alerting re-nag on purpose: a repeat email is noise, a repeat attempt is the job. Before this they shared a clock, and on 2026-08-20 stock visible at 20:04 and 20:06 drew no attempt because David had been emailed at 20:02 |
 | `EP_HOLD_PAUSE_EXTRA` | `10` | Minutes added to the hold window during which nothing will restart the watcher |
 | `EP_PRIORITY_WEEKEND` | `100` | Securing precedence of the two weekend pages. Higher wins the buying browser |
