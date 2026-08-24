@@ -103,8 +103,22 @@ check_true("tells him to use a browser, not the app", "not the app" in body_now)
 check_true("tells him the quantity to set", "Set the quantity" in body_now)
 check_true("warns the page defaults to 2", "defaults to 2" in body_now)
 check_true("names the panel to scroll to", "Verified Resale Tickets" in body_now)
-check_true("says a vanished listing may be a basket hold",
-           "basket" in body_now and "expire" in body_now)
+# Reworded 2026-08-24. The email used to tell David a vanished listing was
+# probably in somebody's basket and that such holds expire. The first half was
+# a guess and the second was advice built on it; five days of chases waiting
+# for those holds to lapse never saw one lapse. What is actually supported by
+# the logs is the observation, not the mechanism: listings have been lasting
+# around ten minutes and reappearing, so trying again is worth it whatever the
+# reason. The instruction to David is the same; the invented cause is gone.
+check_true("tells him a vanished listing is worth retrying",
+           "try again in a few minutes" in body_now.lower())
+check_true("and grounds that in what was measured, not in a theory",
+           "ten minutes" in body_now)
+# And while the buyer is refused on every listing, the alert must not imply
+# that securing is on its way — that buys hesitation exactly when it costs the
+# ticket.
+check_true("and tells him not to wait for the watcher",
+           "do not wait for the watcher" in body_now.lower())
 
 print("\nBasket alert — fired when a reserve actually succeeds")
 

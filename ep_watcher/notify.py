@@ -287,6 +287,20 @@ def _headline(listing: Listing) -> str:
 
 
 def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
+    # Is this a ticket he has not been told about, or the same one again?
+    #
+    # The alerts did not distinguish these, and on 2026-08-24 that sent 69
+    # pushes for 16 listings — roughly four apiece, every one titled and
+    # toned exactly like the first. An alert that arrives four times is not
+    # four times as loud; it is the alert being taught to be ignored, which
+    # matters more here than anywhere else because the plan now depends on
+    # David buying by hand from these.
+    #
+    # So a new ticket keeps everything: urgent priority, the ring, the works.
+    # A repeat says plainly that it is a repeat and arrives quietly. Both
+    # still carry the link, because a quiet reminder he happens to see is
+    # still a ticket he can buy.
+    is_repeat = not new_listings
     which = []
     if reading.primary in GOOD_STATUSES:
         which.append("box office")
@@ -309,7 +323,11 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     # The link goes first, and alone on its line. Everything below it is
     # context for afterwards; a listing that lives four minutes is not read
     # top to bottom.
-    subject = f"TICKETS AVAILABLE ({where}): {_headline(pick)} — {name}{_from_watcher()}"
+    subject = (
+        f"still there ({where}): {_headline(pick)} — {name}{_from_watcher()}"
+        if is_repeat else
+        f"TICKETS AVAILABLE ({where}): {_headline(pick)} — {name}{_from_watcher()}"
+    )
     body = (
         f"Hi David,\n\n"
         f"GO — {_headline(pick)} on the {where}, {name}.\n\n"
@@ -329,8 +347,14 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
         f"Trigger : {reason}\n"
         f"Source  : {reading.source}\n"
         f"Wanted  : {config.WANTED_QUANTITY} ticket(s)\n\n"
-        f"If it is gone, it may be in someone else's basket rather than sold —\n"
-        f"those holds expire, so it is worth trying again a few minutes later.\n\n"
+        f"IF IT IS GONE, try again in a few minutes anyway — listings have been\n"
+        f"lasting around ten minutes and reappearing, so a first refusal is\n"
+        f"often not the end of it.\n\n"
+        f"NOTE: the watcher itself is currently being refused at the checkout\n"
+        f"on every listing, while Ticketmaster's own error page confirms the\n"
+        f"ticket is still live. That is being investigated. It does not appear\n"
+        f"to affect buying by hand — so please do not wait for the watcher to\n"
+        f"secure this one.\n\n"
         f"Plain event page, if the link above misbehaves:\n{url}\n\n"
         f"Checked at: {stamp()}\n"
     )
@@ -338,12 +362,18 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     _push(
         "available-push",
         # Section and price in the title, so the lock screen alone is enough
-        # to decide whether to move.
-        title=f"EP2026 {_headline(pick)}",
+        # to decide whether to move. A repeat says so in the first word, for
+        # the same reason — the title is all that is read on a lock screen,
+        # and "still there" and "NEW" call for different reactions.
+        title=(f"still there — EP2026 {_headline(pick)}" if is_repeat
+               else f"NEW — EP2026 {_headline(pick)}"),
         message=f"{name}\n\n" + _listing_block(reading.listings)
                 + f"\n\nTap to open at quantity {config.WANTED_QUANTITY}.",
-        priority="urgent",
-        tags=["tickets", "rotating_light"],
+        # Urgent bypasses do-not-disturb on the phone. That is exactly right
+        # for a ticket he has not seen and exactly wrong for the fourth
+        # reminder about one he has.
+        priority="default" if is_repeat else "urgent",
+        tags=["tickets"] if is_repeat else ["tickets", "rotating_light"],
         click=link,
     )
     # Last, and only for the real thing. A ringing phone is the one channel
@@ -356,7 +386,10 @@ def available(reading: Reading, reason: str, new_listings: List[str]) -> None:
     # that a call from this number can be ignored — the precise habit that
     # would cost the ticket. `python -m ep_watcher ring` is the command for
     # proving the phone works, and it rings for real.
-    if not TEST_MODE:
+    # And never for a reminder. The ring is reserved for news; a phone that
+    # rings about a ticket he has already been told about twice is the fastest
+    # way to make the ring itself ignorable.
+    if not TEST_MODE and not is_repeat:
         _safe("call", ring_phone, f"{_headline(pick)} on {name}")
 
 
@@ -668,6 +701,53 @@ def buyer_blocked(reading: Reading, minutes: float) -> None:
                 f"work; tap the ticket email and buy it yourself.",
         priority="high",
         tags=["no_entry"],
+    )
+
+
+def buying_broken(reading: Reading, streak: int) -> None:
+    """A run of live listings refused at checkout. The buying path is broken.
+
+    Deliberately distinct from buyer_blocked() above, because the two states
+    look identical from the outside and call for opposite responses. A block
+    is Ticketmaster asking for less traffic; it clears, and resting is the
+    right answer. This is a checkout that accepts the request and hands back a
+    "sold out" page for a ticket that is still on sale — it does not clear on
+    its own, and waiting is the wrong answer.
+
+    Sent once per run, not once per refusal. The whole point is that the
+    per-attempt failure emails were arriving faithfully and truthfully for
+    five days while nothing said the sentence that mattered, which is that all
+    of them were the same failure.
+    """
+    name, url = _event_of(reading)
+    _safe(
+        "buying-broken-email", _send_email,
+        f"the watcher cannot buy at all — buy by hand{_from_watcher()}",
+        f"Hi David,\n\n"
+        f"{streak} tickets in a row have now been refused at the checkout on\n"
+        f"{name} — and in each case Ticketmaster's own error page confirmed\n"
+        f"the listing was still ACTIVE at the moment it refused us.\n\n"
+        f"WHAT THIS MEANS. The tickets are real and they are on sale. Finding\n"
+        f"them is working perfectly. What is not working is the last step,\n"
+        f"where the watcher clicks through to buy — that step is being\n"
+        f"refused every single time, on every listing.\n\n"
+        f"WHAT TO DO. Buy by hand from the link in the ticket alerts. Do not\n"
+        f"wait for the watcher to secure one; on current evidence it will not.\n"
+        f"Listings have been lasting around ten minutes, so there is usually\n"
+        f"more time than it feels like.\n\n"
+        f"WHAT IT IS NOT. Not your account, and not the sign-in — both check\n"
+        f"out fine. Not a race being lost either; the refusal arrives in a\n"
+        f"fifth of a second, long before any race could be run.\n\n"
+        f"{url}\n\n"
+        f"Sent at: {stamp()}\n"
+    )
+    _push(
+        "buying-broken-push",
+        title="Watcher can't buy — buy by hand",
+        message=f"{streak} live tickets refused at checkout in a row. Finding "
+                f"works, buying does not. Use the link in the ticket alert.",
+        priority="high",
+        tags=["rotating_light"],
     )
 
 

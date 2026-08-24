@@ -34,6 +34,11 @@ are here for one thing, it is most likely
 - [What it has actually caught](#what-it-has-actually-caught)
 - [Two pages, watched separately](#two-pages-watched-separately)
 - [Securing a ticket automatically (opt-in, off by default)](#securing-a-ticket-automatically-opt-in-off-by-default)
+  - [The test ran, and `qty=1` is refused too](#the-test-ran-and-qty1-is-refused-too)
+  - [Ten of fourteen retries never left the machine](#ten-of-fourteen-retries-never-left-the-machine)
+  - [The chase is two minutes now, not twelve](#the-chase-is-two-minutes-now-not-twelve)
+  - [A run of refusals now raises its own alarm](#a-run-of-refusals-now-raises-its-own-alarm)
+  - [The alerts stopped shouting about tickets he has already seen](#the-alerts-stopped-shouting-about-tickets-he-has-already-seen)
   - [How it runs](#how-it-runs)
   - [What happens when a listing appears](#what-happens-when-a-listing-appears)
   - [The weekend ticket always wins the browser](#the-weekend-ticket-always-wins-the-browser)
@@ -630,6 +635,118 @@ identify falls back, because "the URL loaded" is not "the URL worked".
 change. The evidence that it is the right request is strong — it is the page's
 own URL with the one field corrected — but treat the next find as the test.
 
+### The test ran, and `qty=1` is refused too
+
+Answered the same evening, 2026-08-24, by thirty-one requests across nine
+listings. **Every one was refused identically.**
+
+```
+?qty=0   18 requests   0 succeeded   302 -> /error/q404
+?qty=1   31 requests   0 succeeded   302 -> /error/q404
+```
+
+Taken together with everything before it, the checkout URL has now been asked
+**49 times and has never once returned an HTTP 200**, on any listing, on any
+day, at either quantity.
+
+The quantity was a real bug and fixing it was right. It was not *the* bug, and
+the section above is left standing rather than edited because the way it was
+wrong matters more than that it was wrong. It is the third confident diagnosis
+in a row — "we lost the race", then "it sat in somebody's basket", then "we
+asked for zero" — each written into the code as settled fact, each overturned
+by the following day's logs.
+
+The reason that keeps happening is structural: **this project has never
+observed a single successful checkout.** Every belief it holds about how
+buying works is reverse-engineered from failures, and there is no positive
+control anywhere in the data to check any of it against.
+
+Four causes are ruled out by evidence. It is not a lost race — the refusal
+arrives in a fifth of a second while the listing stays in the feed for another
+ten minutes. It is not a signed-out session — `check-buy` reports the cookies
+intact, and in one capture `identity.ticketmaster.ie` bounced straight back
+with a 302, which only happens when already authenticated. It is not a
+malformed URL — the offer id decodes and re-encodes exactly. And it is not a
+sold ticket — the error payload says `"active": true` at the moment of
+refusal.
+
+What remains is one of: the buying browser is flagged and `q404` is a polite
+refusal; the URL is no longer the live entry point and the real flow goes
+through `checkout.ticketmaster.ie/graphql`, which the traces show the page
+talking to; or a listing-level rule this cannot see. **`python -m ep_watcher
+probe-offer` separates all three** — see [Commands](#commands).
+
+### Ten of fourteen retries never left the machine
+
+Found in the same review, and it makes most of what the chase recorded
+fictional.
+
+Ticketmaster's 302 to `/error/q404` is cacheable, so Chrome caches it. On
+listing `l0vmtvwkd2`, fourteen visits produced **four** distinct Ticketmaster
+error ids; the other ten were replays from disk, returning in **1–2
+milliseconds** — not a possible round trip to Dublin, where the fastest real
+answer measured 120ms.
+
+That is worse than wasted time. A retry that cannot observe a change makes the
+chase logically incapable of succeeding, and every identical "still refused"
+it logged was then read as evidence the listing was still held — evidence the
+browser manufactured by not asking.
+
+Fixed by sending `Cache-Control: no-cache` on the offer navigation, and by
+recording any sub-50ms reply as a replay rather than counting it as a refusal.
+Deliberately **not** fixed with a cache-busting query parameter: a nonce would
+work too, but it changes the request Ticketmaster sees on the one path already
+being refused for reasons not yet understood, and that could add a second
+cause while making the first unreadable. `EP_OFFER_NO_CACHE=0` reverts.
+
+### The chase is two minutes now, not twelve
+
+`EP_SECURE_ACTIVE_TIMEOUT` went from 720 to 120, and `EP_SECURE_ACTIVE_RETRIES`
+from 10 to 3, on 2026-08-24.
+
+The twelve-minute window existed to outlast a basket hold. The evidence says
+there is no basket to outlast: a hold would show the listing dropping out of
+the feed and returning, and across fourteen visits `l0vmtvwkd2` never left.
+Ten chases ran the full window that day and none converted.
+
+What it cost was **122 minutes of buying-browser time in one day** — a fifth
+of it — plus six deferred watchdog restarts, because the watchdog rightly will
+not kill a chase it cannot distinguish from a hang. Three real, cache-busted
+attempts answer the only question this loop can currently answer: whether a
+refusal is transient or systematic.
+
+### A run of refusals now raises its own alarm
+
+Five live listings refused in a row sends one loud alert saying the buying
+path is broken, separately from the per-attempt failure emails.
+
+This is a reporting fix, not a buying one, and it is the one that would have
+saved the most time. The per-attempt emails arrived faithfully and truthfully
+for five days while 65 attempts produced 65 refusals, and nothing in the
+system ever said the sentence that mattered — that all of them were the same
+failure. A pattern is a different fact from any of its instances, and no
+per-listing message can state it however well written it is.
+
+Distinct from the block alert on purpose: a block is Ticketmaster asking for
+less traffic, and resting is the cooperative answer. This is something wrong
+at our end, which does not clear on its own, and the useful response is to
+tell David to buy by hand.
+
+### The alerts stopped shouting about tickets he has already seen
+
+On 2026-08-24 the watcher sent **69 pushes for 16 listings** — roughly four
+apiece, every one urgent, identically titled, and ringing the phone.
+
+An alert that arrives four times is not four times as loud; it teaches its
+reader to ignore it. That matters more here than it would anywhere else,
+because with the buyer converting nothing the plan now rests on David seeing
+an alert and buying by hand. The notification *is* the product.
+
+So a listing he has not been told about keeps everything: urgent priority, the
+ring, `NEW` first in the title. A repeat says `still there` first, drops to
+default priority, and does not ring — while still carrying the link, because a
+quiet reminder he happens to see is still a ticket he can buy.
+
 ### It was never a race, and the refusal page says so
 
 The single most useful thing this project has found, and it was sitting
@@ -1045,6 +1162,7 @@ sudo pmset -a sleep 0 disablesleep 1     # undo with disablesleep 0
 | `login` | Open Chrome to sign in by hand (only needed for *buying*) |
 | `login-buy` | The same, for the **buying** profile — needed for `EP_SECURE_ON_FIND` |
 | `check-buy` | Is the buying profile still signed in? Read-only, types nothing |
+| `probe-offer` | Ask one live checkout URL from **two** browsers — a copy of the signed-in buying profile, and a clean signed-out one — and compare. Two page loads; never sets a quantity, clicks a listing, baskets or pays. Needs a live listing, and finds one itself |
 | `calibrate` | Dump screenshot + text + HTML after a search |
 | `networks` | List every connection the watcher has seen, with blocks against each |
 | `status` | Print config and health, including the peak request rate |

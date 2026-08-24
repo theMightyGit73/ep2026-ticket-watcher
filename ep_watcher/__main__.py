@@ -157,6 +157,200 @@ def cmd_check_buy(_args) -> int:
     return 1
 
 
+def cmd_probe_offer(_args) -> int:
+    """Ask the same checkout URL from two different browsers, and compare.
+
+    ── The question this exists to answer ───────────────────────────────────
+
+    Between 2026-08-20 and 2026-08-24 the watcher found 65 resale listings and
+    secured none. Every attempt died the same way: the checkout URL answers
+    302 to /error/q404 — "sold or removed" — while Ticketmaster's own error
+    payload says the listing is `"active": true` and its feed keeps offering
+    the ticket for another ten minutes. Forty-nine requests, forty-nine
+    refusals, not one HTTP 200 in the project's entire history.
+
+    Three explanations survive the evidence, and the project cannot choose
+    between them by looking at more failures, because it has never once seen a
+    success. There is no positive control anywhere in the data — every belief
+    it holds about how buying works is reverse-engineered from things that
+    went wrong. That is how three confident diagnoses in a row ("we lost the
+    race", "it sat in a basket", "we asked for zero") each got written into
+    the code as settled and each was overturned by the next day's logs.
+
+    One measurement separates all three:
+
+      * BOTH browsers refused  -> the URL is not the live entry point, or the
+        listing genuinely cannot be sold to anyone at this quantity. Look at
+        checkout.ticketmaster.ie/graphql, which the traces show the real page
+        talking to.
+      * ONLY the watcher refused -> the buying browser or its account is
+        flagged, and q404 is a polite refusal rather than a true one. A clean
+        identity on a different connection is then the route worth taking.
+      * BOTH reached a checkout -> the failure is in how the watcher drives
+        the page, not in what Ticketmaster will allow, and it is a bug we own.
+
+    ── Why it is safe to run ────────────────────────────────────────────────
+
+    Two page loads. That is less traffic than one ordinary poll, on a
+    connection that has drawn 22 blocks and should not be spent casually. It
+    stops at whatever page it lands on: it never sets a quantity, never clicks
+    a listing, never puts anything in a basket and never pays. The clean side
+    uses a throwaway profile in a temp directory, signed out, so nothing it
+    does can touch the account or the buying session.
+
+    Needs a live listing to be meaningful, and finds one itself. During
+    daylight there is usually one within the hour; overnight there will be
+    nothing and it says so rather than inventing an answer.
+    """
+    import shutil
+    import tempfile
+    from . import buyer
+
+    _banner("Probing one checkout URL from two browsers")
+
+    # Work on a COPY of the buying profile, never the profile itself.
+    #
+    # Chrome takes an exclusive lock on a user-data-dir, and the watcher holds
+    # the real buying profile open all day for its warm browser. Pointing this
+    # at the original would either fail with "profile already in use" or, if
+    # the watcher happened to be down, leave a second Chrome writing to the
+    # session David signed in by hand — the one asset in this project that
+    # cannot be regenerated without him. A copy carries the cookies, which is
+    # everything this needs, and risks nothing.
+    def clone_buy_profile() -> Path:
+        dst = Path(tempfile.mkdtemp(prefix="ep-probe-signedin-"))
+        shutil.copytree(
+            config.BUY_PROFILE_DIR, dst, dirs_exist_ok=True,
+            # Lock files and sockets belong to the running Chrome and either
+            # refuse to copy or confuse the one we are about to start.
+            ignore=shutil.ignore_patterns(
+                "Singleton*", "*.lock", "lockfile", "*.sock"),
+        )
+        return dst
+
+    try:
+        signed_in_dir = clone_buy_profile()
+    except Exception as exc:
+        print(f"  [FAIL]  could not copy the buying profile: "
+              f"{type(exc).__name__}: {exc}\n")
+        return 1
+
+    events = [e for e in config.EVENTS if getattr(e, "secure_priority", 0)]
+    listing_id = ""
+    event = None
+
+    # Find something live to ask about. The signed-in copy is used for the
+    # lookup because it is the session Ticketmaster already accepts; a fresh
+    # profile would have to clear the bot check from cold just to read a feed.
+    print("  Looking for a live listing...\n")
+    for candidate in events:
+        try:
+            with _browser().BrowserSession(profile_dir=signed_in_dir) as session:
+                data = session.fetch_resale_json(candidate,
+                                                 config.WANTED_QUANTITY) or {}
+        except Exception as exc:
+            print(f"  could not ask {candidate.slug}: {type(exc).__name__}: {exc}")
+            continue
+        picks = (data or {}).get("picks") or []
+        if picks:
+            listing_id = (picks[0].get("resaleListingId")
+                          or picks[0].get("id") or "")
+            event = candidate
+            print(f"  [ OK ]  {candidate.slug}: {len(picks)} listing(s), "
+                  f"probing {listing_id}\n")
+            break
+        print(f"  [ -- ]  {candidate.slug}: nothing on sale")
+
+    if not listing_id or event is None:
+        shutil.rmtree(signed_in_dir, ignore_errors=True)
+        print("\n  Nothing is listed right now, so there is nothing to probe.")
+        print("  Re-run when an alert arrives — that is exactly the moment")
+        print("  this answers. Almost nothing appears between 22:00 and 09:00.\n")
+        return 1
+
+    url = buyer.offer_url(event, listing_id)
+    if not url:
+        shutil.rmtree(signed_in_dir, ignore_errors=True)
+        print(f"\n  [FAIL]  could not build an offer URL for {listing_id}\n")
+        return 1
+    print(f"  URL: {url}\n")
+
+    def look(label: str, profile_dir, signed_in: bool) -> dict:
+        """Load the URL once and report where it ended up."""
+        out = {"label": label, "landed": "", "verdict": "", "error": ""}
+        try:
+            with _browser().BrowserSession(profile_dir=profile_dir) as session:
+                page = session.page
+                # The same no-cache discipline the buyer now uses. Without it
+                # a second look at the same listing can be answered by Chrome
+                # rather than Ticketmaster, which is precisely the bug that
+                # made ten of fourteen retries fictional on 2026-08-24.
+                buyer._disable_offer_cache(page)
+                page.goto(url, wait_until="domcontentloaded",
+                          timeout=config.PAGE_TIMEOUT_MS)
+                out["landed"] = page.url
+                ctx = buyer.read_error_context(page.url) or {}
+                listing = (ctx.get("listing") or {})
+                if "/error/" in page.url:
+                    out["verdict"] = "REFUSED (sold-or-removed screen)"
+                    if listing.get("active") is True:
+                        out["verdict"] += " — but the payload says ACTIVE"
+                else:
+                    out["verdict"] = "reached a page that is not the refusal"
+        except Exception as exc:
+            out["error"] = f"{type(exc).__name__}: {exc}"
+            out["verdict"] = "could not load"
+        return out
+
+    clean_dir = Path(tempfile.mkdtemp(prefix="ep-probe-clean-"))
+    try:
+        watcher_side = look("a copy of the watcher's buying profile (signed in)",
+                            signed_in_dir, True)
+        clean_side = look("a clean throwaway profile (signed out)",
+                          clean_dir, False)
+    finally:
+        # Both are scratch directories from mkdtemp above, never a real
+        # profile — the buying profile itself is not touched by this command
+        # at any point, only copied out of.
+        shutil.rmtree(clean_dir, ignore_errors=True)
+        shutil.rmtree(signed_in_dir, ignore_errors=True)
+
+    print()
+    for side in (watcher_side, clean_side):
+        print(f"  {side['label']}")
+        print(f"      verdict : {side['verdict']}")
+        if side["landed"]:
+            print(f"      landed  : {side['landed'][:110]}")
+        if side["error"]:
+            print(f"      error   : {side['error']}")
+        print()
+
+    w_refused = "REFUSED" in watcher_side["verdict"]
+    c_refused = "REFUSED" in clean_side["verdict"]
+
+    print("  " + "-" * 62)
+    if w_refused and c_refused:
+        print("  BOTH refused. This is not bot detection singling out the")
+        print("  watcher — a clean, signed-out browser is refused identically.")
+        print("  The offer URL is very likely no longer the entry point the")
+        print("  live page uses. Next: capture what a real click requests,")
+        print("  and look at checkout.ticketmaster.ie/graphql.")
+    elif w_refused and not c_refused:
+        print("  ONLY THE WATCHER was refused. The clean browser got through,")
+        print("  so the URL is right and the listing is buyable — this browser")
+        print("  or this account is being singled out. Next: a fresh profile")
+        print("  and a fresh account, off the home connection.")
+    elif not w_refused and not c_refused:
+        print("  NEITHER was refused. The URL works from both. The failure is")
+        print("  in how the buyer drives the page after arriving — a bug we")
+        print("  own, and the first one in a fortnight that is ours to fix.")
+    else:
+        print("  The watcher got through and the clean browser did not, which")
+        print("  is the signed-in session doing its job. Not a failure.")
+    print("  " + "-" * 62 + "\n")
+    return 0
+
+
 def cmd_login(_args) -> int:
     """Sign in by hand, once. The cookies land in the profile dir and every
     later run reuses them — this is the whole reason the watcher can see a
@@ -1812,6 +2006,7 @@ COMMANDS = {
     "login": cmd_login,
     "login-buy": cmd_login_buy,
     "check-buy": cmd_check_buy,
+    "probe-offer": cmd_probe_offer,
     "login-auto": cmd_login_auto,
     "check": cmd_check,
     "run": cmd_run,

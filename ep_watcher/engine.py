@@ -671,6 +671,12 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
         # the qty=0 refusal that lost every ticket to date, so "did it go
         # direct" belongs beside "did it work".
         used_direct=bool(getattr(hold, "used_direct", False)),
+        # Navigations answered from Chrome's cache rather than by
+        # Ticketmaster. Queryable because it is the number that decides how
+        # much of a chase actually happened: the ten replays of 2026-08-24
+        # were read for a day as ten refusals, and a refusal nobody sent is
+        # not a refusal. A run of these means the chase is talking to itself.
+        cache_replays=int(getattr(hold, "cache_replays", 0) or 0),
         traced=len(getattr(hold, "trace", []) or []),
         # Queryable, because "how often is the buying browser being blocked"
         # is a question about the health of the whole approach, not about one
@@ -688,6 +694,28 @@ def _maybe_secure(reading: Reading, st: dict = None, quiet: bool = False):
               f"and alerting continue.")
         _safely("blocked-buyer alert", notify.buyer_blocked,
                 reading, config.SECURE_BLOCK_COOLDOWN_MINUTES)
+
+    # Watch the run, not just the attempt.
+    #
+    # A refusal of a listing Ticketmaster calls ACTIVE is the signature of the
+    # failure that lost all 65 tickets between 2026-08-20 and 2026-08-24: not
+    # a block, not a sale, not a lost race — a checkout that hands back a
+    # plausible "sold out" for a ticket that is demonstrably still on sale.
+    # Counted here rather than inside the buyer because the fact worth
+    # alerting on spans attempts, and no single attempt can see it.
+    #
+    # Blocks are excluded: a challenged attempt never reached the checkout, so
+    # it is evidence about traffic rather than about buying, and
+    # note_secure_block above already owns that case.
+    if st is not None and not getattr(hold, "challenged", False):
+        refused_live = bool(getattr(hold, "ever_active", False)) and not hold.secured
+        if state_mod.note_secure_refusal(st, refused_live):
+            print(f"[{stamp()}] SYSTEMATIC REFUSAL — "
+                  f"{config.SECURE_REFUSAL_STREAK} live listings in a row were "
+                  f"refused at checkout. The tickets were real and on sale; the "
+                  f"buying path is not working. Buy by hand from the alerts.")
+            _safely("systematic-refusal alert", notify.buying_broken,
+                    reading, config.SECURE_REFUSAL_STREAK)
 
     if hold.secured:
         print(f"[{stamp()}] HOLD LIVE — browser left open for checkout")

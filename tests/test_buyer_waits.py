@@ -130,10 +130,19 @@ print("\n'Gone' may only be claimed when the endpoint says so")
 session = FakeSession(rows_visible=False, picks=[])
 hold = run(session)
 check("nothing was held", hold.secured, False)
-check_true("a genuinely empty endpoint reads as sold",
-           "genuinely sold" in hold.reason)
-check_true("and says the race was lost at the last step",
-           "race was lost" in hold.reason)
+# Reworded 2026-08-24. This used to require the words "genuinely sold" and
+# "race was lost", and the check was right about the SHAPE — an empty endpoint
+# must read differently from one that still lists the ticket — while being
+# wrong about the certainty. An empty feed is also what a withdrawal looks
+# like, and what 49 consecutive refusals look like, so "sold" was a guess
+# stated as a finding. The distinction being defended is unchanged; only the
+# confidence is.
+check_true("an empty endpoint reads as no longer offered",
+           "no longer being offered" in hold.reason)
+check_true("names a sale as the likely cause, not the certain one",
+           "Most likely sold" in hold.reason)
+check_true("and admits the alternatives cannot be told apart",
+           "Not distinguishable" in hold.reason)
 
 print("\nAnd when the endpoint still has it, that is NOT a lost race")
 # This is the case that was misreported three times. The listing is there, the

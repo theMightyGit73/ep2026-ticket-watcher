@@ -904,7 +904,15 @@ WARM_BUY_BROWSER = os.environ.get("EP_WARM_BUY_BROWSER", "1").lower() in ("1", "
 # of looking for one that probably is not. That is the whole trade, and it is
 # only ever spent on a listing already confirmed present — see secure(), which
 # gives up at once when the feed agrees the ticket has gone.
-SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "300"))
+# 2026-08-24, second revision: 120, down from 300.
+#
+# The paragraph above trades chase-time against search-time on the assumption
+# that a chase can win. Five days of evidence say this one cannot: 49 of 49
+# checkout requests were refused, and not one of them ever returned a page
+# that could be bought from. Until a single successful checkout has been
+# observed, a long chase is not a bet with poor odds — it is a bet with no
+# recorded winner, paid for with the buying browser's whole day.
+SECURE_TIMEOUT_SECONDS = int(os.environ.get("EP_SECURE_TIMEOUT_SECONDS", "120"))
 
 #: How many extra goes at a listing the feed says did not actually sell.
 #:
@@ -940,7 +948,10 @@ SECURE_RETRIES = int(os.environ.get("EP_SECURE_RETRIES", "6"))
 # basket lapses in twenty seconds — the one measured case was still held after
 # seventy-five — so a short pause spent the budget on page loads instead of on
 # waiting, which is the thing that actually has to happen.
-SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "40"))
+# Twenty, back down from forty. Forty was chosen to give a basket time to
+# lapse; with the chase no longer built on that theory, the pause exists only
+# to keep three attempts from arriving as one burst.
+SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "20"))
 
 #: The budget when Ticketmaster's own error page says the listing is ACTIVE.
 #:
@@ -964,8 +975,31 @@ SECURE_RETRY_PAUSE_SECONDS = float(os.environ.get("EP_SECURE_RETRY_PAUSE", "40")
 #: blocked for the duration, so another page's listing could be missed. It is
 #: spent against a ticket already confirmed present rather than against the
 #: hope of a better one, and a weekend ticket can still preempt the lot.
+#
+# ── 2026-08-24, revised down to 120 from 720 ─────────────────────────────
+#
+# The reasoning above is sound and its premise is now falsified. It reads
+# `"active": true` as proof that a basket is holding the ticket, and infers
+# that the basket will lapse. The first half is solid — Ticketmaster does say
+# the listing is live. The second half was never evidence, and the chases it
+# authorised have now tested it thoroughly:
+#
+#   * Ten chases on 2026-08-24 ran the full twelve-minute window. None
+#     converted. Nothing ever "came free".
+#   * A basket lapsing would show up as a listing that disappears and returns.
+#     Listing l0vmtvwkd2 was visible continuously across fourteen visits.
+#   * Ten of those fourteen retries never reached Ticketmaster at all: the
+#     302 came back from Chrome's cache in one to two milliseconds. Most of
+#     the chase was the browser talking to itself.
+#
+# What the window actually bought was 114 minutes of buying-browser time on
+# 2026-08-24, a fifth of the day, plus six deferred watchdog restarts.
+#
+# Two minutes and three real attempts is enough to catch a genuine transient
+# refusal, which is all this can honestly claim to be for until a successful
+# checkout has been observed even once.
 SECURE_ACTIVE_TIMEOUT_SECONDS = int(
-    os.environ.get("EP_SECURE_ACTIVE_TIMEOUT", "720"))
+    os.environ.get("EP_SECURE_ACTIVE_TIMEOUT", "120"))
 
 #: How many goes at a listing the error page says is still active.
 #:
@@ -974,7 +1008,11 @@ SECURE_ACTIVE_TIMEOUT_SECONDS = int(
 #: unlimited: every go is another request against a connection that has been
 #: blocked twenty-three times, and if a basket has not lapsed in eight minutes
 #: the buyer behind it is probably paying rather than dithering.
-SECURE_ACTIVE_RETRIES = int(os.environ.get("EP_SECURE_ACTIVE_RETRIES", "10"))
+# Three, not ten. Ten goes at forty-second pauses assumed the thing being
+# waited for was real; see the window above. Three real, cache-busted attempts
+# distinguish a transient refusal from a systematic one, which is the only
+# question this loop can currently answer.
+SECURE_ACTIVE_RETRIES = int(os.environ.get("EP_SECURE_ACTIVE_RETRIES", "3"))
 
 
 #: Go straight to the listing's checkout URL instead of clicking its row.
@@ -997,6 +1035,43 @@ SECURE_ACTIVE_RETRIES = int(os.environ.get("EP_SECURE_ACTIVE_RETRIES", "10"))
 #: checkout, and the old path stays underneath as the fallback. Set 0 to go
 #: back to clicking the row, with its known behaviour and its known result.
 DIRECT_OFFER = os.environ.get("EP_DIRECT_OFFER", "1").lower() in ("1", "true", "yes")
+
+#: Force every offer navigation onto the network instead of Chrome's cache.
+#:
+#: Not a tuning knob. Without it most of a chase is fictional.
+#:
+#: Ticketmaster answers the offer URL with a 302 to /error/q404, and that
+#: redirect is cacheable. Chrome duly caches it, so the second and subsequent
+#: visits to the same listing are answered from disk — the request never
+#: leaves the machine, and the "refusal" being recorded is a copy of the first
+#: one. The traces of 2026-08-24 measure it plainly: the first attempt on a
+#: listing takes 120-330ms, and the retries come back in 1-2ms, which is not a
+#: possible round trip to Dublin. On listing l0vmtvwkd2, ten of fourteen
+#: retries were cache replays, and the four that were real produced four
+#: distinct error ids while the ten produced none.
+#:
+#: The consequence is worse than wasted time. A retry that cannot observe a
+#: change makes the chase logically incapable of succeeding, and every
+#: identical "still refused" it logged was read as evidence that the listing
+#: was still held — evidence the browser manufactured by not asking.
+#:
+#: Done with request headers rather than a cache-busting query parameter, on
+#: purpose. A nonce in the URL would defeat the cache just as well, but it
+#: also changes the request Ticketmaster sees on the one path that is already
+#: being refused for reasons not yet understood; introducing an unknown
+#: parameter there could add a second cause and make the first unreadable.
+#: `Cache-Control: no-cache` changes only who answers.
+OFFER_NO_CACHE = os.environ.get(
+    "EP_OFFER_NO_CACHE", "1").lower() in ("1", "true", "yes")
+
+#: Below this, a response cannot have come from Ticketmaster.
+#:
+#: Used to label a navigation as a cache replay in the diagnostics rather than
+#: letting it pass as a refusal. Dublin from this connection measures 120ms at
+#: its fastest and the cache replays measure 1-2ms, so anything under 50ms is
+#: unambiguous — there is no plausible network path that fast.
+CACHE_REPLAY_SECONDS = float(
+    os.environ.get("EP_CACHE_REPLAY_SECONDS", "0.05"))
 
 #: How often to check the resale feed while waiting out a basket.
 #:
@@ -1078,6 +1153,20 @@ SECURE_CHALLENGE_PAUSE_SECONDS = float(
 #: feeding whatever detection is unhappy, and it lets David be told once,
 #: clearly, that only he can buy right now.
 SECURE_BLOCK_STREAK = int(os.environ.get("EP_SECURE_BLOCK_STREAK", "3"))
+
+#: How many refusals of a LIVE listing in a row before saying the buying
+#: itself is broken. See state.note_secure_refusal().
+#:
+#: Five, because the thing being detected is a pattern rather than an
+#: incident, and a pattern needs enough instances to be one. One refusal is
+#: routine, two is bad luck, five in a row on five different listings that
+#: Ticketmaster itself called active is not a run of bad luck — it is the
+#: shape of the last five days, in which 65 attempts produced 65 refusals and
+#: nothing in the system ever said so.
+#:
+#: Reached quickly by design: at roughly thirteen listings a day this trips
+#: within hours of a regression rather than after somebody reads the logs.
+SECURE_REFUSAL_STREAK = int(os.environ.get("EP_SECURE_REFUSAL_STREAK", "5"))
 
 #: How long the buyer rests once that streak is reached. Alerting and watching
 #: are untouched throughout — only the buying browser stands down.

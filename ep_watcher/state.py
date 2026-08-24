@@ -139,6 +139,13 @@ def _defaults():
         "secure_block_streak": 0,
         "secure_cooldown_until": None,    # ISO8601
         "secure_block_alerted": None,     # ISO8601, so it says so once
+        # Consecutive attempts refused with the listing still live. Counted
+        # apart from blocks because they look nothing alike from outside — a
+        # block announces itself, this one hands back a plausible "sold out"
+        # — and because a run of them means something is wrong with the way
+        # this project buys, not with one listing. See note_secure_refusal().
+        "secure_refusal_streak": 0,
+        "secure_refusal_alerted": None,   # ISO8601, so it says so once
         # While the buyer is working and the poll clock has stopped for it.
         # Read by watchdog.sh, which would otherwise mistake a twelve-minute
         # chase for a wedged process — see note_securing().
@@ -568,6 +575,49 @@ def note_secure_block(state: dict, challenged: bool) -> bool:
     state["secure_cooldown_until"] = (
         utc_now() + timedelta(minutes=config.SECURE_BLOCK_COOLDOWN_MINUTES)
     ).isoformat()
+    return True
+
+
+def note_secure_refusal(state: dict, refused: bool) -> bool:
+    """Count a refusal of a live listing, and raise the alarm once on a run.
+
+    True when this call is the one that trips the alarm, so the caller can say
+    so exactly once. A single success anywhere resets the count.
+
+    ── Why this exists ──────────────────────────────────────────────────────
+
+    Between 2026-08-20 and 2026-08-24 this project attempted to buy 65 resale
+    listings and secured none of them. Every attempt was refused at the same
+    step, and every refusal was explained individually, in prose, in the log:
+    a lost race, then a basket, then a quantity. Each explanation was
+    plausible for one listing and absurd for sixty-five, and nothing in the
+    system was watching the sixty-five.
+
+    That is the failure this guards against, and it is a reporting failure
+    rather than a buying one. A run of identical refusals is a different fact
+    from any one of them — it says the way we are buying does not work, which
+    no per-listing message can say however well written it is. So this counts
+    them and says it out loud, once, instead of leaving the pattern to be
+    noticed by whoever next reads five days of logs end to end.
+
+    Deliberately does NOT stand the buyer down, which is what note_secure_block
+    does above. A block is Ticketmaster asking for less traffic and resting is
+    the cooperative answer. This is something being wrong at our end, and the
+    useful response is to tell David to buy by hand — the attempts themselves
+    are cheap, bounded, and might start working the moment the cause changes.
+    """
+    if not refused:
+        state["secure_refusal_streak"] = 0
+        state["secure_refusal_alerted"] = None
+        return False
+    streak = int(state.get("secure_refusal_streak") or 0) + 1
+    state["secure_refusal_streak"] = streak
+    if streak < config.SECURE_REFUSAL_STREAK:
+        return False
+    # Once per run of refusals, not once per refusal past the threshold.
+    if state.get("secure_refusal_alerted"):
+        return False
+    state["secure_refusal_alerted"] = utc_now().isoformat()
     return True
 
 

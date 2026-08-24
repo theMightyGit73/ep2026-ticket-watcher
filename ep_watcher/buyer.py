@@ -472,6 +472,98 @@ def offer_url(event, listing_id: str, qty: int = None) -> str:
     return f"https://{host}/{event_id}/{listing_id}?qty={int(wanted)}"
 
 
+def _disable_offer_cache(page, result=None) -> bool:
+    """Make the next navigation ask Ticketmaster rather than Chrome.
+
+    See config.OFFER_NO_CACHE for what this is fixing and how it was measured.
+    The short version: Ticketmaster's refusal is a cacheable 302, Chrome
+    caches it, and a chase that revisits the same listing then re-reads its
+    own copy of the first answer instead of finding out whether anything has
+    changed.
+
+    Set on the page rather than the context so it survives nothing else and
+    affects nothing else; the buying browser makes ordinary page loads too and
+    there is no reason to make those uncacheable.
+
+    Never raises. A browser that will not take the header still gets its
+    navigation — with the old, cached behaviour — which is strictly what it
+    had before this existed.
+    """
+    if not config.OFFER_NO_CACHE:
+        return False
+    try:
+        page.set_extra_http_headers({
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        })
+        return True
+    except Exception as exc:
+        if result is not None:
+            result.note(f"could not turn off the browser cache for this "
+                        f"navigation ({type(exc).__name__}) — a repeat visit "
+                        f"may be answered from cache rather than by Ticketmaster")
+        return False
+
+
+def _note_if_cached(result, seconds: float) -> bool:
+    """Say so when a 'refusal' never left the machine.
+
+    A navigation that resolves faster than the network possibly can was served
+    from cache, and whatever it appears to prove, it proves nothing about the
+    listing. Recording that in the attempt's own notes is the difference
+    between a chase that can be trusted and the one of 2026-08-24, where ten
+    of fourteen retries were replays and every one was filed as fresh evidence
+    that the ticket was still held.
+
+    Returns True when the navigation looks like a replay, so callers and tests
+    can act on it rather than only reading about it.
+    """
+    if seconds >= config.CACHE_REPLAY_SECONDS:
+        return False
+    if result is not None:
+        result.cache_replays = getattr(result, "cache_replays", 0) + 1
+        result.note(
+            f"this navigation came back in {seconds * 1000:.0f}ms, which is "
+            f"too fast to have reached Ticketmaster — it was answered from "
+            f"the browser cache, so it says nothing about the listing")
+    return True
+
+
+def active_refusal_reason(out) -> str:
+    """What to say when Ticketmaster refuses a listing it calls ACTIVE.
+
+    Module-level rather than buried in secure()'s verdict() so that the exact
+    wording can be tested. That is not a stylistic preference: the wording is
+    the thing that went wrong. This message is the project's own account of
+    why it keeps failing, it is what gets read the next morning, and three
+    versions of it in a row named a cause that the following day's evidence
+    disproved — a lost race, then a basket, then a quantity of zero. Each was
+    written as a finding rather than a guess, and each sent the next day's
+    work somewhere useless.
+
+    So the rule this encodes: say what was observed, and stop naming a cause.
+    Two things are actually known at this point — Ticketmaster refused us, and
+    Ticketmaster said the listing was live. The reason for the refusal is not
+    in evidence, and the honest record says so rather than filling the gap
+    with the most plausible story available.
+    """
+    replayed = getattr(out, "cache_replays", 0) or 0
+    attempts = getattr(out, "attempts", 0) or 0
+    minutes = (getattr(out, "elapsed", 0.0) or 0.0) / 60
+    summary = getattr(out, "offer_summary", "") or ""
+    return (
+        f"Ticketmaster refused this listing while its own error page said the "
+        f"listing was still ACTIVE. So it had not sold, and this was not a "
+        f"race lost at the click — but why we were refused is NOT established. "
+        f"We tried {attempts} time(s) over {minutes:.0f} min and were refused "
+        f"every time."
+        + (f" {replayed} of those never reached Ticketmaster (browser cache), "
+           f"so they prove nothing." if replayed else "")
+        + (f" Offer: {summary}." if summary else "")
+        + " Buy it by hand from the link in the alert."
+    )
+
+
 def describe_offer(listing: dict) -> str:
     """One line about the listing Ticketmaster refused, for an alert.
 
@@ -894,6 +986,16 @@ class HoldResult:
     #: page says 11:39" deserve different amounts of trust — and the estimate
     #: comes from one observation of an entirely different event.
     minutes_measured: bool = False
+
+    #: How many navigations in this attempt were answered by Chrome rather
+    #: than by Ticketmaster — see _note_if_cached().
+    #:
+    #: Recorded because a chase's honesty depends on it. Any refusal counted
+    #: here observed nothing, so a chase whose replays outnumber its real
+    #: requests has not established that a listing is still held; it has
+    #: established that nobody asked. On 2026-08-24 that was ten attempts in
+    #: fourteen, and the whole basket theory rested on them.
+    cache_replays: int = 0
 
     #: Seconds spent on each step, in the order they happened.
     #:
@@ -1728,15 +1830,23 @@ def secure(session: BuySession, event, listing, result: HoldResult = None) -> Ho
         # refusals of live tickets as lost races, which pointed a fortnight of
         # work at shaving seconds off a click that was never the problem.
         if out.ever_active and not out.secured:
-            out.reason = (
-                f"this was never a race. Ticketmaster refused the listing and "
-                f"its own error page said, at that moment, that the listing "
-                f"was still ACTIVE — so it had not sold; it was spoken for, "
-                f"most likely sitting in somebody else's basket. We went back "
-                f"{out.attempts} time(s) over "
-                f"{out.elapsed / 60:.0f} min and it never came free."
-                + (f" Offer: {out.offer_summary}." if out.offer_summary else "")
-            )
+            # Say what was observed; stop naming a cause.
+            #
+            # This message used to end "most likely sitting in somebody else's
+            # basket". That was an inference, written as a finding, and five
+            # days of data have now contradicted it: a basket hold would show
+            # the listing dropping out of the feed and returning, and across
+            # fourteen visits to l0vmtvwkd2 it never left. It also sent the
+            # chase off to wait twelve minutes for a lapse that never came.
+            #
+            # The pattern this project keeps repeating is not a wrong guess,
+            # it is a guess recorded as a fact — "we lost the race", "it was
+            # in a basket", "we asked for zero", each written into the log as
+            # settled and each overturned by the next day's evidence. What is
+            # actually known here is exactly two things: Ticketmaster refused
+            # us, and Ticketmaster said the listing was live. The reason for
+            # the refusal is not in evidence, and the honest record says so.
+            out.reason = active_refusal_reason(out)
             out.note(out.reason)
             return out
         if out.ever_listed_after and not out.secured and not out.still_listed_after:
@@ -2190,8 +2300,11 @@ def _secure_once(session: BuySession, event, listing,
         if direct:
             result.note(f"going straight to the offer: {direct}")
             try:
+                _disable_offer_cache(page, result)
+                _t0 = time.monotonic()
                 page.goto(direct, wait_until="domcontentloaded",
                           timeout=config.PAGE_TIMEOUT_MS)
+                _note_if_cached(result, time.monotonic() - _t0)
                 result.used_direct = True
                 result.mark("direct")
             except (PlaywrightTimeout, PlaywrightError) as exc:
@@ -2359,9 +2472,18 @@ def _secure_once(session: BuySession, event, listing,
                         f"race — the ticket was there and reachable by hand."
                     )
                 elif result.still_listed_after is False:
+                    # "Sold" is one explanation, not the only one, and this
+                    # cannot tell them apart. The feed also goes empty when a
+                    # listing is withdrawn, and — on the evidence of 49
+                    # consecutive refusals — when Ticketmaster simply stops
+                    # offering it to this browser. Claiming a sale here is
+                    # what filed live tickets as lost races for a fortnight
+                    # and pointed the work at speed.
                     result.reason = (
-                        "the listing had genuinely sold — the resale endpoint "
-                        "reports nothing left. The race was lost at the last step."
+                        "the listing is no longer being offered to us — the "
+                        "page refused it and the resale endpoint now reports "
+                        "nothing left. Most likely sold; possibly withdrawn. "
+                        "Not distinguishable from here."
                     )
                 else:
                     result.reason = (
@@ -2775,6 +2897,9 @@ def capture_failure(page, result: "HoldResult", event, attempt: int = 1) -> str:
         # Listing.offer_ids and OfferTrace.
         "offer_ids": list(result.offer_ids),
         "used_direct": result.used_direct,
+        # How many of this attempt's navigations Chrome answered by itself.
+        # Anything above zero means part of what follows is not evidence.
+        "cache_replays": getattr(result, "cache_replays", 0),
         "row_href": result.row_href,
         "trace": list(result.trace),
         "notes": list(result.notes),

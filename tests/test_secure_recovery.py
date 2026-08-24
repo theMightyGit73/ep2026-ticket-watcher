@@ -276,8 +276,13 @@ page = FakePage(EVENT.url, rows_visible=False)
 session = FakeSession(page, feed=payload([]))
 result = buyer._secure_once(session, EVENT, LISTING)
 check("the feed says nothing is left", result.still_listed_after, False)
-check_true("and the reason says so plainly",
-           "genuinely sold" in (result.reason or ""))
+# See test_buyer_waits.py for why "genuinely sold" became "most likely sold".
+# The property under test is that this case is distinguishable from the one
+# above it, not that the project is certain what happened.
+check_true("and the reason says it is no longer offered to us",
+           "no longer being offered" in (result.reason or ""))
+check_true("naming a sale as likely rather than established",
+           "Most likely sold" in (result.reason or ""))
 
 print("\n...and from not being able to ask at all")
 # The third case is not a detail. "Sold" and "we could not tell" call for

@@ -187,8 +187,14 @@ truthy("reports secured", out.secured)
 
 print("\nthe verdict says what actually happened")
 out, n = run_secure([{"listing_active": True, "still_listed_after": None}])
+# The wording moved on 2026-08-24 from "this was never a race" to "this was
+# not a race lost at the click", because the message stopped naming a cause it
+# could not evidence. Either phrasing satisfies what is actually being
+# defended: the reason must not blame speed for a refusal that arrived in a
+# fifth of a second on a listing Ticketmaster called live.
 truthy("does not call it a lost race", "race" not in out.reason.lower()
-       or "never a race" in out.reason.lower())
+       or "never a race" in out.reason.lower()
+       or "not a race" in out.reason.lower())
 truthy("says the listing was active", "ACTIVE" in out.reason)
 
 print("\nan active listing must not be reported as sold")
