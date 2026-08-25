@@ -383,25 +383,26 @@ def cmd_probe_offer(_args) -> int:
             print(f"      error   : {side['error']}")
         print()
 
-    # Two independent browsers must produce two independent error ids.
+    # A shared error id is expected here, and does NOT mean one observation
+    # was counted twice.
     #
-    # Ticketmaster mints a fresh `cid` per refusal — the buying browser's own
-    # three attempts on 2026-08-25 produced three distinct ones twelve seconds
-    # apart. So if both sides of this probe come back with the SAME cid, the
-    # two sides did not make two requests, and whatever the verdict says is an
-    # artifact of this command rather than a fact about Ticketmaster.
+    # That guard was added first and was wrong. It assumed Ticketmaster mints
+    # a fresh cid per request. The control that settles it was already on
+    # record: probing a made-up listing id returned the SAME cid to both
+    # sides, and nothing about a nonexistent id could make this command
+    # collapse two browsers into one — the code path is identical. Across
+    # runs the cid does change (1afbc85e at 12:05, 7db9c8c2 at 12:28 on the
+    # same listing, whose price moved between them), so the id tracks the
+    # listing's state rather than the individual request.
     #
-    # Worth failing loudly on. The entire value of this probe is that it
-    # compares two independent observations, and a project with this one's
-    # record of confident wrong answers should not be allowed to publish a
-    # conclusion drawn from one observation printed twice.
-    a, b = cid_of(watcher_side["landed"]), cid_of(clean_side["landed"])
-    if a and a == b:
+    # What actually needs checking is the thing the guard was reaching for:
+    # that the two sides really were two browsers. That is answerable
+    # directly, and cheaply, by confirming they were given different profile
+    # directories — so it is checked rather than inferred from a cid.
+    if str(signed_in_dir) == str(clean_dir):
         print("  " + "!" * 62)
-        print("  SUSPECT RESULT — both browsers reported the same error id")
-        print(f"  ({a}). Ticketmaster issues a new one per refusal, so this")
-        print("  looks like one observation counted twice rather than two")
-        print("  independent ones. Do not draw a conclusion from this run.")
+        print("  BROKEN PROBE — both sides used the same profile directory,")
+        print("  so this is one observation counted twice. No conclusion.")
         print("  " + "!" * 62 + "\n")
         return 2
 
