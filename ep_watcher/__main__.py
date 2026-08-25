@@ -220,23 +220,45 @@ def cmd_probe_offer(_args) -> int:
     # everything this needs, and risks nothing.
     def clone_buy_profile() -> Path:
         dst = Path(tempfile.mkdtemp(prefix="ep-probe-signedin-"))
-        shutil.copytree(
-            config.BUY_PROFILE_DIR, dst, dirs_exist_ok=True,
-            # These belong to the Chrome that is running right now, and every
-            # one of them either refuses to copy or confuses the browser we
-            # are about to start. `RunningChromeVersion` is the one that bit:
-            # it is a symlink pointing at a live process's version file, so it
-            # dangles the moment you read it from outside, and copytree fails
-            # the entire copy on it rather than skipping it.
-            ignore=shutil.ignore_patterns(
-                "Singleton*", "RunningChromeVersion", "*.lock", "lockfile",
-                "*.sock", "*.pid"),
-            # Belt and braces for anything else transient the live browser
-            # leaves lying about. A profile copy that dies on one volatile
-            # file is a diagnostic that only works when the thing being
-            # diagnosed is stopped, which is no diagnostic at all.
-            ignore_dangling_symlinks=True,
-        )
+
+        # Copy the session, not the cache.
+        #
+        # Three reasons, and the first one is why this exists at all. A live
+        # Chrome rewrites and evicts its cache constantly, so copytree lists a
+        # Cache_Data directory, then finds a file gone by the time it reaches
+        # it, and fails the ENTIRE copy on the missing one. That is what
+        # happened at 12:52 on 2026-08-25, and it cost the listing: the probe
+        # aborted instead of running, on a ticket that was live at the time.
+        #
+        # Second, cache is the bulk of a Chrome profile and none of it is
+        # needed — what makes this clone useful is the cookie jar. Skipping it
+        # turns a slow copy into a quick one, and with 70 of 75 listings gone
+        # inside two minutes, the copy is on the critical path.
+        #
+        # Third, an empty cache is what we actually want: it guarantees the
+        # clone cannot replay a cached refusal from the watcher's own history.
+        skip = {"Cache", "Code Cache", "GPUCache", "GrShaderCache",
+                "ShaderCache", "DawnCache", "DawnGraphiteCache",
+                "DawnWebGPUCache", "CacheStorage", "Service Worker",
+                "component_crx_cache", "extensions_crx_cache", "Crashpad"}
+
+        def ignore(dirpath, names):
+            drop = {n for n in names if n in skip}
+            drop |= {n for n in names
+                     if n.startswith("Singleton") or n == "RunningChromeVersion"
+                     or n.endswith((".lock", ".sock", ".pid"))}
+            return drop
+
+        # copytree still raises if a file it DID decide to copy vanishes
+        # underneath it, which a live profile can always do. Collect those and
+        # carry on: a session missing one volatile file is still a session,
+        # and failing the probe outright is the outcome this is avoiding.
+        try:
+            shutil.copytree(config.BUY_PROFILE_DIR, dst, dirs_exist_ok=True,
+                            ignore=ignore, ignore_dangling_symlinks=True)
+        except shutil.Error as exc:
+            print(f"  [ -- ]  {len(exc.args[0])} volatile file(s) moved during "
+                  f"the copy and were skipped — the session is what matters")
         return dst
 
     try:
