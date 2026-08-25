@@ -2007,3 +2007,28 @@ PROFILE_MAX_AGE_MINUTES = float(os.environ.get("EP_PROFILE_MAX_AGE", "90"))
 # So it is checked against each page's shortest possible draw, which is the
 # thing it was always meant to bound.
 PRESS_MIN_INTERVAL_SECONDS = int(os.environ.get("EP_PRESS_MIN_SECONDS", "120"))
+
+
+#: Ask Ticketmaster's origin for resale data instead of Fastly's edge copy.
+#:
+#: The single change that actually answers "can we get there before it shows
+#: up on the page", and it came out of David's own network capture on
+#: 2026-08-25: his signed-in browser's call to /api/quickpicks/…/resale came
+#: back `x-cache: HIT` with `age: 13`. The answer was thirteen seconds old
+#: before it reached him.
+#:
+#: The endpoint's own headers are `max-age=15, stale-while-revalidate=30`, so
+#: a listing can exist for up to forty-five seconds before any edge copy
+#: mentions it. No cadence fixes that — asking the same URL ten times in ten
+#: seconds returns the same stale object ten times, which is why speeding the
+#: sweep from 90s to 25s could only ever recover part of the gap.
+#:
+#: A nonce makes the URL novel, so Fastly cannot answer it and origin must.
+#:
+#: What it costs, plainly: every sweep call becomes an origin request rather
+#: than an edge read. That is heavier for Ticketmaster and more conspicuous
+#: than the call the page makes for itself, on a connection that has been
+#: blocked twenty-two times. It is on because David asked for the earliest
+#: possible sighting knowing that trade; the sweep's 403 backoff still rests
+#: it for 30 minutes after three refusals, so it cannot run away unattended.
+EDGE_BYPASS = os.environ.get("EP_EDGE_BYPASS", "1").lower() in ("1", "true", "yes")

@@ -687,10 +687,38 @@ class BrowserSession:
                            stale-while-revalidate=30
 
         `cache: no-store` is set so the browser revalidates rather than
-        replaying its disk copy. A cache-busting query parameter would work
-        too but is deliberately avoided: a novel URL misses Fastly's edge and
-        hits origin, which is both heavier and more conspicuous than the call
-        the page makes for itself.
+        replaying its disk copy.
+
+        ── Reading the edge is reading the past ─────────────────────────────
+
+        `cache: no-store` defeats CHROME's cache. It does nothing about
+        Fastly's. David's own network capture of 2026-08-25 14:32 shows what
+        that means in practice: the same call, from his own signed-in browser,
+        came back `x-cache: HIT` with `age: 13` — the answer he was given had
+        been sitting at the Dublin edge for thirteen seconds.
+
+        Add `stale-while-revalidate=30` to `max-age=15` and a listing can
+        exist for up to forty-five seconds before any edge copy mentions it.
+        That is not a cadence problem and polling faster cannot touch it:
+        asking the same URL ten times in ten seconds gets the same stale
+        object ten times.
+
+        It also explains the thing that looked inexplicable — listings that
+        appear already half-dead, and 70 of the first 75 seen exactly once.
+        Some of that window was spent before we could possibly have seen them.
+
+        So EDGE_BYPASS puts a nonce on the URL. A novel URL misses the edge
+        and is answered by origin, which is the only way to learn about a
+        listing at the moment it exists rather than when Dublin catches up.
+        This is the "get there before it reaches the page" that the whole
+        project has been trying to buy with speed it could not use.
+
+        The cost is real and is the reason this is a switch rather than the
+        default everywhere: every bypassed call is an origin hit, heavier for
+        Ticketmaster and more conspicuous than the call the page makes for
+        itself, on a connection already blocked twenty-two times. The sweep's
+        403 backoff is unchanged and still rests it after three refusals.
+        `EP_EDGE_BYPASS=0` returns to reading the edge.
 
         Returns a record in the same shape as the passive listener produces,
         so _parse_resale_json can read either without caring which. None if
@@ -718,6 +746,10 @@ class BrowserSession:
             f"/api/quickpicks/{event_id}/resale"
             f"?qty={qty}&offset=0&limit=20"
         )
+        if config.EDGE_BYPASS:
+            # Milliseconds, so two calls a second apart cannot collide on the
+            # same cache key and quietly start reading the edge again.
+            url += f"&_={int(time.time() * 1000)}"
         try:
             record = self.page.evaluate(
                 """async (url) => {
