@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -368,15 +369,41 @@ def cmd_probe_offer(_args) -> int:
         shutil.rmtree(clean_dir, ignore_errors=True)
         shutil.rmtree(signed_in_dir, ignore_errors=True)
 
+    def cid_of(landed: str) -> str:
+        m = re.search(r"cid=([0-9a-f-]+)", landed or "")
+        return m.group(1) if m else ""
+
     print()
     for side in (watcher_side, clean_side):
         print(f"  {side['label']}")
         print(f"      verdict : {side['verdict']}")
         if side["landed"]:
-            print(f"      landed  : {side['landed'][:110]}")
+            print(f"      cid     : {cid_of(side['landed']) or '(none)'}")
         if side["error"]:
             print(f"      error   : {side['error']}")
         print()
+
+    # Two independent browsers must produce two independent error ids.
+    #
+    # Ticketmaster mints a fresh `cid` per refusal — the buying browser's own
+    # three attempts on 2026-08-25 produced three distinct ones twelve seconds
+    # apart. So if both sides of this probe come back with the SAME cid, the
+    # two sides did not make two requests, and whatever the verdict says is an
+    # artifact of this command rather than a fact about Ticketmaster.
+    #
+    # Worth failing loudly on. The entire value of this probe is that it
+    # compares two independent observations, and a project with this one's
+    # record of confident wrong answers should not be allowed to publish a
+    # conclusion drawn from one observation printed twice.
+    a, b = cid_of(watcher_side["landed"]), cid_of(clean_side["landed"])
+    if a and a == b:
+        print("  " + "!" * 62)
+        print("  SUSPECT RESULT — both browsers reported the same error id")
+        print(f"  ({a}). Ticketmaster issues a new one per refusal, so this")
+        print("  looks like one observation counted twice rather than two")
+        print("  independent ones. Do not draw a conclusion from this run.")
+        print("  " + "!" * 62 + "\n")
+        return 2
 
     w_refused = "REFUSED" in watcher_side["verdict"]
     c_refused = "REFUSED" in clean_side["verdict"]
