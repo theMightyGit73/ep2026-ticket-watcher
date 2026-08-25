@@ -110,10 +110,19 @@ check_true("names the panel to scroll to", "Verified Resale Tickets" in body_now
 # the logs is the observation, not the mechanism: listings have been lasting
 # around ten minutes and reappearing, so trying again is worth it whatever the
 # reason. The instruction to David is the same; the invented cause is gone.
-check_true("tells him a vanished listing is worth retrying",
-           "try again in a few minutes" in body_now.lower())
-check_true("and grounds that in what was measured, not in a theory",
-           "ten minutes" in body_now)
+# Corrected again 2026-08-25, and this one was my error rather than the
+# project's. The email said listings last "around ten minutes", which came
+# from reading a CHASE duration as a listing's visibility. It is not what the
+# data says: of 75 distinct listing ids, 70 were seen exactly once — gone by
+# the next look — and the chase notes that looked like persistence actually
+# read "still held after N checks", meaning the listing was ABSENT from the
+# feed throughout. The advice that follows from the real number is the
+# opposite of the advice that was being given.
+check_true("tells him to move immediately", "GO NOW" in body_now)
+check_true("and grounds that in the measurement",
+           "gone by the watcher's next look" in body_now)
+check_true("and no longer promises ten minutes",
+           "ten minutes" not in body_now)
 # And while the buyer is refused on every listing, the alert must not imply
 # that securing is on its way — that buys hesitation exactly when it costs the
 # ticket.

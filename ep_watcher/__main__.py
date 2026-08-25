@@ -257,11 +257,32 @@ def cmd_probe_offer(_args) -> int:
     listing_id = ""
     event = None
 
+    # A listing named on the command line skips the feed lookup entirely.
+    #
+    # Speed is the whole reason. The measurement wanted here is of a LIVE
+    # listing, and the data says most are gone by the watcher's next look —
+    # 70 of the first 75 were seen exactly once. Two probe runs on 2026-08-25
+    # both arrived to find nothing on sale, because each spent its first
+    # seconds asking the feed what to look at when the caller already knew.
+    # Passing the id straight through turns a lookup plus a probe into a
+    # probe, and costs one fewer request against a rate-limited endpoint.
+    wanted = getattr(_args, "listing", None) or os.environ.get("EP_PROBE_LISTING", "")
+    if wanted:
+        slug = getattr(_args, "event", None) or os.environ.get("EP_PROBE_EVENT", "")
+        event = next((e for e in events if e.slug == slug), None) or (
+            events[0] if events else None)
+        if event is None:
+            print("  [FAIL]  no watched event to probe against\n")
+            return 1
+        listing_id = wanted
+        print(f"  Probing {listing_id} on {event.slug} (named, no lookup)\n")
+
     # Find something live to ask about. The signed-in copy is used for the
     # lookup because it is the session Ticketmaster already accepts; a fresh
     # profile would have to clear the bot check from cold just to read a feed.
-    print("  Looking for a live listing...\n")
-    for candidate in events:
+    if not listing_id:
+        print("  Looking for a live listing...\n")
+    for candidate in (events if not listing_id else []):
         try:
             with _browser().BrowserSession(profile_dir=signed_in_dir) as session:
                 data = session.fetch_resale_json(candidate,
@@ -310,10 +331,23 @@ def cmd_probe_offer(_args) -> int:
                 out["landed"] = page.url
                 ctx = buyer.read_error_context(page.url) or {}
                 listing = (ctx.get("listing") or {})
-                if "/error/" in page.url:
+                # q404 and e404 are NOT the same answer, and treating them
+                # alike would be the fastest way to a wrong conclusion here.
+                #
+                # q404 carries Ticketmaster's own record of a listing it has
+                # just declined to sell — that is the refusal being
+                # investigated. e404 is "no such listing", which is what a
+                # stale or mistyped id gets, and it says nothing about
+                # whether checkout works. A probe that scored both as REFUSED
+                # would happily report "both browsers refused, the URL must
+                # be wrong" about an id that had simply already sold.
+                if "/error/q404" in page.url:
                     out["verdict"] = "REFUSED (sold-or-removed screen)"
                     if listing.get("active") is True:
                         out["verdict"] += " — but the payload says ACTIVE"
+                elif "/error/" in page.url:
+                    out["verdict"] = ("GONE — Ticketmaster has no such listing "
+                                      "any more (not a refusal)")
                 else:
                     out["verdict"] = "reached a page that is not the refusal"
         except Exception as exc:
@@ -346,8 +380,15 @@ def cmd_probe_offer(_args) -> int:
 
     w_refused = "REFUSED" in watcher_side["verdict"]
     c_refused = "REFUSED" in clean_side["verdict"]
+    gone = "GONE" in watcher_side["verdict"] and "GONE" in clean_side["verdict"]
 
     print("  " + "-" * 62)
+    if gone:
+        print("  The listing had already gone before either browser got to")
+        print("  it, so this run proves nothing either way. Not a refusal —")
+        print("  Ticketmaster says there is no such listing any more.")
+        print("  " + "-" * 62 + "\n")
+        return 1
     if w_refused and c_refused:
         print("  BOTH refused. This is not bot detection singling out the")
         print("  watcher — a clean, signed-out browser is refused identically.")
@@ -2054,6 +2095,15 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--interval", type=int, default=None,
         help="seconds between polls in `watch` (default %(default)s)",
+    )
+    parser.add_argument(
+        "--listing", default=None,
+        help="probe-offer: the resale listing id to probe, skipping the "
+             "feed lookup (most listings are gone within a couple of minutes)",
+    )
+    parser.add_argument(
+        "--event", default=None,
+        help="probe-offer: which watched page --listing belongs to",
     )
     args = parser.parse_args(argv)
     return COMMANDS[args.command](args)
