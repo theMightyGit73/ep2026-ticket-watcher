@@ -692,12 +692,27 @@ chase logically incapable of succeeding, and every identical "still refused"
 it logged was then read as evidence the listing was still held — evidence the
 browser manufactured by not asking.
 
-Fixed by sending `Cache-Control: no-cache` on the offer navigation, and by
-recording any sub-50ms reply as a replay rather than counting it as a refusal.
-Deliberately **not** fixed with a cache-busting query parameter: a nonce would
-work too, but it changes the request Ticketmaster sees on the one path already
-being refused for reasons not yet understood, and that could add a second
-cause while making the first unreadable. `EP_OFFER_NO_CACHE=0` reverts.
+Fixed by putting a nonce on RETRY navigations only, and by recording any
+sub-50ms reply as a replay rather than counting it as a refusal.
+
+**The first fix for this was worse than the bug, and is worth recording.** It
+set `Cache-Control: no-cache` with `page.set_extra_http_headers`, and its
+docstring said it "affects nothing else". That is not what the call does: it
+is sticky for the life of the page, so it put no-cache on *every* subsequent
+request the buying browser made — the parked event page, reloaded uncached
+each time, and every poll of `/api/quickpicks/…/resale`, which is rate-limited
+and answers 403 when pushed. On the morning of 2026-08-25 the second attempt
+of the 10:10 chase never returned at all: the worker sat inside it for 390
+seconds, past the ceiling meant to bound it, and the next listing was refused
+with "the browser was busy".
+
+So the scope has to be the request, not the page. A nonce is the only thing
+that is genuinely per-navigation — it changes the cache key for one URL,
+touches nothing else, cannot be left switched on, and has no browser round
+trip to hang in. Attempt one still goes out as the exact URL Ticketmaster's
+own page builds, with no parameter of ours in it; the unknown-parameter risk
+is only ever taken on a request that would otherwise be a cache replay, and
+therefore guaranteed to tell us nothing. `EP_OFFER_NO_CACHE=0` reverts.
 
 ### The chase is two minutes now, not twelve
 

@@ -44,19 +44,6 @@ def check(label, got, want):
         failures.append(label)
 
 
-class FakePage:
-    """Records the headers it was handed, and can refuse to take them."""
-
-    def __init__(self, explode=False):
-        self.headers = None
-        self.explode = explode
-
-    def set_extra_http_headers(self, headers):
-        if self.explode:
-            raise RuntimeError("browser said no")
-        self.headers = dict(headers)
-
-
 class FakeResult:
     def __init__(self):
         self.notes = []
@@ -66,26 +53,47 @@ class FakeResult:
         self.notes.append(text)
 
 
-print("\nThe navigation asks Ticketmaster, not Chrome")
+print("\nThe first attempt sends Ticketmaster's own URL, untouched")
 
-page = FakePage()
-buyer._disable_offer_cache(page)
-check("a no-cache header is set before the offer loads",
-      (page.headers or {}).get("Cache-Control"), "no-cache")
-check("and the HTTP/1.0 spelling too, for anything that only reads that",
-      (page.headers or {}).get("Pragma"), "no-cache")
+# The attempt most likely to succeed must carry no invention of ours. It also
+# needs no help: nothing is cached for a listing being visited for the first
+# time.
+BASE = "https://secure.ticketmaster.ie/18006314BD813D3E/l0vmtvwkd2?qty=1"
+check("attempt 1 is unchanged", buyer.uncached_offer_url(BASE, 1), BASE)
 
 
-print("\nA browser that refuses the header still gets its navigation")
+print("\nA retry is made distinct, so Chrome cannot replay it")
 
-# The old behaviour is a cached retry, which is bad. A crash here would be
-# worse: it would lose the attempt entirely, on the one path that reaches a
-# checkout. Degrade, say so, carry on.
-exploding = FakePage(explode=True)
-result = FakeResult()
-check("no exception escapes", buyer._disable_offer_cache(exploding, result), False)
-check("and the attempt is told the cache may answer",
-      any("cache" in n for n in result.notes), True)
+retry = buyer.uncached_offer_url(BASE, 2)
+check("attempt 2 differs from attempt 1", retry != BASE, True)
+check("and still points at the same listing", "l0vmtvwkd2" in retry, True)
+check("and still asks for one ticket", "qty=1" in retry, True)
+
+# Two retries must not collide, or the second replays the first.
+import time as _t
+a = buyer.uncached_offer_url(BASE, 2)
+_t.sleep(0.002)
+b = buyer.uncached_offer_url(BASE, 3)
+check("two retries get different URLs", a != b, True)
+
+
+print("\nThe scope is the request, never the page")
+
+# The first version of this fix used page.set_extra_http_headers, whose
+# docstring claimed it "affects nothing else". It is sticky for the life of
+# the page, so it actually put no-cache on every later request the buying
+# browser made — the parked event page and every poll of the rate-limited
+# resale endpoint. The second attempt of the 10:10 chase on 2026-08-25 never
+# returned; the worker sat in it for 390s and the next listing was refused
+# because the browser was "busy".
+#
+# So nothing here may touch page-wide state. A pure function over a string
+# cannot: there is no browser round trip to hang in and nothing to leave
+# switched on.
+check("no page-level header helper survives",
+      hasattr(buyer, "_disable_offer_cache"), False)
+check("the helper is a pure string function",
+      callable(getattr(buyer, "uncached_offer_url", None)), True)
 
 
 print("\nA reply too fast to be real is recorded as a replay")
@@ -117,13 +125,8 @@ check("below the fastest real answer measured at 120ms",
       config.CACHE_REPLAY_SECONDS < 0.12, True)
 
 
-print("\nThe offer URL itself is left alone")
+print("\nThe builder itself still produces Ticketmaster's exact URL")
 
-# Deliberate: a nonce would defeat the cache too, but it changes the request
-# Ticketmaster sees on the one path already being refused for reasons not yet
-# understood. Adding an unknown parameter there could introduce a second cause
-# and make the first unreadable. The fix changes who answers, not what is
-# asked.
 class Ev:
     url = ("https://www.ticketmaster.ie/electric-picnic-2026-weekend-camping"
            "-co-laois-28-08-2026/event/18006314BD813D3E")

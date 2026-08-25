@@ -472,37 +472,47 @@ def offer_url(event, listing_id: str, qty: int = None) -> str:
     return f"https://{host}/{event_id}/{listing_id}?qty={int(wanted)}"
 
 
-def _disable_offer_cache(page, result=None) -> bool:
-    """Make the next navigation ask Ticketmaster rather than Chrome.
+def uncached_offer_url(url: str, attempt: int) -> str:
+    """The offer URL for a RETRY, made distinct so Chrome cannot replay it.
 
-    See config.OFFER_NO_CACHE for what this is fixing and how it was measured.
-    The short version: Ticketmaster's refusal is a cacheable 302, Chrome
-    caches it, and a chase that revisits the same listing then re-reads its
-    own copy of the first answer instead of finding out whether anything has
-    changed.
+    Returns `url` unchanged for the first attempt, and for every attempt when
+    OFFER_NO_CACHE is off.
 
-    Set on the page rather than the context so it survives nothing else and
-    affects nothing else; the buying browser makes ordinary page loads too and
-    there is no reason to make those uncacheable.
+    ── Why a nonce, after all, and only on retries ──────────────────────────
 
-    Never raises. A browser that will not take the header still gets its
-    navigation — with the old, cached behaviour — which is strictly what it
-    had before this existed.
+    The first version of this fix set `Cache-Control: no-cache` on the page
+    with `set_extra_http_headers`, and its docstring said it "affects nothing
+    else". That was wrong, and the morning of 2026-08-25 is what it cost.
+
+    Playwright's `set_extra_http_headers` is not per-navigation. It is sticky
+    for the life of the page, so it did not put no-cache on the offer request
+    — it put no-cache on EVERY request the buying browser made afterwards:
+    the parked event page, reloaded uncached each time, and every one of the
+    relist polls hammering `/api/quickpicks/…/resale`, an endpoint that is
+    rate-limited and answers 403 when pushed. The second attempt of the 10:10
+    chase never returned at all. The worker sat inside it for 390 seconds,
+    which is longer than the ceiling that was supposed to bound it, and while
+    it sat there the next listing was refused with "the browser was busy".
+
+    So the scope has to be the request, not the page. A nonce is the only
+    thing that is genuinely per-navigation: it changes the cache key for this
+    one URL and touches nothing else, cannot be left switched on, and cannot
+    block — there is no browser round trip to hang in.
+
+    Applying it only from attempt two is the other half. The first attempt on
+    a new listing has nothing cached to replay, so it needs no help, and it is
+    also the attempt most likely to succeed — that one goes out as the exact
+    URL Ticketmaster's own page builds, with no parameter of ours in it. The
+    unknown-parameter risk that argued against a nonce is therefore only ever
+    taken on a request that would otherwise be a cache replay: a request that,
+    unmodified, is guaranteed to tell us nothing.
     """
-    if not config.OFFER_NO_CACHE:
-        return False
-    try:
-        page.set_extra_http_headers({
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        })
-        return True
-    except Exception as exc:
-        if result is not None:
-            result.note(f"could not turn off the browser cache for this "
-                        f"navigation ({type(exc).__name__}) — a repeat visit "
-                        f"may be answered from cache rather than by Ticketmaster")
-        return False
+    if not config.OFFER_NO_CACHE or attempt <= 1 or not url:
+        return url
+    sep = "&" if "?" in url else "?"
+    # Time-based rather than random so the value is legible in a trace and two
+    # retries can be told apart by eye.
+    return f"{url}{sep}_={int(time.time() * 1000)}"
 
 
 def _note_if_cached(result, seconds: float) -> bool:
@@ -2319,9 +2329,13 @@ def _secure_once(session: BuySession, event, listing,
         wanted_id = (getattr(listing, "listing_id", "") or "")
         direct = offer_url(event, wanted_id) if config.DIRECT_OFFER else ""
         if direct:
+            # Attempt one goes out exactly as Ticketmaster's own page builds
+            # it. A retry gets a nonce, because without one Chrome answers it
+            # from disk in a millisecond and the "refusal" is a copy of the
+            # first. See uncached_offer_url().
+            direct = uncached_offer_url(direct, getattr(result, "attempts", 1))
             result.note(f"going straight to the offer: {direct}")
             try:
-                _disable_offer_cache(page, result)
                 _t0 = time.monotonic()
                 page.goto(direct, wait_until="domcontentloaded",
                           timeout=config.PAGE_TIMEOUT_MS)

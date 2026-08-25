@@ -299,11 +299,12 @@ def cmd_probe_offer(_args) -> int:
         try:
             with _browser().BrowserSession(profile_dir=profile_dir) as session:
                 page = session.page
-                # The same no-cache discipline the buyer now uses. Without it
-                # a second look at the same listing can be answered by Chrome
-                # rather than Ticketmaster, which is precisely the bug that
-                # made ten of fourteen retries fictional on 2026-08-24.
-                buyer._disable_offer_cache(page)
+                # Each side is a brand-new profile with an empty cache, so
+                # there is nothing here for Chrome to replay and the URL goes
+                # out exactly as Ticketmaster's own page builds it. That
+                # matters: the whole value of this probe is that both sides
+                # send the SAME request, and a cache-buster on one of them
+                # would be a difference we then had to reason about.
                 page.goto(url, wait_until="domcontentloaded",
                           timeout=config.PAGE_TIMEOUT_MS)
                 out["landed"] = page.url
