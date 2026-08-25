@@ -434,8 +434,59 @@ def cmd_probe_offer(_args) -> int:
                 sess.set_quantity(config.WANTED_QUANTITY, probe)
                 out["steps"] += [n for n in probe.notes][-2:]
                 sess.await_listings(probe, 45)
-                out["steps"].append("searched and waited for the panel")
-                # Click the row for this listing if it is on the page.
+                out["steps"].append("searched")
+
+                # Go to the offer URL from HERE, with the page's own
+                # checkout state established.
+                #
+                # This is the actual test, and clicking the row is not. The
+                # panel is unreliable by design — 78 of the 80 resale-blind
+                # polls on record never saw it render at all — so a test that
+                # depends on finding a row to click fails for reasons that
+                # have nothing to do with the hypothesis. It did exactly that
+                # on l903pq11k at 13:22, on a live listing.
+                #
+                # What is being tested is whether the offer URL works once
+                # Ticketmaster has been told, server-side, what we are
+                # buying: the event page load fires api/rules, /region and a
+                # graphql POST, and the quantity and search above put a real
+                # selection behind them. Every refusal on record was made
+                # without that. So establish it, then make the same request
+                # that has been refused 49 times, and see if it still is.
+                out["steps"].append("now going to the offer URL with the "
+                                    "page's session established")
+                try:
+                    page.goto(url, wait_until="domcontentloaded",
+                              timeout=config.PAGE_TIMEOUT_MS)
+                    out["landed"] = page.url
+                    ctx = buyer.read_error_context(page.url) or {}
+                    live = (ctx.get("listing") or {}).get("active")
+                    if "/error/q404" in page.url:
+                        out["verdict"] = ("REFUSED (q404) even with the page's "
+                                          "own session established")
+                        # Without this the run is not evidence. A listing that
+                        # sold between detection and the probe also lands on
+                        # q404, and reading that as "the session was not the
+                        # problem" would be the same mistake this project has
+                        # made four times already.
+                        out["verdict"] += (" — and the payload says ACTIVE, so "
+                                           "the listing was still live"
+                                           if live is True else
+                                           " — but the payload does NOT say "
+                                           "active, so it may simply have sold "
+                                           "first. Inconclusive.")
+                    elif "/error/" in page.url:
+                        out["verdict"] = "GONE (no such listing any more)"
+                    else:
+                        out["verdict"] = ("REACHED A NON-REFUSAL PAGE — the "
+                                          "session is what was missing")
+                    return out
+                except Exception as exc:
+                    out["verdict"] = f"offer navigation failed: {type(exc).__name__}"
+                    return out
+
+                # Unreachable today; kept because a rendered panel would let a
+                # future run compare a real click against the URL above.
                 clicked = False
                 for sel in (f"[href*='{listing_id}']", f"[id*='{listing_id}']",
                             "[data-tid*='resale'] button", "text=/Verified Resale/i"):
