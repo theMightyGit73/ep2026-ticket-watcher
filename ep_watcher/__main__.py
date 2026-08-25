@@ -317,10 +317,25 @@ def cmd_probe_offer(_args) -> int:
 
     def look(label: str, profile_dir, signed_in: bool) -> dict:
         """Load the URL once and report where it ended up."""
-        out = {"label": label, "landed": "", "verdict": "", "error": ""}
+        out = {"label": label, "landed": "", "verdict": "", "error": "",
+               "chain": []}
         try:
             with _browser().BrowserSession(profile_dir=profile_dir) as session:
                 page = session.page
+                # Record the redirect chain, because "both were refused" is
+                # not the same claim as "both were refused for the same
+                # reason".
+                #
+                # A signed-out browser could be turned away simply for being
+                # signed out, which would say nothing about why the SIGNED-IN
+                # watcher is turned away — and a probe that scored those two
+                # as one shared verdict would be comparing two different
+                # failures and calling them a match. The chain distinguishes
+                # them: a browser sent to identity.ticketmaster.ie and left
+                # there was refused for auth, and one that goes straight to
+                # /error/q404 was refused for the listing.
+                page.on("response", lambda r: out["chain"].append(
+                    (r.status, r.url[:120])) if len(out["chain"]) < 12 else None)
                 # Each side is a brand-new profile with an empty cache, so
                 # there is nothing here for Chrome to replay and the URL goes
                 # out exactly as Ticketmaster's own page builds it. That
@@ -356,6 +371,96 @@ def cmd_probe_offer(_args) -> int:
             out["verdict"] = "could not load"
         return out
 
+    def via_page(profile_dir) -> dict:
+        """Reach the listing the way the page does, not by URL.
+
+        The theory this tests, and it unifies everything seen so far:
+        `secure.ticketmaster.ie/{event}/{listing}?qty=N` is not a standalone
+        entry point. It is the last hop of a flow that has already told
+        Ticketmaster, server-side, what you are buying — the event page fires
+        `checkout.ticketmaster.ie/api/rules`, `/region` and a graphql POST on
+        every load, before any listing is chosen.
+
+        Every refusal on record was made without that handshake:
+
+          * The clean signed-out browser in this very command has no session
+            at all, and is refused.
+          * The watcher with EP_DIRECT_OFFER=1 "skips the quantity, the
+            search and the panel wait" by design, and is refused.
+          * The watcher before that clicked the row, but the page built the
+            link from a quantity stepper an overlay had pinned at zero, so
+            the session it did establish was for no tickets — and it was
+            refused.
+
+        Not one attempt in this project's history has reached that URL with
+        the page's own state properly set. So this drives the page: quantity,
+        search, panel, then click the row and see where it actually goes.
+        """
+        out = {"label": "the page's own flow (quantity, search, click)",
+               "landed": "", "verdict": "", "error": "", "chain": [], "steps": []}
+        try:
+            sess = buyer.BuySession(profile_dir=profile_dir)
+            sess.start()
+            try:
+                page = sess.page
+                page.on("response", lambda r: out["chain"].append(
+                    (r.status, r.url[:120])) if len(out["chain"]) < 40 else None)
+                page.goto(event.url, wait_until="domcontentloaded",
+                          timeout=config.PAGE_TIMEOUT_MS)
+                out["steps"].append("opened the event page")
+                probe = buyer.HoldResult()
+                sess.set_quantity(config.WANTED_QUANTITY, probe)
+                out["steps"] += [n for n in probe.notes][-2:]
+                sess.await_listings(probe, 45)
+                out["steps"].append("searched and waited for the panel")
+                # Click the row for this listing if it is on the page.
+                clicked = False
+                for sel in (f"[href*='{listing_id}']", f"[id*='{listing_id}']",
+                            "[data-tid*='resale'] button", "text=/Verified Resale/i"):
+                    try:
+                        el = page.locator(sel).first
+                        if el.count():
+                            el.click(timeout=8000)
+                            clicked = True
+                            out["steps"].append(f"clicked via {sel}")
+                            break
+                    except Exception:
+                        continue
+                if not clicked:
+                    out["verdict"] = "could not find the resale row to click"
+                    return out
+                page.wait_for_timeout(4000)
+                out["landed"] = page.url
+                if "/error/q404" in page.url:
+                    out["verdict"] = "REFUSED (q404) even through the page's own flow"
+                elif "/error/" in page.url:
+                    out["verdict"] = "GONE (no such listing)"
+                else:
+                    out["verdict"] = "REACHED A NON-REFUSAL PAGE — this is the flow that works"
+            finally:
+                sess.close()
+        except Exception as exc:
+            out["error"] = f"{type(exc).__name__}: {exc}"
+            out["verdict"] = "could not complete the page flow"
+        return out
+
+    if getattr(_args, "via_page", False):
+        page_dir = clone_buy_profile()
+        try:
+            res = via_page(page_dir)
+        finally:
+            shutil.rmtree(page_dir, ignore_errors=True)
+        print(f"  {res['label']}")
+        for st in res["steps"]:
+            print(f"        · {st[:100]}")
+        print(f"      verdict : {res['verdict']}")
+        if res["landed"]:
+            print(f"      landed  : {res['landed'][:110]}")
+        if res["error"]:
+            print(f"      error   : {res['error']}")
+        print()
+        return 0
+
     clean_dir = Path(tempfile.mkdtemp(prefix="ep-probe-clean-"))
     try:
         watcher_side = look("a copy of the watcher's buying profile (signed in)",
@@ -381,6 +486,12 @@ def cmd_probe_offer(_args) -> int:
             print(f"      cid     : {cid_of(side['landed']) or '(none)'}")
         if side["error"]:
             print(f"      error   : {side['error']}")
+        hops = [c for c in side["chain"]
+                if "ticketmaster" in c[1] and "/api/" not in c[1]]
+        for st, u in hops[:5]:
+            print(f"        {st}  {u[:96]}")
+        if any("identity.ticketmaster" in u for _, u in side["chain"]):
+            print("        ^ went through the sign-in service")
         print()
 
     # A shared error id is expected here, and does NOT mean one observation
@@ -417,8 +528,19 @@ def cmd_probe_offer(_args) -> int:
         print("  Ticketmaster says there is no such listing any more.")
         print("  " + "-" * 62 + "\n")
         return 1
+    clean_hit_signin = any("identity.ticketmaster" in u
+                           for _, u in clean_side["chain"])
+    if w_refused and c_refused and clean_hit_signin:
+        print("  Both were refused, but the clean browser was sent through")
+        print("  the sign-in service on the way — so it may simply have been")
+        print("  refused for being signed out, which is a DIFFERENT failure")
+        print("  from the watcher's. This run does not separate the theories.")
+        print("  " + "-" * 62 + "\n")
+        return 2
     if w_refused and c_refused:
-        print("  BOTH refused. This is not bot detection singling out the")
+        print("  BOTH refused, and the clean browser was never asked to sign")
+        print("  in — so it was refused for the LISTING, not for its session.")
+        print("  This is not bot detection singling out the")
         print("  watcher — a clean, signed-out browser is refused identically.")
         print("  The offer URL is very likely no longer the entry point the")
         print("  live page uses. Next: capture what a real click requests,")
@@ -2128,6 +2250,11 @@ def main(argv=None) -> int:
         "--listing", default=None,
         help="probe-offer: the resale listing id to probe, skipping the "
              "feed lookup (most listings are gone within a couple of minutes)",
+    )
+    parser.add_argument(
+        "--via-page", dest="via_page", action="store_true",
+        help="probe-offer: reach the listing by driving the page (quantity, "
+             "search, click) instead of by URL",
     )
     parser.add_argument(
         "--event", default=None,
