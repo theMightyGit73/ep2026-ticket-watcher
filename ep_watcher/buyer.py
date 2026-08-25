@@ -1635,7 +1635,28 @@ class BuyerWorker(threading.Thread):
         if state in ("dead", "starting") or not self.is_alive():
             return None
         if state == "busy":
-            return None
+            # Answer, rather than sending the caller to the cold path.
+            #
+            # None means "not mine, open your own browser". For a dead or
+            # still-starting worker that is right. For a BUSY one it is
+            # actively wrong, and the night of 2026-08-24 is what it costs: a
+            # cold start on a busy worker always finds the warm browser
+            # holding the profile lock, and reports it as "already open
+            # holding something at least as important as this" — which is a
+            # sentence about a live basket, printed about a browser that is
+            # merely mid-attempt and holding nothing.
+            #
+            # David reads those messages to decide whether to go and finish a
+            # checkout by hand. Telling him a ticket is being held when none
+            # is, is worse than saying nothing, and it repeated for six
+            # consecutive listings while the real state was "busy".
+            result.reason = (
+                "the buying browser was already mid-attempt on another "
+                "listing, so this one was not tried. Nothing is being held "
+                "— it was busy, not holding."
+            )
+            result.note(result.reason)
+            return result
         if state == "holding" and not may_preempt:
             result.reason = (
                 "the buying browser is already open holding something at "

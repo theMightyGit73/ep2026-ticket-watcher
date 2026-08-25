@@ -140,13 +140,29 @@ print("\nThe chase cannot occupy the buying browser for a quarter of an hour")
 # total, a fifth of the day — and the watchdog deferred six restarts because
 # it could not tell a chase from a hang. The ceiling is what stops that, so it
 # is pinned rather than left to whoever next edits a constant.
-budget = config.secure_budget_seconds()
-check("the whole budget is at most three minutes", budget <= 180, True)
-check("and long enough for a few real attempts", budget >= 90, True)
-check("the active-listing window no longer waits out a basket",
-      config.SECURE_ACTIVE_TIMEOUT_SECONDS <= 180, True)
+# What must be short is the CHASE. This check originally asserted that on
+# secure_budget_seconds(), which was wrong in exactly the way that caused the
+# outage of the night of 2026-08-24: the budget is not the chase, it is the
+# ceiling on every path an attempt can take, and one of those paths waits out
+# a block on timings the chase ceilings do not bound. Asserting the two are
+# the same number is what made a 180s worker timeout look correct while a
+# legitimate challenged attempt still took 281s.
+check("the chase itself is at most two minutes",
+      config.SECURE_ACTIVE_TIMEOUT_SECONDS <= 120, True)
+check("and long enough for a few real attempts",
+      config.SECURE_ACTIVE_TIMEOUT_SECONDS >= 90, True)
 check("and takes a small number of goes",
       config.SECURE_ACTIVE_RETRIES <= 4, True)
+
+# The overall budget is allowed to be longer, because a challenged attempt is
+# legitimately longer — but not so long that the buying browser goes back to
+# being occupied for a fifth of the day. See test_secure_clock.py, which pins
+# the relationship between this and the worker's timeout.
+budget = config.secure_budget_seconds()
+check("the overall budget covers more than the chase",
+      budget > config.SECURE_ACTIVE_TIMEOUT_SECONDS, True)
+check("but stays far below the old twelve-minute window",
+      budget <= 420, True)
 
 
 print()

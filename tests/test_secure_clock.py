@@ -274,3 +274,44 @@ finally:
 
 print(f"\n{'ALL PASSED' if not failures else 'FAILURES: ' + ', '.join(failures)}\n")
 sys.exit(1 if failures else 0)
+
+
+# ── The submit timeout must outlast every path an attempt can take ───────
+#
+# Added 2026-08-24 after the change that caused the outage it now prevents.
+#
+# secure_budget_seconds() bounds the chase, and BuyerWorker.submit() waits on
+# the job for budget + 60. Cutting the two chase ceilings from 720 to 120 that
+# evening dropped the submit timeout to 180s — while a challenged attempt,
+# which waits a block out on SECURE_CHALLENGE_* timings that neither ceiling
+# bounds, was measured the day before at 271s and 281s.
+#
+# The first block of the night duly overran, the attempt was abandoned
+# mid-flight, the worker stayed busy behind it, and six consecutive listings
+# were reported as "already open holding something" while nothing was held.
+#
+# So: every path has to fit inside the number the worker waits on.
+print("\nthe worker's timeout outlasts a challenged attempt")
+
+budget = config.secure_budget_seconds()
+submit_timeout = budget + 60          # secure_in_thread()'s arithmetic
+
+# The two live measurements, plus room. A challenged attempt is the longest
+# thing an attempt is ALLOWED to be; anything past this really is hung.
+WORST_OBSERVED_CHALLENGE = 281
+
+check("the submit timeout clears the worst measured challenge",
+      submit_timeout > WORST_OBSERVED_CHALLENGE, True)
+check("with real headroom, not a couple of seconds",
+      submit_timeout - WORST_OBSERVED_CHALLENGE >= 60, True)
+
+# The budget must actually account for the challenge path rather than happening
+# to be large. If someone cuts the chase ceilings again, this has to move too.
+check("the budget exceeds the chase ceilings on its own",
+      budget > max(config.SECURE_TIMEOUT_SECONDS,
+                   config.SECURE_ACTIVE_TIMEOUT_SECONDS), True)
+
+# And it must not creep back up to the twelve-minute window that occupied the
+# buying browser for a fifth of 2026-08-24.
+check("but stays well under the old twelve-minute window",
+      budget <= 420, True)

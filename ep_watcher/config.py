@@ -1100,8 +1100,36 @@ def secure_budget_seconds() -> int:
     what would happen the moment the active-listing window above extended past
     SECURE_TIMEOUT_SECONDS, and it would look like a bug in the browser rather
     than an arithmetic mismatch between two constants.
+
+    ── The challenge path has its own clock, and it must be counted ─────────
+
+    It was not, and that cost the night of 2026-08-24. The two ceilings above
+    were cut from 720 to 120 that evening, which is right for a chase. But an
+    attempt that meets a block screen does not chase — it waits the challenge
+    out on SECURE_CHALLENGE_* timings, which neither ceiling bounds. Measured
+    on live blocks the day before: 271s, 281s, 65s.
+
+    So the submit timeout became 180s while a legitimate challenged attempt
+    still took 271s, and the first block of the night overran it. The attempt
+    was abandoned mid-flight, the worker stayed busy behind it, and every find
+    for the next several hours fell through to the cold path, found the warm
+    browser holding the profile lock, and reported "already open holding
+    something at least as important" — about a browser that was holding
+    nothing at all. Six listings, no attempt made on any of them.
+
+    The lesson is the one this docstring already stated and then failed to
+    apply: every path an attempt can take has to fit inside the number the
+    worker waits on. A ceiling is not a duration — this is only ever spent
+    when a challenge is actually met — so counting it costs nothing on the
+    ordinary path and prevents an outage on the rare one.
     """
-    return max(SECURE_TIMEOUT_SECONDS, SECURE_ACTIVE_TIMEOUT_SECONDS)
+    base = max(SECURE_TIMEOUT_SECONDS, SECURE_ACTIVE_TIMEOUT_SECONDS)
+    # Each challenge round is a pause plus the attempt that follows it. The
+    # attempt allowance is generous on purpose: the cost of overestimating is
+    # a slightly later abandonment of something genuinely hung, and the cost
+    # of underestimating is the outage described above.
+    challenge = SECURE_CHALLENGE_RETRIES * (SECURE_CHALLENGE_PAUSE_SECONDS + 150)
+    return int(base + challenge)
 
 
 #: The shortest gap between two securing attempts on the same page.
