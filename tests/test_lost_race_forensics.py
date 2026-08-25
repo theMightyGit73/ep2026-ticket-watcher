@@ -182,7 +182,15 @@ held.still_listed_after = True
 held.ids_after = ["lmnlh641"]
 block = notify._verdict_block(held)
 check_true("says it may not be gone", "MAY NOT ACTUALLY BE GONE" in block)
-check_true("and tells him to try again", "TRY THE LINK AGAIN" in block)
+# Reworded 2026-08-25: the instruction is now "TRY THE LINK YOURSELF, NOW AND
+# AGAIN IN A FEW MINUTES", because the block no longer tells him to sit and
+# wait for a basket to lapse — a mechanism this project has asserted for days
+# and never once observed. What must survive is the instruction to retry.
+check_true("and tells him to try the link", "TRY THE LINK" in block)
+check_true("and to come back to it", "AGAIN IN A FEW MINUTES" in block)
+# And it must no longer state the basket as established fact.
+check_true("without naming a basket as the cause",
+           "holding it in a basket" not in block)
 
 sold = buyer.HoldResult()
 sold.still_listed_after = False

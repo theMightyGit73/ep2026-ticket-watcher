@@ -838,17 +838,32 @@ def _verdict_block(hold) -> str:
         active = getattr(hold, "ever_active", False) or None
     if active:
         offer = getattr(hold, "offer_summary", "") or ""
+        # No basket theory, and no promise to keep trying.
+        #
+        # This block used to say the ticket was "sitting in somebody else's
+        # basket" and that those lapse within about ten minutes. Both halves
+        # are now contradicted by the watcher's own measurements, and the
+        # email of 2026-08-25 10:53 carried this paragraph directly beneath a
+        # reason that said the cause was NOT established — two sentences in
+        # one message, disagreeing.
+        #
+        # The chase of 10:51 settles it as far as this project can: three
+        # genuine, uncached requests over two minutes, three distinct
+        # Ticketmaster error ids, the listing reported ACTIVE at every one,
+        # and refused every time. A basket that was about to lapse would have
+        # lapsed. Telling David to sit tight for ten minutes on that basis is
+        # advice to wait out something nobody has ever observed happening.
         return (
             "IT DID NOT SELL. TICKETMASTER SAYS SO ITSELF.\n"
             "The refusal page carries Ticketmaster's own record of the\n"
-            "listing, and it says the listing is still ACTIVE. So this was\n"
-            "not a race lost by a second — the ticket exists, and somebody\n"
-            "else is holding it in a basket. Those lapse, usually within\n"
-            "about ten minutes.\n"
+            "listing, and it says the listing is still ACTIVE. So the ticket\n"
+            "exists and this was not a race lost by a second.\n"
             + (f"The listing: {offer}\n" if offer else "")
-            + "THE WATCHER IS STILL GOING BACK FOR IT and will keep trying\n"
-            "while the window lasts. Try the link yourself too — two of us\n"
-            "refreshing is strictly better than one.\n\n"
+            + "WHY WE WERE REFUSED IS NOT KNOWN. The watcher has now been\n"
+            "refused on every listing it has ever tried, always with the\n"
+            "listing still live. Do not wait for it to get this one.\n"
+            "GO AND BUY IT YOURSELF from the link in the other email —\n"
+            "buying by hand does not appear to be affected.\n\n"
         )
     still = getattr(hold, "still_listed_after", None)
     if still is None:
@@ -859,10 +874,11 @@ def _verdict_block(hold) -> str:
             "IT MAY NOT ACTUALLY BE GONE.\n"
             "Ticketmaster showed the 'sold or removed' page, but its own\n"
             f"resale feed still listed a ticket a second later (id: {ids}).\n"
-            "That pattern means somebody else is holding it in a basket\n"
-            "rather than having bought it — and those baskets expire.\n"
-            "TRY THE LINK AGAIN IN A FEW MINUTES. The watcher will also\n"
-            "alert you again the moment it reappears.\n\n"
+            "So it had not sold when we were turned away. What is holding\n"
+            "it is not established — the basket theory this used to state\n"
+            "as fact has not survived the watcher's own measurements.\n"
+            "TRY THE LINK YOURSELF, NOW AND AGAIN IN A FEW MINUTES.\n"
+            "Listings here have been lasting around ten minutes.\n\n"
         )
     return (
         "It really did go: the resale feed agreed it was no longer there\n"
