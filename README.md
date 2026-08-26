@@ -44,6 +44,7 @@ are here for one thing, it is most likely
   - [Pressing the one button that reserves](#pressing-the-one-button-that-reserves)
   - [Reading Fastly's edge is reading the past](#reading-fastlys-edge-is-reading-the-past)
   - [The final-48-hours cadence](#the-final-48-hours-cadence)
+  - [What the 45s cadence actually cost](#what-the-45s-cadence-actually-cost)
   - [How it runs](#how-it-runs)
   - [What happens when a listing appears](#what-happens-when-a-listing-appears)
   - [The weekend ticket always wins the browser](#the-weekend-ticket-always-wins-the-browser)
@@ -896,6 +897,31 @@ Set on 2026-08-26 at David's request, with two days to the gates.
 Searches themselves were **not** sped up: they sit at 16.7/hour against a
 20/hour ceiling, and the watcher was blocked once while running below that
 rate. The sweep is the cheap lever and that is where the speed went.
+
+### What the 45s cadence actually cost
+
+Measured on 2026-08-26, because the argument for 45s was a prediction and
+predictions in this project have not aged well.
+
+The first backoff came **22 minutes** after the change, and the sweep degraded
+to 90s — exactly the floor the choice was made against. It recovered to 45s
+after 20 clean answers, 52 minutes later.
+
+| Base | Observed pattern | Effective interval |
+| --- | --- | --- |
+| 90s | 4 backoffs in 12h — ~10h at 90s, ~2h at 180s | **~105s** |
+| 45s | ~22 min clean, then ~30 min at 90s | **~71s** |
+
+So the sweep looks about a third more often than it did, while never being
+slower than the previous base. That is the whole reason 45s was picked against
+the **backoff multiplier** rather than against the request budget: three 403s
+double the interval, so the downside case is bounded at the old rate.
+
+The monitoring changed with it. Firing an alarm on the first backoff was the
+wrong signal — at 45s a backoff is expected and self-healing. What matters is
+the rate, so the watch now fires only if four or more land inside an hour,
+which would mean the sweep is degraded more than it is fast and 45s is above
+the ceiling after all.
 
 ### It was never a race, and the refusal page says so
 
