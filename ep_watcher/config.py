@@ -2032,3 +2032,25 @@ PRESS_MIN_INTERVAL_SECONDS = int(os.environ.get("EP_PRESS_MIN_SECONDS", "120"))
 #: possible sighting knowing that trade; the sweep's 403 backoff still rests
 #: it for 30 minutes after three refusals, so it cannot run away unattended.
 EDGE_BYPASS = os.environ.get("EP_EDGE_BYPASS", "1").lower() in ("1", "true", "yes")
+
+
+#: Press 'Continue To Payment' at the checkout, which is what reserves a
+#: resale ticket. Never enters card details and never confirms an order.
+#:
+#: The checkout captured at 00:53 on 2026-08-26 has exactly one forward
+#: control, labelled "Continue To Payment", and Ticketmaster's own warning
+#: beside it reads "Proceed to payment to reserve these tickets". So that
+#: button is the reservation step; there is no separate hold or basket control
+#: to press instead. Until this existed the watcher reached that page and
+#: stopped, leaving the ticket takeable by anyone until David got to a laptop.
+#:
+#: David chose this on 2026-08-26, having been told what it does and what it
+#: risks: it agrees to the Ticket Exchange Policy on his behalf, and it moves
+#: the browser onto the payment screen, which is one step closer to a purchase
+#: than this project has ever gone. It is the same scope he set on 2026-08-19
+#: — secure it, then hand off for payment — and this is the step that secures.
+#:
+#: Set 0 to go back to stopping at the order page. Everything else is
+#: unchanged by the switch, so turning it off costs a reservation, not a find.
+RESERVE_AT_CHECKOUT = os.environ.get(
+    "EP_RESERVE_AT_CHECKOUT", "1").lower() in ("1", "true", "yes")

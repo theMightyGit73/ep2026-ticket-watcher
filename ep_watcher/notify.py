@@ -592,22 +592,34 @@ def secured_hold(reading: Reading, hold) -> None:
     # is his when it is merely reachable would be the cruellest thing this
     # system could say, and it would also slow him down: a held ticket can be
     # strolled to, an unheld one cannot.
-    subject = (f"CHECKOUT OPEN — PAY NOW TO GET IT: {_headline(pick)} — "
-               f"{name}{_from_watcher()}")
+    subject = (
+        f"RESERVED — JUST PAY: {_headline(pick)} — {name}{_from_watcher()}"
+        if getattr(hold, "reserved", False) else
+        f"CHECKOUT OPEN — PAY NOW TO GET IT: {_headline(pick)} — "
+        f"{name}{_from_watcher()}")
     body = (
         f"Hi David,\n\n"
         f"The watcher has a CHECKOUT PAGE open for this ticket, signed in as\n"
         f"you, right now.\n\n"
         f"  {_headline(pick)}\n"
         f"  {name}\n\n"
-        f"THE TICKET IS NOT RESERVED YET. Ticketmaster's own words on that\n"
-        f"page are 'Proceed to payment to reserve these tickets'. It becomes\n"
-        f"yours when you pay and not before, so this is a race, not a hold.\n\n"
-        f"{_preempt_line(hold)}"
-        f"{_where_to_finish(hold)}"
-        f"{_clock_line(hold, minutes)}"
-        f"The watcher will not pay for it: it stops at the basket, every\n"
-        f"time, by design.\n\n"
+        + (
+            f"THE WATCHER HAS TAKEN THE RESERVE STEP. It pressed 'Continue To\n"
+            f"Payment', which is what Ticketmaster says reserves these\n"
+            f"tickets, and stopped dead on the card screen. No card details\n"
+            f"have been entered and no order has been placed.\n\n"
+            f"ALL THAT IS LEFT IS PAYING. Go to the laptop and enter the card.\n\n"
+            if getattr(hold, "reserved", False) else
+            f"THE TICKET IS NOT RESERVED YET. Ticketmaster's own words on that\n"
+            f"page are 'Proceed to payment to reserve these tickets', and that\n"
+            f"step was not taken — so it is still winnable by anyone until you\n"
+            f"press it yourself. This is a race, not a hold.\n\n"
+        )
+        + f"{_preempt_line(hold)}"
+        + f"{_where_to_finish(hold)}"
+        + f"{_clock_line(hold, minutes)}"
+        + "The watcher will not pay for it: it stops at the card screen,\n"
+        "every time, by design.\n\n"
         f"WHAT THE CHECKOUT PAGE WILL ASK YOU — from a real one captured on\n"
         f"2026-08-19, so you are not reading it for the first time in a hurry.\n"
         f"Three of these are compulsory and the page will refuse to submit\n"

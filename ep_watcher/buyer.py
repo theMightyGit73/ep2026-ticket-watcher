@@ -997,6 +997,14 @@ class HoldResult:
     #: comes from one observation of an entirely different event.
     minutes_measured: bool = False
 
+    #: True once 'Continue To Payment' has been pressed — the step
+    #: Ticketmaster says reserves the ticket. Distinct from `secured`, which
+    #: only means a checkout page was reached: on the capture of 2026-08-26
+    #: the page said in its own words that the tickets were NOT reserved
+    #: until that button was pressed, so the alert has to be able to tell
+    #: David which of the two he is looking at.
+    reserved: bool = False
+
     #: How many navigations in this attempt were answered by Chrome rather
     #: than by Ticketmaster — see _note_if_cached().
     #:
@@ -2649,7 +2657,12 @@ def _secure_once(session: BuySession, event, listing,
             else:
                 result.minutes_hint = config.HOLD_MINUTES_HINT
                 result.note("no countdown visible — using the configured estimate")
-            result.note("BASKET CONFIRMED — the ticket is held; stopping here")
+            result.note("CHECKOUT REACHED — this is as far as anything has "
+                        "ever got")
+
+            # Take the one step that turns a reachable ticket into a reserved
+            # one, then stop for good. See _reserve_at_checkout().
+            _reserve_at_checkout(page, result)
 
             # Where the checkout actually is, captured at the moment it exists.
             #
@@ -3170,6 +3183,106 @@ def button_labels(button) -> list:
         except Exception:
             pass
     return labels
+
+
+#: The exact accessible name of the control that reserves a resale ticket.
+#:
+#: Observed on the real checkout of 2026-08-26 00:53, not guessed. That page
+#: has exactly one forward control, and Ticketmaster's own warning beside it
+#: reads "Proceed to payment to reserve these tickets" — so this button IS the
+#: reservation step. There is no separate hold, basket or reserve control to
+#: press instead; the stepper goes 1 Your Order, 2 Payment, 3 Confirmation,
+#: and this moves 1 to 2.
+RESERVE_BUTTON = "continue to payment"
+
+#: Anything that could complete a purchase, checked on the page AFTER the
+#: reserve step. Nothing here is ever pressed by this module under any
+#: circumstance or configuration.
+NEVER_PRESS = ("pay now", "place order", "confirm", "complete purchase",
+               "submit payment", "buy")
+
+
+def _reserve_at_checkout(page, result: HoldResult) -> bool:
+    """Press the one control that reserves the ticket, and stop dead after it.
+
+    True when the reservation step was taken.
+
+    ── Why this exists, and why it is allowed to press a "pay" button ───────
+
+    The watcher reached a live checkout at 00:53 on 2026-08-26 and could go no
+    further, because FORBIDDEN_BUTTONS blocks anything containing "pay" and
+    the only forward control on that page is labelled "Continue To Payment".
+    The blanket rule was right while nobody knew what that button did. The
+    captured page settles it: beside it Ticketmaster writes "Proceed to
+    payment to reserve these tickets", so pressing it is what turns a page
+    anyone can still take from you into a ticket that is yours to pay for.
+
+    David chose this on 2026-08-26 knowing the trade — it is the same scope he
+    set on 2026-08-19, secure it and hand off for payment, and this is the
+    step that secures.
+
+    ── What keeps it safe ──────────────────────────────────────────────────
+
+    Three things, and they are independent of each other:
+
+      * It presses ONE button, matched on its exact accessible name, and only
+        when that name is exactly RESERVE_BUTTON. Not a prefix, not a
+        substring, not the first thing that looks like a Continue.
+      * After pressing, it returns. It never presses anything again, on any
+        page, for the rest of the attempt. There is no loop after this point.
+      * NEVER_PRESS is checked against every label on the button first, so a
+        page that relabels its final purchase control "Continue to payment"
+        cannot slip through the exact match either.
+
+    Card details are never entered, and the screen this lands on is where the
+    watcher stops for good.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+    if not config.RESERVE_AT_CHECKOUT:
+        result.note("not pressing 'Continue To Payment' — reserving is "
+                    "switched off (EP_RESERVE_AT_CHECKOUT=0)")
+        return False
+    try:
+        # The policy tick is a precondition, not a nicety: the button does not
+        # advance without it. Failing to find it is not fatal — some accounts
+        # may have it pre-agreed — so this tries and carries on either way.
+        for label in ("I agree to the Ticket Exchange Policy",
+                      "Ticket Exchange Policy"):
+            try:
+                box = page.get_by_role("checkbox", name=label, exact=False).first
+                if box.is_visible(timeout=1_500) and not box.is_checked():
+                    box.check(timeout=3_000)
+                    result.note("ticked the Ticket Exchange Policy box — "
+                                "required before the page will advance")
+                    break
+            except (PlaywrightTimeout, PlaywrightError):
+                continue
+
+        button = page.get_by_role("button", name=RESERVE_BUTTON, exact=True).first
+        if not button.is_visible(timeout=3_000):
+            result.note("no 'Continue To Payment' control on this page")
+            return False
+        labels = button_labels(button)
+        if not labels:
+            result.note("refusing to press an unlabelled reserve control")
+            return False
+        bad = next((l for l in labels
+                    if any(n in l.lower() for n in NEVER_PRESS)), None)
+        if bad is not None:
+            result.note(f"refusing to press {bad!r} — that completes a purchase")
+            return False
+        button.click(timeout=8_000)
+        result.note("pressed 'Continue To Payment' — this is the step that "
+                    "reserves the ticket. STOPPING HERE: no card details are "
+                    "entered and nothing further will be pressed.")
+        result.reserved = True
+        return True
+    except (PlaywrightTimeout, PlaywrightError) as exc:
+        result.note(f"could not take the reserve step ({type(exc).__name__}) — "
+                    f"the checkout page is still open for David")
+        return False
 
 
 def _press_one_safe_button(page, result: HoldResult) -> bool:
