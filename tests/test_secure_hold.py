@@ -348,7 +348,19 @@ hold = buyer.HoldResult(secured=True, minutes_hint=4)
 real_notify.secured_hold(resale_reading(), hold)
 body = mails["body"]
 check_true("names the laptop as the certainty", "LAPTOP DEFINITELY HAS IT" in body)
-check_true("carries the countdown", "4 minutes" in body)
+# A MEASURED countdown must still be quoted — that number is read off the
+# page and is worth trusting. An UNMEASURED one must not be: the estimate came
+# from a boxing match at Croke Park, and the real checkout of 2026-08-26 had
+# no clock at all because nothing was reserved. Quoting a number there invents
+# a safety margin that does not exist.
+measured = buyer.HoldResult(secured=True, minutes_hint=4, minutes_measured=True)
+real_notify.secured_hold(resale_reading(), measured)
+check_true("a measured countdown is quoted", "4 MINUTES" in mails["body"].upper())
+
+real_notify.secured_hold(resale_reading(), hold)   # unmeasured
+check_true("an unmeasured one is not invented",
+           "NO COUNTDOWN ON THE PAGE" in mails["body"])
+check_true("and it says to go now", "Go now." in mails["body"])
 
 print("\nThe held alert offers the phone a route, honestly framed")
 # Reversed on 2026-08-19. This alert used to say flatly "do NOT try to pick

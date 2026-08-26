@@ -77,12 +77,36 @@ RESALE_MARKER = "verified resale ticket"
 #: walk to the laptop and an obvious empty screen. Missing one that IS there
 #: costs the ticket, silently, while it expires. So this errs towards
 #: recognising.
+#: Words that mean "this browser is now on a page that can buy the ticket".
+#:
+#: The first five were inferred. The last four were MEASURED, on the only
+#: attempt in this project's history that ever reached a checkout — 00:53 on
+#: 2026-08-26, listing ljw94z59 on the instalment page, HTTP 200 on
+#: secure.ticketmaster.ie/{event}/{listing}?qty=1 with the title "Checkout |
+#: Electric Picnic 2026 - Weekend Camping Instalment Plan | Ticketmaster".
+#:
+#: Not one of the inferred five appeared on it. The real page says "SECURE
+#: CHECKOUT", "Proceed to payment to reserve these tickets" and "Total to
+#: Pay"; the list was looking for "proceed to checkout" and "your tickets are
+#: reserved". So the watcher got a live checkout page, failed to recognise
+#: it, recorded "no basket appeared", and emailed David to say it could not
+#: hold the ticket — while the page it was standing on had his name fields
+#: and a Total to Pay of €366.39 on it.
+#:
+#: That is the most expensive near-miss in the project. Every entry below
+#: that came from a real capture is marked, because the difference between
+#: guessed and observed vocabulary is exactly what cost that ticket.
 BASKET_MARKERS = (
     "place order",
     "cancel order",
     "time left to complete",
     "your tickets are reserved",
     "proceed to checkout",
+    # ── observed on the live checkout page, 2026-08-26 00:53 ──
+    "secure checkout",
+    "proceed to payment",
+    "total to pay",
+    "cost breakdown",
 )
 SOLD_OUT_HINTS = ("tickets are currently unavailable", "this event is sold out")
 

@@ -278,8 +278,12 @@ try:
     check("with nothing to preempt, since nothing was held", attempts[0][2], False)
     subs = " | ".join(m["Subject"] or "" for m in mails)
     check_true("the availability alert still went out", "AVAILABLE" in subs)
-    check_true("and so did the held-ticket alert",
-               "HELD" in subs.upper() or "SECURED" in subs.upper())
+    # Subject changed 2026-08-26 from "HELD" to "CHECKOUT OPEN". The only
+    # checkout this project has ever reached said "Proceed to payment to
+    # reserve these tickets" — nothing was held, and saying otherwise would
+    # tell David a ticket was his when it was merely reachable.
+    check_true("and so did the checkout alert",
+               "CHECKOUT OPEN" in subs.upper() or "HELD" in subs.upper())
 finally:
     config.SECURE_ON_FIND, buyer.secure_in_thread = was_flag, was_secure
 

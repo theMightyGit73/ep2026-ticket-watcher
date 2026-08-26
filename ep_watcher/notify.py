@@ -551,10 +551,18 @@ def _clock_line(hold, minutes: int) -> str:
             f"THE PAGE ITSELF SAYS {minutes} MINUTES — that is its own countdown,\n"
             f"read at the moment the ticket was held, not an estimate.\n\n"
         )
+    # No countdown is not the same as an unknown countdown.
+    #
+    # The checkout reached on 2026-08-26 had no clock on it, and that was not
+    # a reading failure — there was nothing to count down, because nothing was
+    # reserved. Quoting "around 10 minutes" there would invent a safety margin
+    # that does not exist, from a boxing match at Croke Park, on a page whose
+    # own text says the tickets are not yours until you pay.
     return (
-        f"You probably have around {minutes} minutes, but treat that as a guess:\n"
-        f"no countdown could be read from the page, and the figure comes from\n"
-        f"a different event's checkout. Assume less rather than more.\n\n"
+        f"NO COUNTDOWN ON THE PAGE. Do not read that as time in hand — on the\n"
+        f"one checkout this has ever reached there was no clock because\n"
+        f"nothing was reserved. Someone else buying it first is what ends\n"
+        f"this, and nothing on screen will warn you. Go now.\n\n"
     )
 
 
@@ -576,12 +584,25 @@ def secured_hold(reading: Reading, hold) -> None:
     pick = _best_listing(reading.listings)
     minutes = getattr(hold, "minutes_hint", 0) or config.HOLD_MINUTES_HINT
 
-    subject = f"HELD — GO TO THE LAPTOP NOW: {_headline(pick)} — {name}{_from_watcher()}"
+    # "On the checkout page", not "held".
+    #
+    # The only checkout this project has ever reached — 00:53 on 2026-08-26 —
+    # said in its own words: "Proceed to payment to reserve these tickets".
+    # The tickets were NOT reserved. Nothing was held. Telling David a ticket
+    # is his when it is merely reachable would be the cruellest thing this
+    # system could say, and it would also slow him down: a held ticket can be
+    # strolled to, an unheld one cannot.
+    subject = (f"CHECKOUT OPEN — PAY NOW TO GET IT: {_headline(pick)} — "
+               f"{name}{_from_watcher()}")
     body = (
         f"Hi David,\n\n"
-        f"A ticket is IN A BASKET under your account right now.\n\n"
+        f"The watcher has a CHECKOUT PAGE open for this ticket, signed in as\n"
+        f"you, right now.\n\n"
         f"  {_headline(pick)}\n"
         f"  {name}\n\n"
+        f"THE TICKET IS NOT RESERVED YET. Ticketmaster's own words on that\n"
+        f"page are 'Proceed to payment to reserve these tickets'. It becomes\n"
+        f"yours when you pay and not before, so this is a race, not a hold.\n\n"
         f"{_preempt_line(hold)}"
         f"{_where_to_finish(hold)}"
         f"{_clock_line(hold, minutes)}"
