@@ -879,10 +879,30 @@ listings that arrive already half-dead, and for 70 of the first 75 being seen
 exactly once: part of that window was spent before we could possibly have seen
 them.
 
-So the sweep puts a nonce on the URL, which misses the edge and forces origin
-to answer. The cost is real: every bypassed call is an origin hit, heavier and
-more conspicuous than the call the page makes for itself, on a connection
-blocked twenty-two times. `EP_EDGE_BYPASS=0` returns to reading the edge.
+So the sweep put a nonce on the URL, meaning to miss the edge and force
+origin to answer.
+
+> **It does not work, measured 2026-08-26.** Asked from a real browser, back
+> to back:
+>
+> ```
+> plain        200  age 18  x-cache HIT
+> &_=<ms>      200  age 18  x-cache HIT    <- same cached object
+> &epcb=<ms>   200  age 18  x-cache HIT
+> limit=21     200  age 18  x-cache HIT    <- a different REQUEST
+> ```
+>
+> Fastly keys this route on the **path** and ignores the query string, so a
+> novel URL is not novel to it — even asking for a different `limit` is
+> answered from the same copy. There is no parameter that reaches origin.
+>
+> The diagnosis was right and the remedy was wrong. The edge answer really is
+> up to 45 seconds old and nothing sendable from a browser makes it fresher.
+> That floor applies to everyone reading this endpoint, including whoever else
+> is racing for the listing, which is the only consolation on offer.
+> `EP_EDGE_BYPASS` now defaults to **0** — switched off rather than deleted,
+> because an unknown parameter on a rate-limited endpoint is a cost with
+> nothing bought.
 
 ### The final-48-hours cadence
 

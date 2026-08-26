@@ -46,23 +46,34 @@ def build(event_id="18006314BD813D3E", qty=1):
     return url
 
 
-print("\nThe sweep asks for something the edge cannot have cached")
+print("\nThe bypass is OFF, because it was measured inert")
 
-check("bypass is on by default", config.EDGE_BYPASS, True)
+# Asked from a real browser on 2026-08-26, back to back against the same
+# endpoint: plain, &_=<ms>, &epcb=<ms> and even limit=21 — a semantically
+# DIFFERENT request — all came back 200 with x-cache HIT and the same age.
+# Fastly keys this route on the path and ignores the query string, so no
+# parameter reaches origin. The nonce bought nothing and cost an unknown
+# parameter on a rate-limited endpoint.
+check("bypass defaults to off", config.EDGE_BYPASS, False)
 url = build()
-check("the URL carries a nonce", "&_=" in url, True)
+check("so the URL carries no nonce", "&_=" in url, False)
 check("and still asks for one ticket", "qty=1" in url, True)
-check("and still names the event",
-      "18006314BD813D3E" in url, True)
+check("and still names the event", "18006314BD813D3E" in url, True)
+check("and is stable between calls", build(), url)
 
 
-print("\nThe nonce varies, or it is not a nonce")
+print("\nThe switch still works, for whenever the cache rules change")
 
-# A constant would look right in a trace and read the edge every time.
-a = build()
-time.sleep(0.002)
-b = build()
-check("two calls differ", a != b, True)
+was = config.EDGE_BYPASS
+try:
+    config.EDGE_BYPASS = True
+    a = build()
+    time.sleep(0.002)
+    b = build()
+    check("turning it on adds a nonce", "&_=" in a, True)
+    check("and two calls differ", a != b, True)
+finally:
+    config.EDGE_BYPASS = was
 
 
 print("\nSwitchable, not surgery")

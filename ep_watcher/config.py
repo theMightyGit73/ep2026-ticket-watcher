@@ -2031,7 +2031,30 @@ PRESS_MIN_INTERVAL_SECONDS = int(os.environ.get("EP_PRESS_MIN_SECONDS", "120"))
 #: blocked twenty-two times. It is on because David asked for the earliest
 #: possible sighting knowing that trade; the sweep's 403 backoff still rests
 #: it for 30 minutes after three refusals, so it cannot run away unattended.
-EDGE_BYPASS = os.environ.get("EP_EDGE_BYPASS", "1").lower() in ("1", "true", "yes")
+#: ── MEASURED INERT, 2026-08-26. Default flipped to off. ─────────────────
+#:
+#: The nonce does not bypass anything. Asked from a real browser, back to
+#: back against the same endpoint:
+#:
+#:     plain            200  age 18  x-cache HIT
+#:     &_=<ms>          200  age 18  x-cache HIT      <- same cached object
+#:     &epcb=<ms>       200  age 18  x-cache HIT
+#:     limit=21         200  age 18  x-cache HIT      <- different REQUEST
+#:
+#: Fastly keys this route on the path and ignores the query string, so a
+#: novel URL is not novel to it. Even changing `limit`, which asks for
+#: different data, is answered from the same copy. There is no parameter that
+#: reaches origin.
+#:
+#: So the reasoning above was right about the problem and wrong about the
+#: remedy: the edge answer really is up to 45s old, and nothing this project
+#: can send from a browser makes it fresher. That floor applies to everyone
+#: reading this endpoint, including whoever else is racing for the listing,
+#: which is the only consolation available.
+#:
+#: Left switchable rather than deleted, and defaulted OFF because an unknown
+#: parameter on a rate-limited endpoint is a cost with nothing bought.
+EDGE_BYPASS = os.environ.get("EP_EDGE_BYPASS", "0").lower() in ("1", "true", "yes")
 
 
 #: Press 'Continue To Payment' at the checkout, which is what reserves a
