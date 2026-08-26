@@ -39,6 +39,11 @@ are here for one thing, it is most likely
   - [The chase is two minutes now, not twelve](#the-chase-is-two-minutes-now-not-twelve)
   - [A run of refusals now raises its own alarm](#a-run-of-refusals-now-raises-its-own-alarm)
   - [The alerts stopped shouting about tickets he has already seen](#the-alerts-stopped-shouting-about-tickets-he-has-already-seen)
+  - [The URL works. We reached a checkout and did not notice](#the-url-works-we-reached-a-checkout-and-did-not-notice)
+  - [It is the instalment page that works](#it-is-the-instalment-page-that-works)
+  - [Pressing the one button that reserves](#pressing-the-one-button-that-reserves)
+  - [Reading Fastly's edge is reading the past](#reading-fastlys-edge-is-reading-the-past)
+  - [The final-48-hours cadence](#the-final-48-hours-cadence)
   - [How it runs](#how-it-runs)
   - [What happens when a listing appears](#what-happens-when-a-listing-appears)
   - [The weekend ticket always wins the browser](#the-weekend-ticket-always-wins-the-browser)
@@ -649,6 +654,12 @@ Taken together with everything before it, the checkout URL has now been asked
 **49 times and has never once returned an HTTP 200**, on any listing, on any
 day, at either quantity.
 
+> **Superseded on 2026-08-26.** It does return 200 — twice, both on the
+> instalment page, at 15:27 and 23:53 on the 25th. The sentence above was true
+> when written and stopped being true the next day, which is exactly the
+> pattern the rest of this section is about. See
+> [The URL works](#the-url-works-we-reached-a-checkout-and-did-not-notice).
+
 The quantity was a real bug and fixing it was right. It was not *the* bug, and
 the section above is left standing rather than edited because the way it was
 wrong matters more than that it was wrong. It is the third confident diagnosis
@@ -675,6 +686,12 @@ refusal; the URL is no longer the live entry point and the real flow goes
 through `checkout.ticketmaster.ie/graphql`, which the traces show the page
 talking to; or a listing-level rule this cannot see. **`python -m ep_watcher
 probe-offer` separates all three** — see [Commands](#commands).
+
+> **All three were wrong.** `probe-offer` showed a clean signed-out browser
+> refused identically, which retired the flagging theory; driving the page's
+> full checkout session first changed nothing, which retired the session
+> theory; and then the URL simply worked. The answer was none of the above —
+> see below.
 
 ### Ten of fourteen retries never left the machine
 
@@ -761,6 +778,124 @@ So a listing he has not been told about keeps everything: urgent priority, the
 ring, `NEW` first in the title. A repeat says `still there` first, drops to
 default priority, and does not ring — while still carrying the link, because a
 quiet reminder he happens to see is still a ticket he can buy.
+
+### The URL works. We reached a checkout and did not notice
+
+At **00:53 on 2026-08-26**, listing `ljw94z59` on the instalment page answered
+`secure.ticketmaster.ie/{event}/{listing}?qty=1` with **HTTP 200**. No 302, no
+`q404`. The page title was *Checkout | Electric Picnic 2026 - Weekend Camping
+Instalment Plan | Ticketmaster*, and it carried the ticket type, the section,
+a cost breakdown of €310.50 plus €55.89 service charge, a **Total to Pay of
+€366.39**, name/email/phone fields, and this warning:
+
+> Proceed to payment to reserve these tickets
+
+The watcher was standing on a live checkout, signed in as David. It recorded
+*"no basket appeared"*, emailed him to say it could not hold the ticket, and
+moved on.
+
+**The cause was four words.** `BASKET_MARKERS` was looking for `proceed to
+checkout` and `your tickets are reserved`. The real page says **SECURE
+CHECKOUT**, **Proceed to payment** and **Total to Pay**. Every marker in that
+list had been *inferred*, never measured, because until 00:53 there had never
+been a checkout page to measure. The observed vocabulary is now in the list
+and tagged as observed rather than guessed.
+
+This is the most expensive near-miss in the project, and it retired three
+theories at once — see the corrections above.
+
+### It is the instalment page that works
+
+The reach rate is not uniform, and the split is the most useful number here:
+
+| Page | Offer requests | Reached checkout |
+| --- | --- | --- |
+| Weekend Camping (standard) | 149 | **0** — 0.0% |
+| Weekend Camping **Instalment** | 81 | **2** — 2.5% |
+
+149 consecutive refusals on one page and two successes on the other is not a
+small sample on the losing side. The likeliest reading is competition: fewer
+people chase a pay-in-stages listing, so we are not always beaten to it. Both
+checkouts were on the instalment page, and one was at **15:27 in the
+afternoon** — so it is not a quiet-hours effect, it is a which-page effect.
+
+Worth stating plainly because the instalment plan is the same festival, the
+same weekend and the same camping ticket. The captured checkout showed a
+Total to Pay of €366.39, which is the same money as the standard listing.
+
+### Pressing the one button that reserves
+
+The checkout page has exactly one forward control, labelled **Continue To
+Payment**, and the stepper above it reads *1 Your Order → 2 Payment → 3
+Confirmation*. There is no hold, no basket and no reserve control. Beside that
+button Ticketmaster writes "Proceed to payment to reserve these tickets", so
+**that button is the reservation step**.
+
+Until 2026-08-26 the watcher would not touch it, because `FORBIDDEN_BUTTONS`
+blocks anything containing "pay". That rule was right while nobody knew what
+the control did, and wrong once the captured page said so in its own words: it
+left a ticket the watcher had already reached sitting there, takeable by
+anyone, until David got to a laptop.
+
+David authorised it having been told what it costs — it agrees to the Ticket
+Exchange Policy on his behalf and moves the browser onto the payment screen,
+one step closer to a purchase than this project had ever gone. It is the same
+scope he set on 2026-08-19: secure it, then hand off for payment.
+
+**Three independent things keep it inside the line.** It presses one control,
+matched on its **exact** accessible name — never a prefix or substring. After
+pressing it returns, so there is no loop and nothing else is ever pressed. And
+`NEVER_PRESS` (`pay now`, `place order`, `confirm`, `complete purchase`) is
+checked against the button's own labels first, so a page that relabels its
+final purchase control "Continue to payment" cannot get through the exact
+match either. **Card details are never entered.**
+
+`EP_RESERVE_AT_CHECKOUT=0` returns to stopping at the order page.
+
+The alert distinguishes the two states, because they demand different speed:
+**RESERVED — JUST PAY** when the step was taken, and **CHECKOUT OPEN — PAY NOW
+TO GET IT** when it was not and the ticket is still winnable by anyone.
+
+### Reading Fastly's edge is reading the past
+
+From David's own network capture on 2026-08-25. His signed-in browser called
+`/api/quickpicks/{event}/resale` and got back:
+
+```http
+x-cache: HIT, MISS, MISS, MISS
+age: 13
+cache-control: max-age=15, stale-if-error=3600, stale-while-revalidate=30
+x-served-by: cache-dub4373-DUB
+```
+
+**`age: 13`.** The answer had been sitting at the Dublin edge for thirteen
+seconds. With `stale-while-revalidate=30` on top of `max-age=15`, a listing can
+exist for **up to forty-five seconds** before any edge copy mentions it.
+
+No cadence closes that gap — asking the same URL ten times in ten seconds
+returns the same stale object ten times. It is also the best explanation for
+listings that arrive already half-dead, and for 70 of the first 75 being seen
+exactly once: part of that window was spent before we could possibly have seen
+them.
+
+So the sweep puts a nonce on the URL, which misses the edge and forces origin
+to answer. The cost is real: every bypassed call is an origin hit, heavier and
+more conspicuous than the call the page makes for itself, on a connection
+blocked twenty-two times. `EP_EDGE_BYPASS=0` returns to reading the edge.
+
+### The final-48-hours cadence
+
+Set on 2026-08-26 at David's request, with two days to the gates.
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `EP_RESALE_SWEEP_SECONDS` | `45` | Chosen against the **backoff**, not the budget: three 403s double the interval, so a 45s base degrades to 90s — exactly the old base. Worst case is no worse than before. 25s was tried and drew three refusals in two minutes plus a block, so this is half the rate known to break. |
+| `EP_NIGHT_POLL_SECONDS` | `0` | Removes the 30-minute overnight floor between 00:00 and 06:00 UTC. Fourteen listings appeared between 19:00 and midnight on the 25th, and one of the only two checkouts ever reached was at **00:53** — inside the window that brake was slowing. |
+| `EP_*_OFFPEAK_MIN/MAX` | `300`/`560` | Offpeak set equal to peak, so the day rate is sustained around the clock. This lifts the trough without raising the **peak** hourly rate, which is the number that has drawn blocks. |
+
+Searches themselves were **not** sped up: they sit at 16.7/hour against a
+20/hour ceiling, and the watcher was blocked once while running below that
+rate. The sweep is the cheap lever and that is where the speed went.
 
 ### It was never a race, and the refusal page says so
 
@@ -1225,7 +1360,9 @@ Environment variables, all optional:
 | `EP_BLOCK_RATE_PER_HOUR` | `20` | The rate that drew a 403 in development. `budget` and the test suite both check against it |
 | `EP_LOOP_TICK_SECONDS` | `45` | Ceiling on how often the loop wakes to ask if a page is due. Costs no requests. Must stay well under the shortest gap any page can draw, or it quantises the cadence upward |
 | `EP_RESALE_SWEEP` | `1` | The cheap resale check between searches — one same-origin XHR from the page already open. Every weekend listing found so far was found by this rather than by a search |
-| `EP_RESALE_SWEEP_SECONDS` | `90` | How often it asks, per swept page. The endpoint's own `cache-control` says `max-age=15`, so this is four times politer than the page's own behaviour |
+| `EP_RESALE_SWEEP_SECONDS` | `45` | How often it asks, per swept page. The endpoint's own `cache-control` says `max-age=15`, so a 45s sweep is close to the freshest answer available. Chosen against the backoff: three 403s double the interval, so 45s degrades to 90s — the previous base |
+| `EP_EDGE_BYPASS` | `1` | Put a nonce on the resale call so Fastly cannot answer it and origin must. Removes up to 45s of edge staleness; costs an origin hit per call. `0` reads the edge |
+| `EP_RESERVE_AT_CHECKOUT` | `1` | Press **Continue To Payment**, the step that reserves a resale ticket, and stop dead on the card screen. Never enters card details, never confirms an order. `0` stops at the order page |
 | `EP_RESALE_SWEEP_MAX` | `240` | The slowest it may become after refusals. Was `600`, which was slower than the 180–360s peak search it exists to beat — a detector that had quietly become the slowest thing in the system |
 | `EP_RESALE_SWEEP_RECOVER_AFTER` | `20` | Clean answers that win the speed back, halving the interval. Without this the ladder only went down: three refusal bursts overnight on 2026-08-20 left the sweep at ten-minute intervals for the morning, and only a restart undid it |
 | `EP_SWEEP_INSTALMENT` | `0` | Include the instalment page in the sweep. Off since 2026-08-21: refusals scale with how many pages are swept, and halving that buys latency on the page that matters. The instalment page is still searched, alerted on and secured as normal |
@@ -1248,7 +1385,7 @@ Environment variables, all optional:
 | `EP_POLL_SECONDS` | `300` | Fallback per-page gap for a page configured without a range |
 | `EP_WATCH_LABEL` | `Electric Picnic 2026` | What to call the watch in emails covering every page |
 | `EP_HEARTBEAT_HOURS` | `1` | How often to send the "still nothing" report |
-| `EP_NIGHT_POLL_SECONDS` | `1800` | Overnight cycle. `0` disables the slowdown |
+| `EP_NIGHT_POLL_SECONDS` | `0` | Overnight cycle floor. Set to `0` for the final 48 hours so the night runs at the day rate |
 | `EP_NIGHT_START_HOUR` | `0` | When the overnight slowdown begins, local time |
 | `EP_NIGHT_END_HOUR` | `6` | When it ends. Was `7` until 2026-08-21, when a real weekend listing appeared at 06:57 local — inside the window, with the searches at half-hourly and only the sweep looking |
 | `EP_SEARCH_TIMEOUT` | `90` | Seconds to wait for a search to resolve. Raised from 45 after daytime timeouts on a tethered connection |
@@ -1848,14 +1985,23 @@ What the watcher does about it:
   signature. The peak window (10:00–20:00 local, where all eight recorded
   sightings fell) is faster and the rest of the day is correspondingly slower,
   so the day's total is redistributed rather than increased.
-- **Overnight it drops to 30 minutes** (`EP_NIGHT_POLL_SECONDS`, midnight to
-  07:00 local). A headstart is worth nothing while you are asleep, and those
-  hours otherwise accumulate volume on the connection unattended, with nobody
-  awake to notice a block.
+- **Overnight it used to drop to 30 minutes** (`EP_NIGHT_POLL_SECONDS`,
+  midnight to 07:00 local), on the reasoning that a headstart is worth nothing
+  while you are asleep and those hours accumulate volume unattended.
 
-The tension is real and worth stating plainly: a resale listing observed
-during testing lived about **five minutes**, so a 10-minute cycle genuinely
-will miss some. But a blocked watcher misses *all* of them. A watcher that
+  **Set to `0` on 2026-08-26**, for the final 48 hours. The reasoning held
+  while the watcher could only notify; it stopped holding once the watcher
+  could reserve a ticket by itself, because then it does not need David awake
+  to be useful. The evidence is direct: fourteen listings appeared between
+  19:00 and midnight on the 25th, and one of the only two checkouts this
+  project has ever reached was at **00:53**, inside the window that brake was
+  slowing. The block risk it was managing is real and unchanged — this is a
+  deliberate trade for the last two days, not a repeal.
+
+The tension is real and worth stating plainly. A resale listing observed
+during testing lived about five minutes; the fuller measurement is worse than
+that, and is the reason the cadence moved at all — of 75 distinct listings,
+**70 were seen exactly once**, gone by the next look. But a blocked watcher misses *all* of them. A watcher that
 gets itself banned on day two catches nothing on day nine.
 
 If you want to run hot during a known onsale, lower `EP_POLL_SECONDS` for that
