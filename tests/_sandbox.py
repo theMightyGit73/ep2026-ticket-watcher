@@ -75,3 +75,18 @@ if "ep_watcher.config" in sys.modules:
     import importlib
 
     importlib.reload(sys.modules["ep_watcher.config"])
+
+# ── Keep the calendar out of the suite ───────────────────────────────────
+#
+# The Early Entry Pass carries its own `stop_after` of 2026-08-27. Once that
+# date passed, `expired()` began returning True for real and six test files
+# went red — not because anything broke, but because the festival happened.
+# A suite that fails on a wall clock cannot tell a real regression from a
+# turned page of a calendar, and whoever reuses this project for a later year
+# would open it to red tests that say nothing about their code.
+#
+# Set here rather than per-file because config reads it at import time and
+# every test imports this module first, so this is the only place it lands
+# before any Event is built.
+import os as _os
+_os.environ.setdefault("EP_EARLY_ENTRY_STOP_AFTER", "2099-12-31")

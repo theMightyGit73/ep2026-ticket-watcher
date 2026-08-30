@@ -43,6 +43,13 @@ from ep_watcher.model import AVAILABLE, UNAVAILABLE, UNKNOWN, Listing, Reading  
 import importlib  # noqa: E402
 import os  # noqa: E402
 
+
+# The pass carries a stop_after of 2026-08-27, so once that date passed it
+# became permanently expired and this file's per-page checks quietly dropped
+# from three pages to two. Pinned forward: what is being tested is that every
+# watched page gets its own summary, named and linked, which is a property of
+# the code and not of the calendar.
+os.environ["EP_EARLY_ENTRY_STOP_AFTER"] = "2099-12-31"
 os.environ["EP_EARLY_ENTRY"] = "1"
 importlib.reload(config)
 

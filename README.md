@@ -29,6 +29,7 @@ are here for one thing, it is most likely
 [Keeping it running](#keeping-it-running) or
 [When something looks wrong](#when-something-looks-wrong).
 
+- [Read this first if you are back for 2027](#read-this-first-if-you-are-back-for-2027)
 - [Why the old one never worked](#why-the-old-one-never-worked)
 - [What actually works, and how it was established](#what-actually-works-and-how-it-was-established)
 - [What it has actually caught](#what-it-has-actually-caught)
@@ -87,6 +88,133 @@ are here for one thing, it is most likely
 - [Superseded](#superseded)
 
 ---
+## Read this first if you are back for 2027
+
+The 2026 run is over. **119 distinct resale listings found and alerted on,
+128 attempts to buy one, none secured, no ticket.** What follows is what that
+bought in knowledge, written for whoever picks this up next August — most
+likely David, a year older and in a hurry.
+
+### The timing model, which is the most valuable thing here
+
+| | Measured, 2026 |
+| --- | --- |
+| First listing seen | 20 Aug, 13:36 |
+| **Last listing ever seen** | **26 Aug, 10:37** |
+| Busiest day | 25 Aug — **44 listings** |
+| Event date | 28 Aug |
+| Event pages returned HTTP 410 Gone | 27 Aug, 23:23 |
+
+Two things follow, and both contradict what this project assumed at the time.
+
+**Resale closes about two days before the gates, not on the day.** The last
+listing appeared 46 hours before the event. Everything after that was an empty
+feed, and then the pages were removed outright. Any plan that plays for "the
+last-minute panic sell" is playing for a window that does not exist.
+
+**Supply peaks three days out, not in the final 48 hours.** The 25th produced
+44 listings — more than double any other day — and the 26th produced 12, all
+before 10:37. On the 24th this README confidently predicted the heaviest
+supply would come on the 26th and 27th. It was wrong, and the cost of being
+wrong was tuning for speed during the days when the market was already
+closing.
+
+So: **be running and fully working by 20 August at the latest**, treat 23–25
+August as the real window, and expect nothing after the 26th.
+
+### The bug that actually cost the ticket
+
+At 00:53 on 26 August the watcher reached a live checkout page — HTTP 200,
+ticket type, section, Total to Pay €366.39, David's name fields, one button
+left to press. It did not recognise it, logged "no basket appeared", emailed
+to say it could not hold the ticket, and moved on.
+
+`BASKET_MARKERS` was looking for `proceed to checkout` and `your tickets are
+reserved`. The page said **SECURE CHECKOUT**, **Proceed to payment** and
+**Total to Pay**. Every string in that list had been *imagined*, never
+measured, because no checkout page had ever been seen to measure.
+
+**The lesson generalises past this one list.** This project spent a fortnight
+reverse-engineering a purchase flow entirely from failures, and produced four
+confident diagnoses in a row — a lost race, somebody else's basket, a quantity
+of zero, a dead URL — each written into the code as settled fact and each
+overturned by the next day's logs. There was never a positive control.
+
+If you do one thing differently next year: **get a successful checkout
+captured early**, by hand if necessary, on any event you are willing to
+actually buy a ticket for. Read the real vocabulary off the real page before
+writing a single matcher against it.
+
+### What worked, and what to keep
+
+- **The resale sweep is the detector.** Every weekend listing found in 2026
+  came from the direct `/api/quickpicks/{event}/resale` call, not from the
+  rendered panel. The panel is unreliable by design — 78 of the first 80
+  resale-blind polls never saw it render at all.
+- **Watch the instalment plan at least as hard as the standard page.** It is
+  the same festival, the same weekend, the same money — and it is where both
+  checkouts came from. Standard page: **0 reached out of 149 requests**.
+  Instalment: **2 out of 81**. The likeliest reason is simply that fewer
+  people race for a pay-in-stages listing.
+- **Alert on new listings loudly and on repeats quietly.** Undifferentiated
+  alerting sent 69 pushes for 16 listings in one day, which teaches the reader
+  to ignore the one that matters.
+
+### What to stop doing
+
+- **Do not chase speed past the cache.** The endpoint sits behind Fastly with
+  `max-age=15, stale-while-revalidate=30`, so an answer can be 45 seconds old
+  before it reaches you. Query parameters do not bust it — the cache key
+  ignores the query string entirely, which was measured, and even changing
+  `limit` returns the same cached copy. That floor is unavoidable, and it
+  applies to everyone racing for the same listing.
+- **Do not run the sweep hot.** 45s drew a block roughly every hour and cost
+  ten in a day. 90s was survivable but still drew 403s. 300s was quiet. The
+  connection being blocked costs every listing, not just the fast ones.
+- **Do not trust `check-buy` alone.** It proves cookies are on disk, not that
+  Ticketmaster still honours them. A sign-out-everywhere leaves the jar
+  looking perfect. Ask `identity.ticketmaster.ie/json/signed-in` from a copy
+  of the profile if it matters.
+
+### The suite had a time bomb in it, now defused
+
+Worth knowing before you trust a green run next year, because it was found by
+accident on 30 August 2026 — two days after the event — while updating this
+file.
+
+Six test files went red the moment the festival passed, and none of them
+because anything broke:
+
+- The Early Entry Pass carries a hard-coded `stop_after` of `2026-08-27`, so
+  `expired()` began returning True for real. Three files that count "every
+  watched page" quietly became two-page counts.
+- `watchdog.sh` correctly refuses to restart the watcher once past
+  `EP_STOP_AFTER`, so every check asserting that a stalled watcher *should* be
+  restarted started failing.
+
+Both behaviours are right in production. The tests were simply reading the
+wall clock and calling it a defect. A suite that fails on a calendar cannot
+tell a real regression from a turned page, which is exactly the state you do
+not want to inherit in a hurry next August.
+
+Fixed by pinning the dates inside the tests that depend on them — 
+`EP_EARLY_ENTRY_STOP_AFTER` and `EP_STOP_AFTER` are set to `2099-12-31` in
+`tests/_sandbox.py`, `test_page_budget.py`, `test_event_identity.py`,
+`test_hold_not_restarted.py` and `test_liveness.py`, each with a note saying
+why. **All 73 files pass again**, and they will still pass in 2027.
+
+### Turning it back on
+
+The code is intact and the switches are all documented below. To point it at
+2027: set the new event URLs in `config.EVENTS`, set `EP_STOP_AFTER` to the
+new date, re-run `login-buy` for the buying profile, and start it. The
+LaunchAgents were unloaded on 30 Aug 2026 and `restart.sh` reinstalls them.
+
+Everything else in this file is the working history of the 2026 attempt,
+including the parts that were wrong, which are marked rather than deleted.
+
+---
+
 ## Why the old one never worked
 
 The previous `ticket_checker.py` fetched the page with `cloudscraper` and

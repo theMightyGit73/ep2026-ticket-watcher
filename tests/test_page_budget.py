@@ -78,6 +78,14 @@ B = next(e for e in config.EVENTS if e.slug == "weekend-camping-instalment")
 # builds these values in the first place.
 import os  # noqa: E402
 
+# The Early Entry Pass carries a stop_after of 2026-08-27. Once that date
+# passed, expired() started returning True for real and this file's
+# three-page count silently became a two-page count — a red test caused by
+# the calendar rather than by the code. Pinned forward here, beside the other
+# settings this file fixes for determinism, because the count being checked
+# is about pages and cadence and has nothing to do with what day it is.
+os.environ["EP_EARLY_ENTRY_STOP_AFTER"] = "2099-12-31"
+
 os.environ["EP_PEAK_START_HOUR"] = "0"
 os.environ["EP_PEAK_END_HOUR"] = "24"
 os.environ["EP_NIGHT_START_HOUR"] = "0"

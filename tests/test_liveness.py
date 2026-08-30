@@ -62,6 +62,12 @@ def run_watchdog(state_dict, stale_minutes=45):
     try:
         env = dict(os.environ)
         env.update({
+            # See test_hold_not_restarted.py: watchdog.sh correctly refuses
+            # to restart anything past the stop date, so every check here that
+            # expects a restart began failing on the calendar once the event
+            # passed. Pinned forward — the logic under test is liveness, not
+            # the date.
+            "EP_STOP_AFTER": "2099-12-31",
             "EP_STATE_FILE": path,
             "EP_WATCHDOG_DRY_RUN": "1",
             "EP_STALE_MINUTES": str(stale_minutes),
@@ -227,6 +233,12 @@ with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
 own_log = fixture + ".log"
 env = dict(os.environ)
 env.update({
+            # See test_hold_not_restarted.py: watchdog.sh correctly refuses
+            # to restart anything past the stop date, so every check here that
+            # expects a restart began failing on the calendar once the event
+            # passed. Pinned forward — the logic under test is liveness, not
+            # the date.
+            "EP_STOP_AFTER": "2099-12-31",
     "EP_STATE_FILE": fixture,
     "EP_WATCHDOG_DRY_RUN": "1",
     "EP_WATCHDOG_LOG": own_log,

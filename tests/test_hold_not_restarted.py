@@ -66,6 +66,16 @@ def run_watchdog(state_dict, stale_minutes=45):
             # the watcher" into the file you read when something has actually
             # gone wrong.
             "EP_WATCHDOG_LOG": log,
+            # Pin the stop date forward for the duration of the run.
+            #
+            # watchdog.sh refuses to restart anything once the event is past,
+            # which is correct — a watcher that has stopped on purpose must
+            # not be "repaired" back into life. But it means that from
+            # 2026-08-29 onwards every check in this file that asserts a
+            # restart SHOULD happen began failing, on a calendar rather than
+            # on a defect. What is under test is the hold-protection logic, so
+            # the date is fixed here rather than inherited from the clock.
+            "EP_STOP_AFTER": "2099-12-31",
         })
         result = subprocess.run(
             ["bash", str(REPO / "watchdog.sh")],
