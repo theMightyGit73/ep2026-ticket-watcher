@@ -218,8 +218,13 @@ battery and including with the lid shut. Fans, heat and a flat battery, for a
 watcher that finished on the 29th.
 
 ```sh
-sudo ./deploy/restore-sleep.sh
+sudo /Users/davidcoyne/SideProjects/EPTicketRefresher/deploy/restore-sleep.sh
 ```
+
+The full path on purpose: written as `./deploy/...` it only works from the
+repo root, and the first person to run it pasted it from their home directory
+and got "command not found". A cleanup command is read once, in a hurry,
+months later — it should not also require knowing where you are standing.
 
 That clears the lock and asks macOS for its own defaults rather than encoding
 somebody's guess at what normal looks like, then re-reads `pmset` and fails
