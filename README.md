@@ -203,6 +203,29 @@ Fixed by pinning the dates inside the tests that depend on them —
 `test_hold_not_restarted.py` and `test_liveness.py`, each with a note saying
 why. **All 73 files pass again**, and they will still pass in 2027.
 
+### Undo the power settings when you are done
+
+Setup asks for this so the Mac cannot nap through a listing:
+
+```sh
+sudo pmset -a sleep 0 disablesleep 1
+```
+
+It is a **manual change made outside the service**, so stopping the watcher
+does not undo it. In 2026 it outlived the run by five days before anyone
+noticed — and with `disablesleep 1` the Mac cannot sleep at all, including on
+battery and including with the lid shut. Fans, heat and a flat battery, for a
+watcher that finished on the 29th.
+
+```sh
+sudo ./deploy/restore-sleep.sh
+```
+
+That clears the lock and asks macOS for its own defaults rather than encoding
+somebody's guess at what normal looks like, then re-reads `pmset` and fails
+loudly if `SleepDisabled` is still 1. **Run it as part of standing the watcher
+down, not as an afterthought.**
+
 ### Turning it back on
 
 The code is intact and the switches are all documented below. To point it at
